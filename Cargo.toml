@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "crates/aifficator-core",
+  "src-tauri"
+]
+resolver = "2"
+
