@@ -1,6 +1,6 @@
 # Mastering
 
-Mastering genera un WAV masterizado desde un archivo local. El flujo combina presets, analisis tecnico con `ffmpeg`/`ffprobe`, feedback del usuario, una receta de procesamiento y un historial explorable guardado en SQLite.
+Mastering genera un AIFF masterizado desde un archivo local. El flujo combina presets, metadata embebida, cover opcional, analisis tecnico con `ffmpeg`/`ffprobe`, feedback del usuario, una receta de procesamiento y un historial explorable guardado en SQLite.
 
 ## Objetivo
 
@@ -8,7 +8,8 @@ Mastering genera un WAV masterizado desde un archivo local. El flujo combina pre
 - Seleccionar un preset de destino.
 - Agregar feedback y notas de referencia.
 - Usar AI opcionalmente para interpretar el feedback y construir una politica de mastering.
-- Renderizar un WAV master.
+- Renderizar un master AIFF.
+- Escribir tags de metadata y cover art opcional.
 - Guardar receta, analisis antes/despues, eventos y resultado.
 - Reabrir cualquier job desde el historial.
 - Reintentar jobs con feedback actualizado.
@@ -23,8 +24,40 @@ Mastering genera un WAV masterizado desde un archivo local. El flujo combina pre
 6. Pulsa **Generar master**.
 7. Revisa el progreso en la pantalla y en el terminal inferior.
 8. Escucha original y master desde el detalle.
-9. Abre la carpeta del resultado o descarga el WAV.
+9. Abre la carpeta del resultado o descarga el AIFF.
 10. Usa **Reintentar** para correr el mismo job con ajustes.
+
+## Formatos de salida
+
+La etapa DSP renderiza un WAV temporal de trabajo. Al final, la app empaqueta el resultado como AIFF y escribe metadata.
+
+| Formato | Codec | Uso |
+| --- | --- | --- |
+| AIFF 24-bit | `pcm_s24be` | Master/archive con mas resolucion |
+| AIFF CDJ safe 16-bit | `pcm_s16be`, 44.1 kHz, stereo | Compatibilidad conservadora con Rekordbox/CDJ/XDJ |
+
+Los jobs antiguos que ya existian como WAV se siguen leyendo desde el historial.
+
+## Metadata y cover
+
+El formulario permite definir:
+
+- titulo;
+- artista;
+- album;
+- genero;
+- ano;
+- numero de track;
+- BPM;
+- tonalidad;
+- ISRC;
+- compositor;
+- label;
+- copyright;
+- comentario;
+- cover JPG/PNG.
+
+La metadata se guarda en SQLite y se escribe en el AIFF usando ID3v2 dentro del contenedor AIFF. El cover se intenta incrustar como `attached_pic`; si falla, la app genera el AIFF sin cover, deja un warning en el reporte y mantiene el master utilizable.
 
 ## Presets
 
@@ -45,10 +78,11 @@ El backend ejecuta un job asincronico con estas etapas:
 2. `source`: valida que el audio fuente exista.
 3. `analysis_before`: analiza loudness, peaks, rango dinamico, clipping, DC offset y metadata.
 4. `recipe`: genera una receta usando preset, feedback, referencia y AI opcional.
-5. `render`: renderiza un WAV 24-bit con la cadena DSP.
-6. `analysis_after`: reanaliza el master generado.
+5. `render`: renderiza un WAV temporal 24-bit con la cadena DSP.
+6. `analysis_after`: reanaliza el render temporal.
 7. `loudness_correction`: aplica pasadas adicionales si quedo bajo el target y sigue siendo seguro.
-8. `completed`: guarda master final y sidecars JSON.
+8. `packaging`: empaqueta AIFF final, escribe metadata y valida tags/cover con `ffprobe`.
+9. `completed`: guarda master final y sidecars JSON.
 
 Si una etapa falla, el job queda en `failed` con `error_message` y el evento se registra en el historial.
 
@@ -87,10 +121,12 @@ Cada job crea una carpeta bajo datos de la app:
 
 Archivos principales:
 
-- WAV final masterizado.
+- AIFF final masterizado.
 - `recipe.json`
 - `analysis_before.json`
 - `analysis_after.json`
+- `metadata.json`
+- `package_report.json`
 
 El path final queda guardado en `mastering_jobs.output_path`.
 
@@ -143,9 +179,13 @@ Campos relevantes de `mastering_jobs`:
 
 - `feedback`
 - `reference_notes`
+- `output_format`
+- `metadata_json`
+- `cover_art_path`
 - `recipe_json`
 - `analysis_before_json`
 - `analysis_after_json`
+- `package_report_json`
 - `error_message`
 - `output_path`
 

@@ -7,15 +7,17 @@ import {
   CheckCircle2,
   Download,
   FolderOpen,
+  ImagePlus,
   Loader2,
   Play,
   RefreshCw,
   SlidersHorizontal,
   Sparkles,
+  Tags,
   Trash2,
   Wand2
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
@@ -37,7 +39,11 @@ type MasteringJob = {
   state: "pending" | "running" | "completed" | "failed";
   feedback?: string | null;
   reference_notes?: string | null;
+  output_format: MasteringOutputFormat;
+  metadata: MasteringMetadata;
+  cover_art_path?: string | null;
   output_path?: string | null;
+  package_report: Record<string, unknown>;
   recipe: Record<string, unknown>;
   analysis_before: Record<string, unknown>;
   analysis_after: Record<string, unknown>;
@@ -48,6 +54,24 @@ type MasteringJob = {
   created_at: string;
   updated_at: string;
   ready: boolean;
+};
+
+type MasteringOutputFormat = "aiff_24" | "aiff_cdj16" | "wav_24";
+
+type MasteringMetadata = {
+  title?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  genre?: string | null;
+  year?: string | null;
+  track_number?: string | null;
+  composer?: string | null;
+  label?: string | null;
+  copyright?: string | null;
+  bpm?: string | null;
+  musical_key?: string | null;
+  isrc?: string | null;
+  comment?: string | null;
 };
 
 type MasteringProgressEvent = {
@@ -80,6 +104,9 @@ export function MasteringPage() {
   const [jobs, setJobs] = useState<MasteringJob[]>([]);
   const [sourcePath, setSourcePath] = useState("");
   const [targetProfile, setTargetProfile] = useState("demo_balanced");
+  const [outputFormat, setOutputFormat] = useState<MasteringOutputFormat>("aiff_24");
+  const [metadata, setMetadata] = useState<MasteringMetadata>({});
+  const [coverArtPath, setCoverArtPath] = useState("");
   const [feedback, setFeedback] = useState("");
   const [referenceNotes, setReferenceNotes] = useState("");
   const [useAi, setUseAi] = useState(true);
@@ -193,7 +220,27 @@ export function MasteringPage() {
         }
       ]
     });
-    if (typeof selected === "string") setSourcePath(selected);
+    if (typeof selected === "string") {
+      setSourcePath(selected);
+      setMetadata((current) => ({
+        ...current,
+        title: current.title?.trim() ? current.title : fileStem(selected)
+      }));
+    }
+  }
+
+  async function chooseCoverArt() {
+    setErrorMessage("");
+    const selected = await open({
+      multiple: false,
+      filters: [
+        {
+          name: "Cover",
+          extensions: ["jpg", "jpeg", "png"]
+        }
+      ]
+    });
+    if (typeof selected === "string") setCoverArtPath(selected);
   }
 
   async function startMastering() {
@@ -206,6 +253,9 @@ export function MasteringPage() {
         targetProfile,
         feedback,
         referenceNotes,
+        outputFormat,
+        metadata: normalizedMetadataForSubmit(metadata, sourcePath),
+        coverArtPath: coverArtPath || null,
         useAi
       });
       setJobs((current) => upsertJob(current, job));
@@ -228,6 +278,9 @@ export function MasteringPage() {
         jobId: job.id,
         feedback: feedback.trim() || job.feedback,
         referenceNotes: referenceNotes.trim() || job.reference_notes,
+        outputFormat,
+        metadata: normalizedMetadataForSubmit(metadata, sourcePath || job.source_path),
+        coverArtPath: coverArtPath || null,
         useAi
       });
       setJobs((current) => upsertJob(current, updated));
@@ -279,8 +332,15 @@ export function MasteringPage() {
   function syncEditorFromJob(job: MasteringJob) {
     setSourcePath(job.source_path);
     setTargetProfile(job.target_profile);
+    setOutputFormat(normalizeEditableOutputFormat(job.output_format));
+    setMetadata(job.metadata ?? {});
+    setCoverArtPath(job.cover_art_path ?? "");
     setFeedback(job.feedback ?? "");
     setReferenceNotes(job.reference_notes ?? "");
+  }
+
+  function updateMetadataField(field: keyof MasteringMetadata, value: string) {
+    setMetadata((current) => ({ ...current, [field]: value }));
   }
 
   function appendTerminalLog(event: MasteringProgressEvent) {
@@ -383,6 +443,72 @@ export function MasteringPage() {
                 </div>
               </div>
 
+              <div className="grid gap-3 rounded-md border border-border bg-background/60 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Tags className="h-4 w-4" />
+                    <span className="text-sm font-semibold">Formato y metadata</span>
+                  </div>
+                  <select
+                    className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                    value={outputFormat}
+                    onChange={(event) => setOutputFormat(normalizeOutputFormat(event.currentTarget.value))}
+                  >
+                    <option value="aiff_24">AIFF 24-bit</option>
+                    <option value="aiff_cdj16">AIFF CDJ safe 16-bit</option>
+                  </select>
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-3">
+                  <MetadataInput label="Titulo" value={metadata.title} onChange={(value) => updateMetadataField("title", value)} />
+                  <MetadataInput label="Artista" value={metadata.artist} onChange={(value) => updateMetadataField("artist", value)} />
+                  <MetadataInput label="Album" value={metadata.album} onChange={(value) => updateMetadataField("album", value)} />
+                  <MetadataInput label="Genero" value={metadata.genre} onChange={(value) => updateMetadataField("genre", value)} />
+                  <MetadataInput label="Ano" value={metadata.year} onChange={(value) => updateMetadataField("year", value)} />
+                  <MetadataInput label="Track" value={metadata.track_number} onChange={(value) => updateMetadataField("track_number", value)} />
+                  <MetadataInput label="BPM" value={metadata.bpm} onChange={(value) => updateMetadataField("bpm", value)} />
+                  <MetadataInput label="Key" value={metadata.musical_key} onChange={(value) => updateMetadataField("musical_key", value)} />
+                  <MetadataInput label="ISRC" value={metadata.isrc} onChange={(value) => updateMetadataField("isrc", value)} />
+                  <MetadataInput label="Compositor" value={metadata.composer} onChange={(value) => updateMetadataField("composer", value)} />
+                  <MetadataInput label="Label" value={metadata.label} onChange={(value) => updateMetadataField("label", value)} />
+                  <MetadataInput label="Copyright" value={metadata.copyright} onChange={(value) => updateMetadataField("copyright", value)} />
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_220px]">
+                  <label className="grid gap-1 text-sm font-medium">
+                    Comentario
+                    <textarea
+                      className="min-h-20 rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      value={metadata.comment ?? ""}
+                      onChange={(event) => updateMetadataField("comment", event.currentTarget.value)}
+                      placeholder="Notas que quedaran embebidas en el AIFF..."
+                    />
+                  </label>
+                  <div className="grid gap-2">
+                    <span className="text-sm font-medium">Cover</span>
+                    <div className="flex gap-2">
+                      <Button type="button" variant="secondary" onClick={() => void chooseCoverArt()} disabled={busy}>
+                        <ImagePlus className="h-4 w-4" />
+                        Elegir
+                      </Button>
+                      <Button type="button" variant="secondary" onClick={() => setCoverArtPath("")} disabled={!coverArtPath || busy}>
+                        Limpiar
+                      </Button>
+                    </div>
+                    {coverArtPath ? (
+                      <div className="grid grid-cols-[52px_minmax(0,1fr)] gap-2 rounded-md border border-border p-2">
+                        <img className="h-12 w-12 rounded-sm object-cover" src={convertFileSrc(coverArtPath)} alt="" />
+                        <span className="min-w-0 truncate text-xs text-muted-foreground" title={coverArtPath}>{coverArtPath}</span>
+                      </div>
+                    ) : (
+                      <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                        JPG o PNG opcional.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               <div className="grid gap-3 md:grid-cols-2">
                 <label className="grid gap-1 text-sm font-medium">
                   Feedback
@@ -471,7 +597,7 @@ export function MasteringPage() {
                   <StatusPill state={job.state} />
                 </div>
                 <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span>{profileByKey.get(job.target_profile)?.label_es ?? job.target_profile}</span>
+                  <span>{profileByKey.get(job.target_profile)?.label_es ?? job.target_profile} / {outputFormatLabel(job.output_format)}</span>
                   <span>{formatDate(job.created_at)}</span>
                 </div>
                 <div className="flex min-w-0 items-center justify-between gap-2 text-xs">
@@ -489,6 +615,8 @@ export function MasteringPage() {
                 <div className="flex flex-wrap gap-1.5">
                   <HistoryChip active={Boolean(job.feedback?.trim())}>Feedback</HistoryChip>
                   <HistoryChip active={Boolean(job.reference_notes?.trim())}>Referencia</HistoryChip>
+                  <HistoryChip active={Boolean(job.metadata?.title || job.metadata?.artist)}>Tags</HistoryChip>
+                  <HistoryChip active={Boolean(job.cover_art_path)}>Cover</HistoryChip>
                 </div>
               </button>
             ))}
@@ -536,6 +664,7 @@ function MasteringDetail({
   const warnings = Array.isArray(recipe.warnings_es) ? recipe.warnings_es : [];
   const originalFeedback = job.feedback?.trim() ?? "";
   const originalReference = job.reference_notes?.trim() ?? "";
+  const packageWarnings = Array.isArray(job.package_report?.warnings) ? job.package_report.warnings : [];
 
   return (
     <div className="grid gap-3">
@@ -544,7 +673,7 @@ function MasteringDetail({
           <div className="min-w-0">
             <CardTitle className="truncate">{job.source_name}</CardTitle>
             <span className="block truncate text-xs text-muted-foreground" title={job.source_path}>
-              {profile?.label_es ?? job.target_profile}
+              {profile?.label_es ?? job.target_profile} / {outputFormatLabel(job.output_format)}
             </span>
           </div>
           <StatusPill state={job.state} />
@@ -586,11 +715,9 @@ function MasteringDetail({
               Abrir master
             </Button>
             {job.output_path ? (
-              <Button asChild variant="secondary">
-                <a href={convertFileSrc(job.output_path)} download>
-                  <Download className="h-4 w-4" />
-                  WAV
-                </a>
+              <Button variant="secondary" onClick={() => void onOpenFolder(job.output_path)}>
+                <Download className="h-4 w-4" />
+                Carpeta {downloadLabel(job.output_format)}
               </Button>
             ) : null}
             <Button
@@ -622,6 +749,52 @@ function MasteringDetail({
             <CardContent className="grid gap-3 p-3 md:grid-cols-2">
               <BriefBlock label="Feedback" value={originalFeedback} />
               <BriefBlock label="Referencia" value={originalReference} />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Metadata</CardTitle>
+              <span className="text-xs text-muted-foreground">{outputFormatLabel(job.output_format)}</span>
+            </CardHeader>
+            <CardContent className="grid gap-3 p-3">
+              <div className="grid gap-2 md:grid-cols-2">
+                <MetadataLine label="Titulo" value={job.metadata?.title} />
+                <MetadataLine label="Artista" value={job.metadata?.artist} />
+                <MetadataLine label="Album" value={job.metadata?.album} />
+                <MetadataLine label="Genero" value={job.metadata?.genre} />
+                <MetadataLine label="Ano" value={job.metadata?.year} />
+                <MetadataLine label="BPM" value={job.metadata?.bpm} />
+                <MetadataLine label="Key" value={job.metadata?.musical_key} />
+                <MetadataLine label="ISRC" value={job.metadata?.isrc} />
+              </div>
+              {job.cover_art_path ? (
+                <div className="grid grid-cols-[56px_minmax(0,1fr)] gap-2 rounded-md border border-border p-2">
+                  <img className="h-14 w-14 rounded-sm object-cover" src={convertFileSrc(job.cover_art_path)} alt="" />
+                  <div className="min-w-0">
+                    <span className="block text-xs font-semibold">Cover</span>
+                    <span className="mt-1 block truncate text-xs text-muted-foreground" title={job.cover_art_path}>{job.cover_art_path}</span>
+                  </div>
+                </div>
+              ) : null}
+              {job.package_report && Object.keys(job.package_report).length > 0 ? (
+                <div className="grid gap-2 rounded-md bg-secondary p-3 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold">Packaging</span>
+                    <span className="text-muted-foreground">
+                      {stringValue(getNested(job.package_report, ["validation", "tag_count"]), "0")} tag(s)
+                    </span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    Cover: {job.package_report.cover_embedded ? "embebido" : job.package_report.cover_requested ? "omitido" : "sin cover"}
+                  </div>
+                  {packageWarnings.map((warning, index) => (
+                    <div key={`${String(warning)}-${index}`} className="text-yellow-800 dark:text-yellow-200">
+                      {String(warning)}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -732,6 +905,36 @@ function AudioPanel({ title, path }: { title: string; path?: string | null }) {
   );
 }
 
+function MetadataInput({
+  label,
+  value,
+  onChange
+}: {
+  label: string;
+  value?: string | null;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="grid gap-1 text-xs font-semibold text-muted-foreground">
+      {label}
+      <input
+        className="h-9 rounded-md border border-input bg-background px-2 text-sm font-normal text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        value={value ?? ""}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+    </label>
+  );
+}
+
+function MetadataLine({ label, value }: { label: string; value?: unknown }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-border/60 py-1.5 last:border-b-0">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="min-w-0 truncate text-xs font-semibold">{stringValue(value, "n/d")}</span>
+    </div>
+  );
+}
+
 function BriefBlock({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border border-border bg-background/60 p-3">
@@ -778,7 +981,7 @@ function MiniMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function HistoryChip({ active, children }: { active: boolean; children: React.ReactNode }) {
+function HistoryChip({ active, children }: { active: boolean; children: ReactNode }) {
   return (
     <span
       className={cn(
@@ -851,9 +1054,68 @@ function upsertJob(jobs: MasteringJob[], job: MasteringJob) {
   return next.sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
 
+function normalizeOutputFormat(value?: string | null): MasteringOutputFormat {
+  if (value === "aiff_cdj16") return "aiff_cdj16";
+  if (value === "wav_24") return "wav_24";
+  return "aiff_24";
+}
+
+function normalizeEditableOutputFormat(value?: string | null): MasteringOutputFormat {
+  return value === "aiff_cdj16" ? "aiff_cdj16" : "aiff_24";
+}
+
+function outputFormatLabel(value?: string | null) {
+  const outputFormat = normalizeOutputFormat(value);
+  if (outputFormat === "aiff_cdj16") return "AIFF CDJ safe";
+  if (outputFormat === "wav_24") return "WAV 24-bit";
+  return "AIFF 24-bit";
+}
+
+function downloadLabel(value?: string | null) {
+  return normalizeOutputFormat(value) === "wav_24" ? "WAV" : "AIFF";
+}
+
+function normalizedMetadataForSubmit(metadata: MasteringMetadata, sourcePath: string): MasteringMetadata {
+  return {
+    title: cleanMetadataValue(metadata.title) || fileStem(sourcePath),
+    artist: cleanMetadataValue(metadata.artist),
+    album: cleanMetadataValue(metadata.album),
+    genre: cleanMetadataValue(metadata.genre),
+    year: cleanMetadataValue(metadata.year),
+    track_number: cleanMetadataValue(metadata.track_number),
+    composer: cleanMetadataValue(metadata.composer),
+    label: cleanMetadataValue(metadata.label),
+    copyright: cleanMetadataValue(metadata.copyright),
+    bpm: cleanMetadataValue(metadata.bpm),
+    musical_key: cleanMetadataValue(metadata.musical_key),
+    isrc: cleanMetadataValue(metadata.isrc),
+    comment: cleanMetadataValue(metadata.comment)
+  };
+}
+
+function cleanMetadataValue(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function fileStem(path: string) {
+  const filename = path.split(/[\\/]/).pop() || "track";
+  const index = filename.lastIndexOf(".");
+  return index > 0 ? filename.slice(0, index) : filename;
+}
+
 function getObject(value: Record<string, unknown>, key: string): Record<string, unknown> {
   const child = value[key];
   return child && typeof child === "object" && !Array.isArray(child) ? child as Record<string, unknown> : {};
+}
+
+function getNested(value: Record<string, unknown>, keys: string[]) {
+  let current: unknown = value;
+  for (const key of keys) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
 }
 
 function stringValue(value: unknown, fallback: string) {

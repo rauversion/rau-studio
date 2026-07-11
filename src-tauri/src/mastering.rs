@@ -40,7 +40,11 @@ pub struct MasteringJob {
     state: String,
     feedback: Option<String>,
     reference_notes: Option<String>,
+    output_format: String,
+    metadata: Value,
+    cover_art_path: Option<String>,
     output_path: Option<String>,
+    package_report: Value,
     recipe: Value,
     analysis_before: Value,
     analysis_after: Value,
@@ -51,6 +55,23 @@ pub struct MasteringJob {
     created_at: String,
     updated_at: String,
     ready: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MasteringMetadata {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    genre: Option<String>,
+    year: Option<String>,
+    track_number: Option<String>,
+    composer: Option<String>,
+    label: Option<String>,
+    copyright: Option<String>,
+    bpm: Option<String>,
+    musical_key: Option<String>,
+    isrc: Option<String>,
+    comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,6 +139,9 @@ pub fn mastering_start_job(
     target_profile: String,
     feedback: Option<String>,
     reference_notes: Option<String>,
+    output_format: Option<String>,
+    metadata: Option<MasteringMetadata>,
+    cover_art_path: Option<String>,
     use_ai: Option<bool>,
 ) -> Result<MasteringJob, String> {
     let source = PathBuf::from(&source_path);
@@ -137,12 +161,16 @@ pub fn mastering_start_job(
         .and_then(|value| value.to_str())
         .unwrap_or("audio")
         .to_string();
+    let output_format = normalize_output_format(output_format.as_deref());
+    let metadata_json = normalized_metadata_json(&source_name, metadata);
+    let cover_art_path = clean_cover_art_path(cover_art_path)?;
 
     conn.execute(
         "INSERT INTO mastering_jobs (
             id, source_path, source_name, target_profile, state, feedback, reference_notes,
-            recipe_json, analysis_before_json, analysis_after_json, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, '{}', '{}', '{}', ?7, ?7)",
+            output_format, metadata_json, cover_art_path,
+            recipe_json, analysis_before_json, analysis_after_json, package_report_json, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, ?9, '{}', '{}', '{}', '{}', ?10, ?10)",
         params![
             id,
             source_path,
@@ -150,6 +178,9 @@ pub fn mastering_start_job(
             target_profile,
             clean_optional(feedback),
             clean_optional(reference_notes),
+            output_format,
+            metadata_json.to_string(),
+            cover_art_path,
             now
         ],
     )
@@ -167,6 +198,9 @@ pub fn mastering_retry_job(
     job_id: String,
     feedback: Option<String>,
     reference_notes: Option<String>,
+    output_format: Option<String>,
+    metadata: Option<MasteringMetadata>,
+    cover_art_path: Option<String>,
     use_ai: Option<bool>,
 ) -> Result<MasteringJob, String> {
     let conn = open_db(&app)?;
@@ -178,6 +212,17 @@ pub fn mastering_retry_job(
 
     let _ = fs::remove_dir_all(job_dir(&app, &job_id)?);
     let now = timestamp();
+    let next_output_format = output_format
+        .as_deref()
+        .map(|value| normalize_output_format(Some(value)))
+        .unwrap_or_else(|| normalize_output_format(Some(&current.output_format)));
+    let next_metadata = metadata
+        .map(|metadata| normalized_metadata_json(&current.source_name, Some(metadata)))
+        .unwrap_or_else(|| current.metadata.clone());
+    let next_cover_art_path = match cover_art_path {
+        Some(value) => clean_cover_art_path(Some(value))?,
+        None => current.cover_art_path.clone(),
+    };
     conn.execute(
         "DELETE FROM mastering_events WHERE job_id = ?1",
         params![&job_id],
@@ -188,20 +233,27 @@ pub fn mastering_retry_job(
             state = 'pending',
             feedback = COALESCE(?2, feedback),
             reference_notes = COALESCE(?3, reference_notes),
+            output_format = ?4,
+            metadata_json = ?5,
+            cover_art_path = ?6,
             output_path = NULL,
             recipe_json = '{}',
             analysis_before_json = '{}',
             analysis_after_json = '{}',
+            package_report_json = '{}',
             error_message = NULL,
             started_at = NULL,
             completed_at = NULL,
             failed_at = NULL,
-            updated_at = ?4
+            updated_at = ?7
          WHERE id = ?1",
         params![
-            job_id,
+            &job_id,
             clean_optional(feedback),
             clean_optional(reference_notes),
+            next_output_format,
+            next_metadata.to_string(),
+            next_cover_art_path,
             now
         ],
     )
@@ -524,15 +576,48 @@ fn run_mastering_job(app: &AppHandle, job_id: &str, use_ai: bool) -> Result<(), 
         )?;
     }
 
+    job =
+        get_job(&conn, job_id)?.ok_or_else(|| format!("Mastering job no encontrado: {job_id}"))?;
     let final_path = final_output_path(&dir, &job);
-    if output_path != final_path {
-        let _ = fs::remove_file(&final_path);
-        fs::rename(&output_path, &final_path)
-            .map_err(|error| format!("No se pudo mover master final: {error}"))?;
-    }
+    emit_event(
+        app,
+        &conn,
+        &job,
+        EventMeta {
+            event: "packaging_started",
+            step: "packaging",
+            level: "info",
+            progress: Some(96.0),
+            message: format!(
+                "Empaquetando master final como {} con metadata.",
+                output_format_label(&job.output_format)
+            ),
+            payload: json!({
+                "output_format": job.output_format.clone(),
+                "cover_art_path": job.cover_art_path.clone()
+            }),
+        },
+    )?;
+    let package_report = package_master(&output_path, &final_path, &job, &recipe)?;
+    let _ = fs::remove_file(&output_path);
+    emit_event(
+        app,
+        &conn,
+        &job,
+        EventMeta {
+            event: "packaging_finished",
+            step: "packaging",
+            level: package_event_level(&package_report),
+            progress: Some(98.0),
+            message: package_summary(&package_report),
+            payload: json!({ "package_report": package_report.clone() }),
+        },
+    )?;
     write_sidecar_json(&dir, "recipe.json", &recipe)?;
     write_sidecar_json(&dir, "analysis_before.json", &analysis_before_json)?;
     write_sidecar_json(&dir, "analysis_after.json", &analysis_after_json)?;
+    write_sidecar_json(&dir, "metadata.json", &job.metadata)?;
+    write_sidecar_json(&dir, "package_report.json", &package_report)?;
     mark_completed(
         &conn,
         job_id,
@@ -540,6 +625,7 @@ fn run_mastering_job(app: &AppHandle, job_id: &str, use_ai: bool) -> Result<(), 
         &recipe,
         &analysis_before_json,
         &analysis_after_json,
+        &package_report,
     )?;
     job =
         get_job(&conn, job_id)?.ok_or_else(|| format!("Mastering job no encontrado: {job_id}"))?;
@@ -632,7 +718,11 @@ fn init_db(conn: &Connection) -> Result<(), String> {
           state TEXT NOT NULL,
           feedback TEXT,
           reference_notes TEXT,
+          output_format TEXT NOT NULL DEFAULT 'aiff_24',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          cover_art_path TEXT,
           output_path TEXT,
+          package_report_json TEXT NOT NULL DEFAULT '{}',
           recipe_json TEXT NOT NULL DEFAULT '{}',
           analysis_before_json TEXT NOT NULL DEFAULT '{}',
           analysis_after_json TEXT NOT NULL DEFAULT '{}',
@@ -662,7 +752,39 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_mastering_events_job_created_at ON mastering_events(job_id, created_at);
         ",
     )
-    .map_err(|error| format!("No se pudo inicializar SQLite mastering: {error}"))
+    .map_err(|error| format!("No se pudo inicializar SQLite mastering: {error}"))?;
+
+    ensure_mastering_column(conn, "output_format", "TEXT NOT NULL DEFAULT 'aiff_24'")?;
+    ensure_mastering_column(conn, "metadata_json", "TEXT NOT NULL DEFAULT '{}'")?;
+    ensure_mastering_column(conn, "cover_art_path", "TEXT")?;
+    ensure_mastering_column(conn, "package_report_json", "TEXT NOT NULL DEFAULT '{}'")?;
+
+    Ok(())
+}
+
+fn ensure_mastering_column(
+    conn: &Connection,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(mastering_jobs)")
+        .map_err(|error| format!("No se pudo inspeccionar mastering_jobs: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("No se pudieron leer columnas de mastering_jobs: {error}"))?;
+    let columns = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("No se pudieron mapear columnas de mastering_jobs: {error}"))?;
+
+    if columns.iter().any(|existing| existing == column) {
+        return Ok(());
+    }
+
+    let sql = format!("ALTER TABLE mastering_jobs ADD COLUMN {column} {definition}");
+    conn.execute(&sql, [])
+        .map_err(|error| format!("No se pudo agregar columna {column}: {error}"))?;
+    Ok(())
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -682,7 +804,8 @@ fn list_jobs(conn: &Connection) -> Result<Vec<MasteringJob>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, source_path, source_name, target_profile, state, feedback, reference_notes,
-                    output_path, recipe_json, analysis_before_json, analysis_after_json, error_message,
+                    output_format, metadata_json, cover_art_path, output_path, package_report_json,
+                    recipe_json, analysis_before_json, analysis_after_json, error_message,
                     started_at, completed_at, failed_at, created_at, updated_at
              FROM mastering_jobs
              ORDER BY created_at DESC",
@@ -700,7 +823,8 @@ fn list_jobs(conn: &Connection) -> Result<Vec<MasteringJob>, String> {
 fn get_job(conn: &Connection, job_id: &str) -> Result<Option<MasteringJob>, String> {
     conn.query_row(
         "SELECT id, source_path, source_name, target_profile, state, feedback, reference_notes,
-                output_path, recipe_json, analysis_before_json, analysis_after_json, error_message,
+                output_format, metadata_json, cover_art_path, output_path, package_report_json,
+                recipe_json, analysis_before_json, analysis_after_json, error_message,
                 started_at, completed_at, failed_at, created_at, updated_at
          FROM mastering_jobs
          WHERE id = ?1",
@@ -748,7 +872,7 @@ fn list_job_events(
 }
 
 fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MasteringJob> {
-    let output_path: Option<String> = row.get(7)?;
+    let output_path: Option<String> = row.get(10)?;
     let state: String = row.get(4)?;
     Ok(MasteringJob {
         id: row.get(0)?,
@@ -758,17 +882,21 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MasteringJob> {
         state: state.clone(),
         feedback: row.get(5)?,
         reference_notes: row.get(6)?,
+        output_format: row.get(7)?,
+        metadata: parse_json_text(row.get::<_, String>(8)?.as_str()),
+        cover_art_path: row.get(9)?,
         ready: state == "completed" && output_path.is_some(),
         output_path,
-        recipe: parse_json_text(row.get::<_, String>(8)?.as_str()),
-        analysis_before: parse_json_text(row.get::<_, String>(9)?.as_str()),
-        analysis_after: parse_json_text(row.get::<_, String>(10)?.as_str()),
-        error_message: row.get(11)?,
-        started_at: row.get(12)?,
-        completed_at: row.get(13)?,
-        failed_at: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        package_report: parse_json_text(row.get::<_, String>(11)?.as_str()),
+        recipe: parse_json_text(row.get::<_, String>(12)?.as_str()),
+        analysis_before: parse_json_text(row.get::<_, String>(13)?.as_str()),
+        analysis_after: parse_json_text(row.get::<_, String>(14)?.as_str()),
+        error_message: row.get(15)?,
+        started_at: row.get(16)?,
+        completed_at: row.get(17)?,
+        failed_at: row.get(18)?,
+        created_at: row.get(19)?,
+        updated_at: row.get(20)?,
     })
 }
 
@@ -811,6 +939,7 @@ fn mark_completed(
     recipe: &Value,
     analysis_before: &Value,
     analysis_after: &Value,
+    package_report: &Value,
 ) -> Result<(), String> {
     let now = timestamp();
     conn.execute(
@@ -820,10 +949,11 @@ fn mark_completed(
           recipe_json = ?3,
           analysis_before_json = ?4,
           analysis_after_json = ?5,
-          completed_at = ?6,
+          package_report_json = ?6,
+          completed_at = ?7,
           failed_at = NULL,
           error_message = NULL,
-          updated_at = ?6
+          updated_at = ?7
          WHERE id = ?1",
         params![
             job_id,
@@ -831,6 +961,7 @@ fn mark_completed(
             recipe.to_string(),
             analysis_before.to_string(),
             analysis_after.to_string(),
+            package_report.to_string(),
             now
         ],
     )
@@ -1845,6 +1976,304 @@ fn render_master(
     Ok(output_path)
 }
 
+fn package_master(
+    rendered_path: &Path,
+    final_path: &Path,
+    job: &MasteringJob,
+    recipe: &Value,
+) -> Result<Value, String> {
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("No se pudo crear carpeta de salida: {error}"))?;
+    }
+    let _ = fs::remove_file(final_path);
+
+    let cover_path = job
+        .cover_art_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file() && is_cover_art_path(path));
+    let mut warnings = Vec::new();
+    let mut cover_embedded = false;
+
+    if let Some(cover) = cover_path.as_ref() {
+        match run_package_command(
+            rendered_path,
+            final_path,
+            job,
+            recipe,
+            Some(cover.as_path()),
+        ) {
+            Ok(()) => cover_embedded = true,
+            Err(error) => {
+                warnings.push(format!(
+                    "No se pudo incrustar la caratula; se genero audio sin cover: {error}"
+                ));
+                let _ = fs::remove_file(final_path);
+                run_package_command(rendered_path, final_path, job, recipe, None)?;
+            }
+        }
+    } else {
+        if job.cover_art_path.is_some() {
+            warnings.push(
+                "Caratula omitida porque el archivo ya no existe o no es JPG/PNG.".to_string(),
+            );
+        }
+        run_package_command(rendered_path, final_path, job, recipe, None)?;
+    }
+
+    let validation = validate_packaged_file(final_path)?;
+    let validation_cover = validation
+        .get("cover_detected")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if cover_embedded && !validation_cover {
+        warnings
+            .push("ffprobe no detecto la caratula como attached_pic en el AIFF final.".to_string());
+    }
+
+    Ok(json!({
+        "output_format": job.output_format.clone(),
+        "output_label": output_format_label(&job.output_format),
+        "output_path": final_path.to_string_lossy(),
+        "metadata_written": !metadata_pairs(&job.metadata, &job.source_name).is_empty(),
+        "cover_requested": job.cover_art_path.is_some(),
+        "cover_embedded": cover_embedded && validation_cover,
+        "warnings": warnings,
+        "validation": validation
+    }))
+}
+
+fn run_package_command(
+    rendered_path: &Path,
+    final_path: &Path,
+    job: &MasteringJob,
+    recipe: &Value,
+    cover_path: Option<&Path>,
+) -> Result<(), String> {
+    let output_format = normalize_output_format(Some(&job.output_format));
+    let is_aiff = output_format != "wav_24";
+    let mut command = Command::new("ffmpeg");
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(rendered_path);
+
+    if let Some(cover) = cover_path {
+        command.arg("-i").arg(cover);
+    }
+
+    command.args(["-map", "0:a:0"]);
+    if cover_path.is_some() {
+        command
+            .args([
+                "-map",
+                "1:v:0",
+                "-c:v",
+                "png",
+                "-disposition:v:0",
+                "attached_pic",
+            ])
+            .args(["-metadata:s:v", "title=Cover"])
+            .args(["-metadata:s:v", "comment=Cover (front)"]);
+    } else {
+        command.arg("-vn");
+    }
+
+    command.args(["-map_metadata", "-1"]);
+    for (key, value) in metadata_pairs(&job.metadata, &job.source_name) {
+        command.arg("-metadata").arg(format!("{key}={value}"));
+    }
+
+    match output_format.as_str() {
+        "aiff_cdj16" => {
+            command.args(["-ar", "44100", "-ac", "2", "-c:a", "pcm_s16be"]);
+        }
+        "wav_24" => {
+            command.args([
+                "-ar",
+                &export_sample_rate(recipe).to_string(),
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_s24le",
+            ]);
+        }
+        _ => {
+            command.args([
+                "-ar",
+                &export_sample_rate(recipe).to_string(),
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_s24be",
+            ]);
+        }
+    }
+
+    if is_aiff {
+        command.args(["-write_id3v2", "1", "-id3v2_version", "3"]);
+    }
+
+    command.arg(final_path);
+    let output = command
+        .output()
+        .map_err(|error| format!("No se pudo ejecutar ffmpeg packaging: {error}"))?;
+
+    if !output.status.success() || !final_path.is_file() {
+        return Err(format!(
+            "ffmpeg no pudo empaquetar el master: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_packaged_file(path: &Path) -> Result<Value, String> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name:format_tags:stream=index,codec_type,codec_name:stream_disposition=attached_pic",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("No se pudo validar metadata con ffprobe: {error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe no pudo validar el master final: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("ffprobe retorno JSON invalido al validar metadata: {error}"))?;
+    let format_name = parsed
+        .pointer("/format/format_name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let tag_count = parsed
+        .pointer("/format/tags")
+        .and_then(Value::as_object)
+        .map(|tags| tags.len())
+        .unwrap_or(0);
+    let cover_detected = parsed
+        .get("streams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|stream| {
+            stream.get("codec_type").and_then(Value::as_str) == Some("video")
+                && stream
+                    .pointer("/disposition/attached_pic")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    == 1
+        });
+
+    Ok(json!({
+        "format_name": format_name,
+        "tag_count": tag_count,
+        "cover_detected": cover_detected
+    }))
+}
+
+fn metadata_pairs(metadata: &Value, source_name: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    push_metadata_pair(
+        &mut pairs,
+        "title",
+        metadata_text(metadata, "title").or_else(|| Some(safe_stem(source_name))),
+    );
+    push_metadata_pair(&mut pairs, "artist", metadata_text(metadata, "artist"));
+    push_metadata_pair(&mut pairs, "album", metadata_text(metadata, "album"));
+    push_metadata_pair(&mut pairs, "genre", metadata_text(metadata, "genre"));
+    push_metadata_pair(&mut pairs, "date", metadata_text(metadata, "year"));
+    push_metadata_pair(&mut pairs, "track", metadata_text(metadata, "track_number"));
+    push_metadata_pair(&mut pairs, "composer", metadata_text(metadata, "composer"));
+    push_metadata_pair(&mut pairs, "publisher", metadata_text(metadata, "label"));
+    push_metadata_pair(
+        &mut pairs,
+        "copyright",
+        metadata_text(metadata, "copyright"),
+    );
+    push_metadata_pair(&mut pairs, "bpm", metadata_text(metadata, "bpm"));
+    push_metadata_pair(
+        &mut pairs,
+        "initialkey",
+        metadata_text(metadata, "musical_key"),
+    );
+    push_metadata_pair(&mut pairs, "isrc", metadata_text(metadata, "isrc"));
+    push_metadata_pair(&mut pairs, "comment", metadata_text(metadata, "comment"));
+    pairs
+}
+
+fn metadata_text(metadata: &Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(500).collect())
+}
+
+fn push_metadata_pair(pairs: &mut Vec<(String, String)>, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        pairs.push((key.to_string(), value));
+    }
+}
+
+fn output_format_label(output_format: &str) -> &'static str {
+    match output_format {
+        "aiff_cdj16" => "AIFF CDJ safe 16-bit",
+        "wav_24" => "WAV 24-bit",
+        _ => "AIFF 24-bit",
+    }
+}
+
+fn package_event_level(report: &Value) -> &'static str {
+    if report
+        .get("warnings")
+        .and_then(Value::as_array)
+        .is_some_and(|warnings| !warnings.is_empty())
+    {
+        "warning"
+    } else {
+        "info"
+    }
+}
+
+fn package_summary(report: &Value) -> String {
+    let label = report
+        .get("output_label")
+        .and_then(Value::as_str)
+        .unwrap_or("master");
+    let tag_count = report
+        .pointer("/validation/tag_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cover = if report
+        .get("cover_embedded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "cover embebido"
+    } else if report
+        .get("cover_requested")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "cover omitido"
+    } else {
+        "sin cover"
+    };
+    format!("{label} listo con {tag_count} tag(s), {cover}.")
+}
+
 fn filter_chain(recipe: &Value, analysis_before: &AudioAnalysis) -> String {
     let mut filters = Vec::new();
     filters.extend(highpass_filters(recipe));
@@ -2195,8 +2624,13 @@ fn final_output_path(dir: &Path, job: &MasteringJob) -> PathBuf {
     } else {
         "master"
     };
+    let extension = if normalize_output_format(Some(&job.output_format)) == "wav_24" {
+        "wav"
+    } else {
+        "aiff"
+    };
     dir.join(format!(
-        "{}-{}-{suffix}.wav",
+        "{}-{}-{suffix}.{extension}",
         safe_stem(&job.source_name),
         job.target_profile
     ))
@@ -2514,6 +2948,60 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_output_format(value: Option<&str>) -> String {
+    match value.unwrap_or("aiff_24") {
+        "aiff_cdj16" => "aiff_cdj16".to_string(),
+        _ => "aiff_24".to_string(),
+    }
+}
+
+fn normalized_metadata_json(source_name: &str, metadata: Option<MasteringMetadata>) -> Value {
+    let metadata = metadata.unwrap_or_default();
+    let title = clean_optional(metadata.title).unwrap_or_else(|| safe_stem(source_name));
+
+    json!({
+        "title": title,
+        "artist": clean_optional(metadata.artist),
+        "album": clean_optional(metadata.album),
+        "genre": clean_optional(metadata.genre),
+        "year": clean_optional(metadata.year),
+        "track_number": clean_optional(metadata.track_number),
+        "composer": clean_optional(metadata.composer),
+        "label": clean_optional(metadata.label),
+        "copyright": clean_optional(metadata.copyright),
+        "bpm": clean_optional(metadata.bpm),
+        "musical_key": clean_optional(metadata.musical_key),
+        "isrc": clean_optional(metadata.isrc),
+        "comment": clean_optional(metadata.comment)
+    })
+}
+
+fn clean_cover_art_path(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(path) = clean_optional(value) else {
+        return Ok(None);
+    };
+    let cover = PathBuf::from(&path);
+    if !cover.is_file() {
+        return Err(format!("Caratula no encontrada: {}", cover.display()));
+    }
+    if !is_cover_art_path(&cover) {
+        return Err(format!(
+            "Formato de caratula no soportado: {}",
+            cover.display()
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn is_cover_art_path(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(extension.as_str(), "jpg" | "jpeg" | "png")
 }
 
 fn value_to_f64(value: &Value) -> Option<f64> {
