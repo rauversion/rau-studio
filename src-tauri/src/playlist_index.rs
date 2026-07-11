@@ -521,6 +521,150 @@ pub fn playlist_index_library_playlists(
 }
 
 #[tauri::command]
+pub fn playlist_index_delete_library(app: AppHandle, library_id: String) -> Result<String, String> {
+    let conn = open_db(&app)?;
+    let deleted = conn
+        .execute(
+            "DELETE FROM playlist_index_libraries WHERE id = ?1",
+            params![&library_id],
+        )
+        .map_err(|error| format!("No se pudo eliminar libreria indexada: {error}"))?;
+    if deleted == 0 {
+        return Err(format!("Libreria indexada no encontrada: {library_id}"));
+    }
+    rebuild_fts(&conn)?;
+    emit_progress(
+        &app,
+        "info",
+        "Indice de libreria eliminado.",
+        Some(100.0),
+        Some(library_id.clone()),
+        None,
+        None,
+    );
+    Ok(library_id)
+}
+
+#[tauri::command]
+pub fn playlist_index_delete_playlists(
+    app: AppHandle,
+    library_id: String,
+    playlist_paths: Vec<String>,
+) -> Result<PlaylistIndexImportResponse, String> {
+    let mut conn = open_db(&app)?;
+    if get_library(&conn, &library_id)?.is_none() {
+        return Err(format!("Libreria indexada no encontrada: {library_id}"));
+    }
+
+    let paths = playlist_paths
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect::<BTreeSet<_>>();
+    if paths.is_empty() {
+        return Err("Selecciona al menos una playlist indexada para eliminar.".to_string());
+    }
+
+    let now = timestamp();
+    {
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("No se pudo iniciar transaccion SQLite: {error}"))?;
+        let mut affected_track_ids = BTreeSet::new();
+
+        for playlist_path in &paths {
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT DISTINCT track_id
+                         FROM playlist_index_memberships
+                         WHERE library_id = ?1 AND playlist_path = ?2",
+                    )
+                    .map_err(|error| {
+                        format!("No se pudieron leer tracks de {playlist_path}: {error}")
+                    })?;
+                let rows = stmt
+                    .query_map(params![&library_id, playlist_path], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map_err(|error| {
+                        format!("No se pudieron mapear tracks de {playlist_path}: {error}")
+                    })?;
+                for track_id in rows {
+                    affected_track_ids.insert(track_id.map_err(|error| {
+                        format!("No se pudo leer track de {playlist_path}: {error}")
+                    })?);
+                }
+            }
+
+            tx.execute(
+                "DELETE FROM playlist_index_playlists WHERE library_id = ?1 AND path = ?2",
+                params![&library_id, playlist_path],
+            )
+            .map_err(|error| format!("No se pudo eliminar indice de {playlist_path}: {error}"))?;
+        }
+
+        for track_id in &affected_track_ids {
+            tx.execute(
+                "DELETE FROM playlist_index_tracks
+                 WHERE library_id = ?1 AND track_id = ?2
+                   AND NOT EXISTS (
+                     SELECT 1 FROM playlist_index_memberships m
+                     WHERE m.library_id = playlist_index_tracks.library_id
+                       AND m.track_id = playlist_index_tracks.track_id
+                   )",
+                params![&library_id, track_id],
+            )
+            .map_err(|error| format!("No se pudo limpiar track huerfano {track_id}: {error}"))?;
+        }
+
+        tx.execute(
+            "DELETE FROM playlist_draft_tracks
+             WHERE draft_id IN (SELECT id FROM playlist_drafts WHERE library_id = ?1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM playlist_index_tracks t
+                 WHERE t.library_id = ?1 AND t.track_id = playlist_draft_tracks.track_id
+               )",
+            params![&library_id],
+        )
+        .map_err(|error| format!("No se pudieron limpiar drafts huerfanos: {error}"))?;
+
+        tx.execute(
+            "UPDATE playlist_index_libraries
+             SET track_count = (
+                   SELECT COUNT(*) FROM playlist_index_tracks WHERE library_id = ?1
+                 ),
+                 playlist_count = (
+                   SELECT COUNT(*) FROM playlist_index_playlists WHERE library_id = ?1 AND node_type = '1'
+                 ),
+                 updated_at = ?2
+             WHERE id = ?1",
+            params![&library_id, &now],
+        )
+        .map_err(|error| format!("No se pudieron actualizar contadores de libreria: {error}"))?;
+
+        tx.commit()
+            .map_err(|error| format!("No se pudo confirmar eliminacion de indices: {error}"))?;
+    }
+
+    rebuild_fts(&conn)?;
+    emit_progress(
+        &app,
+        "info",
+        &format!("Indices de playlists eliminados: {}", paths.len()),
+        Some(100.0),
+        Some(library_id.clone()),
+        Some(paths.len()),
+        Some(paths.len()),
+    );
+
+    let library = get_library(&conn, &library_id)?
+        .ok_or_else(|| "No se pudo leer libreria indexada.".to_string())?;
+    let playlists = list_playlists(&conn, &library_id)?;
+    Ok(PlaylistIndexImportResponse { library, playlists })
+}
+
+#[tauri::command]
 pub fn playlist_index_playlist_tracks(
     app: AppHandle,
     library_id: String,

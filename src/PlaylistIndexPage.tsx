@@ -136,6 +136,9 @@ type PlayerState = {
 
 type PlaylistIndexTab = "index" | "search" | "playlist";
 type PlaylistIndexPlaylistStatus = "pending" | "queued" | "indexing" | "indexed";
+type DeleteIndexDialogState =
+  | { kind: "library"; library: PlaylistIndexLibrary }
+  | { kind: "playlists"; libraryId: string; playlistPaths: string[] };
 
 export function PlaylistIndexPage() {
   const { locale, t } = useI18n();
@@ -171,6 +174,7 @@ export function PlaylistIndexPage() {
   const [createDraftSheetOpen, setCreateDraftSheetOpen] = useState(false);
   const [detailTrack, setDetailTrack] = useState<PlaylistIndexTrack | null>(null);
   const [detailSheetOpen, setDetailSheetOpen] = useState(false);
+  const [deleteIndexDialog, setDeleteIndexDialog] = useState<DeleteIndexDialogState | null>(null);
 
   const audioElement = useRef<HTMLAudioElement | null>(null);
   const terminalElement = useRef<HTMLDivElement | null>(null);
@@ -202,6 +206,13 @@ export function PlaylistIndexPage() {
   const allPreviewPlaylistsSelected =
     indexablePlaylists.length > 0 &&
     selectedPreviewPlaylistPaths.size === indexablePlaylists.length;
+  const selectedIndexedPlaylistPaths = useMemo(
+    () =>
+      Array.from(selectedPreviewPlaylistPaths).filter((playlistPath) =>
+        indexedPlaylistPaths.has(playlistPath)
+      ),
+    [indexedPlaylistPaths, selectedPreviewPlaylistPaths]
+  );
   const embeddedPercent = activeLibrary && activeLibrary.track_count > 0
     ? Math.round((activeLibrary.embedded_track_count / activeLibrary.track_count) * 100)
     : 0;
@@ -239,10 +250,20 @@ export function PlaylistIndexPage() {
     try {
       const response = await invoke<PlaylistIndexLibrary[]>("playlist_index_libraries");
       setLibraries(response);
-      const nextId = selectId || activeLibraryId || response[0]?.id || "";
+      const preferredId = selectId || activeLibraryId;
+      const nextId = response.some((library) => library.id === preferredId)
+        ? preferredId
+        : response[0]?.id || "";
       setActiveLibraryId(nextId);
       if (nextId) {
         await loadLibraryDetails(nextId);
+      } else {
+        setPlaylists([]);
+        setDrafts([]);
+        setDraftTracks([]);
+        setPlaylistTracks([]);
+        setActivePlaylistPath("");
+        setActiveDraftId("");
       }
     } catch (error) {
       setErrorMessage(translateBackendMessage(locale, String(error)));
@@ -614,6 +635,75 @@ export function PlaylistIndexPage() {
     }
   }
 
+  function requestDeleteIndexedPlaylists(playlistPaths: string[]) {
+    if (!activeLibraryId || playlistPaths.length === 0) return;
+    setDeleteIndexDialog({
+      kind: "playlists",
+      libraryId: activeLibraryId,
+      playlistPaths: Array.from(new Set(playlistPaths))
+    });
+  }
+
+  function requestDeleteIndexedLibrary(library: PlaylistIndexLibrary) {
+    setDeleteIndexDialog({ kind: "library", library });
+  }
+
+  async function confirmDeleteIndex() {
+    if (!deleteIndexDialog) return;
+
+    setBusy(true);
+    setMessage("");
+    setErrorMessage("");
+
+    try {
+      if (deleteIndexDialog.kind === "library") {
+        const deletedId = await invoke<string>("playlist_index_delete_library", {
+          libraryId: deleteIndexDialog.library.id
+        });
+        if (deletedId === activeLibraryId) {
+          setXmlPreview(null);
+          setXmlPath("");
+          setSelectedPreviewPlaylistPaths(new Set());
+          setPlaylistIndexStatuses({});
+          setSearchResults([]);
+          setSelectedTrackIds(new Set());
+        }
+        setMessage(t("Indice eliminado: {name}", { name: deleteIndexDialog.library.source_name }));
+        await loadLibraries("");
+      } else {
+        const response = await invoke<PlaylistIndexImportResponse>("playlist_index_delete_playlists", {
+          libraryId: deleteIndexDialog.libraryId,
+          playlistPaths: deleteIndexDialog.playlistPaths
+        });
+        const deletedPaths = new Set(deleteIndexDialog.playlistPaths);
+        setPlaylists(response.playlists);
+        setSelectedPreviewPlaylistPaths((current) => {
+          const next = new Set(current);
+          for (const path of deletedPaths) next.delete(path);
+          return next;
+        });
+        setPlaylistIndexStatuses((current) => {
+          const next = { ...current };
+          for (const path of deletedPaths) next[path] = "pending";
+          return next;
+        });
+        if (activePlaylistPath && deletedPaths.has(activePlaylistPath)) {
+          setActivePlaylistPath("");
+          setPlaylistTracks([]);
+        }
+        setMessage(t("Indices eliminados: {count}", { count: deleteIndexDialog.playlistPaths.length }));
+        await loadLibraries(response.library.id);
+      }
+      setDeleteIndexDialog(null);
+    } catch (error) {
+      const message = translateBackendMessage(locale, String(error));
+      setErrorMessage(message);
+      appendTerminalLog({ level: "error", message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function exportDraft() {
     if (!activeDraft || !activeLibrary) return;
 
@@ -874,20 +964,29 @@ export function PlaylistIndexPage() {
             <CardContent className="overflow-y-auto">
               {libraries.length === 0 ? <EmptyRow>{t("Indexa un XML para empezar.")}</EmptyRow> : null}
               {libraries.map((library) => (
-                <button
+                <div
                   key={library.id}
-                  type="button"
                   className={cn(
-                    "grid w-full min-w-0 gap-1 border-b border-border px-3 py-2 text-left text-xs hover:bg-secondary",
+                    "grid w-full min-w-0 grid-cols-[minmax(0,1fr)_28px] items-center gap-2 border-b border-border px-3 py-2 text-left text-xs hover:bg-secondary",
                     library.id === activeLibraryId && "bg-muted"
                   )}
-                  onClick={() => void selectLibrary(library.id)}
                 >
-                  <strong className="truncate text-sm">{library.source_name}</strong>
-                  <span className="truncate text-muted-foreground" title={library.source_path}>
-                    {library.track_count} tracks · {library.playlist_count} playlists
-                  </span>
-                </button>
+                  <button type="button" className="min-w-0 text-left" onClick={() => void selectLibrary(library.id)}>
+                    <strong className="block truncate text-sm">{library.source_name}</strong>
+                    <span className="block truncate text-muted-foreground" title={library.source_path}>
+                      {library.track_count} tracks · {library.playlist_count} playlists
+                    </span>
+                  </button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    disabled={busy}
+                    title={t("Eliminar indice")}
+                    onClick={() => requestDeleteIndexedLibrary(library)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               ))}
             </CardContent>
           </Card>
@@ -951,6 +1050,17 @@ export function PlaylistIndexPage() {
                   <Button variant="secondary" size="sm" disabled={busy || !indexSourcePath || indexablePlaylists.length === 0} onClick={() => void indexAllPreviewPlaylists()}>
                     {t("Indexar todo")}
                   </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={busy || selectedIndexedPlaylistPaths.length === 0}
+                    onClick={() => requestDeleteIndexedPlaylists(selectedIndexedPlaylistPaths)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {selectedIndexedPlaylistPaths.length > 1
+                      ? t("Eliminar {count} indices", { count: selectedIndexedPlaylistPaths.length })
+                      : t("Eliminar indice")}
+                  </Button>
                 </div>
               </CardHeader>
               <CardContent className="overflow-y-auto">
@@ -978,19 +1088,32 @@ export function PlaylistIndexPage() {
                       <span className="truncate">{playlist.path}</span>
                       <strong className="text-right tabular-nums">{playlist.track_count}</strong>
                       <PlaylistIndexStatusBadge status={status} />
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        className="max-md:hidden"
-                        disabled={busy || status === "indexing"}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void indexXml(indexSourcePath, [playlist.path]);
-                        }}
-                      >
-                        <Database className="h-3.5 w-3.5" />
-                        {t("Indexar")}
-                      </Button>
+                      <div className="flex justify-end gap-1 max-md:hidden">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={busy || status === "indexing"}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void indexXml(indexSourcePath, [playlist.path]);
+                          }}
+                        >
+                          <Database className="h-3.5 w-3.5" />
+                          {t("Indexar")}
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="icon"
+                          disabled={busy || !indexedPlaylistPaths.has(playlist.path)}
+                          title={t("Eliminar indice")}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            requestDeleteIndexedPlaylists([playlist.path]);
+                          }}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
                       {status === "indexing" ? (
                         <span className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden bg-primary/15">
                           <span className="block h-full w-1/3 animate-[playlist-index-row_1s_ease-in-out_infinite] rounded-full bg-primary" />
@@ -1247,6 +1370,13 @@ export function PlaylistIndexPage() {
         onOpenFolder={(track) => void openFolder(track.source_path)}
       />
 
+      <IndexDeleteDialog
+        request={deleteIndexDialog}
+        busy={busy}
+        onCancel={() => setDeleteIndexDialog(null)}
+        onConfirm={() => void confirmDeleteIndex()}
+      />
+
       <TerminalDrawer
         logs={terminalLogs}
         expanded={terminalExpanded}
@@ -1498,6 +1628,79 @@ function PlaylistTrackDetailSheet({
           </SheetBlock>
         </div>
       </aside>
+    </div>
+  );
+}
+
+function IndexDeleteDialog({
+  request,
+  busy,
+  onCancel,
+  onConfirm
+}: {
+  request: DeleteIndexDialogState | null;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useI18n();
+  if (!request) return null;
+
+  const isLibrary = request.kind === "library";
+  const playlistCount = request.kind === "playlists" ? request.playlistPaths.length : 0;
+  const title = isLibrary
+    ? t("Eliminar libreria indexada")
+    : playlistCount > 1
+      ? t("Eliminar {count} indices", { count: playlistCount })
+      : t("Eliminar indice");
+  const description = isLibrary
+    ? t("Esto elimina el indice SQLite de esta libreria, sus playlists, vectores y drafts. No elimina archivos de audio ni modifica el XML original.")
+    : t("Esto elimina el indice SQLite de las playlists seleccionadas. No elimina archivos de audio ni modifica el XML original.");
+  const items = request.kind === "playlists" ? request.playlistPaths.slice(0, 6) : [];
+  const remaining = request.kind === "playlists" ? Math.max(0, request.playlistPaths.length - items.length) : 0;
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" role="alertdialog" aria-modal="true">
+      <div className="absolute inset-0 bg-black/45" onClick={busy ? undefined : onCancel} />
+      <section className="relative z-[85] w-full max-w-md rounded-md border border-border bg-background text-foreground shadow-2xl">
+        <header className="border-b border-border px-4 py-3">
+          <h2 className="text-base font-semibold">{title}</h2>
+          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{description}</p>
+        </header>
+        <div className="grid gap-3 px-4 py-4">
+          {isLibrary ? (
+            <div className="rounded-md border border-border bg-secondary/60 p-3 text-sm">
+              <strong className="block truncate">{request.library.source_name}</strong>
+              <span className="mt-1 block truncate text-xs text-muted-foreground" title={request.library.source_path}>
+                {request.library.source_path}
+              </span>
+            </div>
+          ) : null}
+          {items.length > 0 ? (
+            <div className="max-h-44 overflow-y-auto rounded-md border border-border bg-secondary/60 p-2">
+              {items.map((path) => (
+                <div key={path} className="truncate border-b border-border/60 px-2 py-1.5 text-xs last:border-b-0" title={path}>
+                  {path}
+                </div>
+              ))}
+              {remaining > 0 ? (
+                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
+                  {t("+ {count} mas", { count: remaining })}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <footer className="flex justify-end gap-2 border-t border-border px-4 py-3">
+          <Button variant="secondary" disabled={busy} onClick={onCancel}>
+            {t("Cancelar")}
+          </Button>
+          <Button variant="destructive" disabled={busy} onClick={onConfirm}>
+            <Trash2 className="h-4 w-4" />
+            {busy ? t("Eliminando") : title}
+          </Button>
+        </footer>
+      </section>
     </div>
   );
 }
