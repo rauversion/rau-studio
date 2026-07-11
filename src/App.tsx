@@ -45,6 +45,7 @@ import { cn } from "./lib/utils";
 import { FileConversionPage } from "./FileConversionPage";
 import { MasteringPage } from "./MasteringPage";
 import { TurnPage } from "./TurnPage";
+import packageMetadata from "../package.json";
 import type * as React from "react";
 
 type Issue = {
@@ -252,6 +253,7 @@ type AudioToolSettings = {
 type EventBridgeStatus = "checking" | "connected" | "error";
 
 const maxConcurrencyLimit = 4;
+const appVersion = packageMetadata.version;
 const themeModeKey = "aifficator.themeMode";
 const savedXmlPathKey = "aifficator.savedXmlPath";
 const recentXmlPathsKey = "aifficator.recentXmlPaths";
@@ -578,7 +580,7 @@ function SettingsPage() {
         </span>
         <div className="min-w-0">
           <h1 className="m-0 text-2xl font-semibold tracking-normal">Settings</h1>
-          <p className="mt-1 text-xs text-muted-foreground">Preferencias generales de Aifficator.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Preferencias generales de Rau Studio.</p>
         </div>
       </header>
 
@@ -1357,7 +1359,7 @@ function RekordboxConvertPage() {
   }
 
   function defaultExportPath(path: string) {
-    return path.replace(/\.xml$/i, "") + ".aifficator.aiff.xml";
+    return path.replace(/\.xml$/i, "") + ".rau-studio.aiff.xml";
   }
 
   function appendTerminalLog(log: ConversionLogEvent) {
@@ -2231,12 +2233,12 @@ function AppSidebar({
   return (
     <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col border-r border-border bg-card px-3 py-4 max-lg:static max-lg:h-auto max-lg:w-full max-lg:border-b max-lg:border-r-0">
       <div className="mb-5 flex items-center gap-3 px-2 max-lg:mb-3">
-        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-border bg-secondary text-secondary-foreground">
-          <Disc3 className="h-5 w-5" />
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-border bg-secondary">
+          <img src="/rau-logo.png" alt="" className="h-8 w-8 object-contain" />
         </span>
         <div className="min-w-0">
-          <strong className="block truncate text-sm font-semibold">Aifficator</strong>
-          <span className="block truncate text-xs text-muted-foreground">Desktop</span>
+          <strong className="block truncate text-sm font-semibold">Rau Studio</strong>
+          <span className="block truncate text-xs text-muted-foreground">v{appVersion} · Desktop</span>
         </div>
       </div>
 
@@ -2333,7 +2335,7 @@ function AppSidebar({
             variant="ghost"
             size="icon"
             className="h-7 w-7 shrink-0"
-            aria-label="Quien creo Aifficator"
+            aria-label="Quien creo Rau Studio"
             aria-expanded={creatorOpen}
             onClick={() => setCreatorOpen((current) => !current)}
           >
@@ -2343,12 +2345,29 @@ function AppSidebar({
           {creatorOpen ? (
             <div
               role="dialog"
-              aria-label="Creditos de Aifficator"
+              aria-label="Creditos de Rau Studio"
               className="absolute bottom-9 left-0 z-50 w-60 rounded-md border border-border bg-card p-3 text-xs text-card-foreground shadow-xl"
             >
-              <strong className="block text-sm">Aifficator</strong>
+              <div className="flex items-center gap-2">
+                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-border bg-secondary">
+                  <img src="/rau-logo.png" alt="" className="h-6 w-6 object-contain" />
+                </span>
+                <div className="min-w-0">
+                  <strong className="block text-sm">Rau Studio</strong>
+                  <span className="block text-[11px] text-muted-foreground">v{appVersion}</span>
+                </div>
+              </div>
               <p className="mt-1 leading-relaxed text-muted-foreground">
-                Creado por <span className="font-semibold text-foreground">Rauversion</span> para la comunidad.
+                Creado por{" "}
+                <a
+                  href="https://rauversion.com"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-semibold text-foreground underline-offset-4 hover:underline"
+                >
+                  Rauversion
+                </a>{" "}
+                para la comunidad.
               </p>
               <p className="mt-2 leading-relaxed text-muted-foreground">
                 Herramienta local para preparar audio, playlists y visuales sin depender de servicios externos.

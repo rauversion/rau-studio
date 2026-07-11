@@ -1,6 +1,6 @@
 # Importar XML generado en Rekordbox
 
-Esta guia resume solo la parte de importacion del HTML adjunto: como abrir en Rekordbox el XML exportado por Aifficator y traer sus playlists a tu libreria.
+Esta guia resume solo la parte de importacion del HTML adjunto: como abrir en Rekordbox el XML exportado por Rau Studio y traer sus playlists a tu libreria.
 
 El punto clave: el XML no contiene audio embebido. Rekordbox lee las rutas `Location` del XML, por eso los archivos originales y las carpetas `converted/` deben seguir en el mismo lugar.
 
@@ -18,7 +18,7 @@ Activa el checkbox `rekordbox xml`.
 
 ![Activar panel rekordbox xml](./rekordbox-xml-display.png)
 
-## 2. Seleccionar el XML exportado por Aifficator
+## 2. Seleccionar el XML exportado por Rau Studio
 
 Sin salir de preferencias, abre:
 
@@ -26,7 +26,7 @@ Sin salir de preferencias, abre:
 Advanced > Database
 ```
 
-En la seccion `Imported Library`, pulsa `Browse` y selecciona el XML que exportaste desde Aifficator.
+En la seccion `Imported Library`, pulsa `Browse` y selecciona el XML que exportaste desde Rau Studio.
 
 ![Seleccionar Imported Library](./rekordbox-xml-library.png)
 
@@ -45,7 +45,7 @@ Ahi deberias ver:
 
 ![Panel rekordbox xml](./rekordbox-xml-library-tab.png)
 
-Si vuelves a exportar el XML desde Aifficator, usa el boton de refrescar junto a `All Tracks` para recargarlo sin configurar todo otra vez.
+Si vuelves a exportar el XML desde Rau Studio, usa el boton de refrescar junto a `All Tracks` para recargarlo sin configurar todo otra vez.
 
 ![Icono refrescar XML](./rekordbox-refresh-icon.png)
 
@@ -62,9 +62,9 @@ Rekordbox creara la playlist dentro de tu libreria y analizara los tracks si lo 
 
 Tambien puedes importar tracks sueltos con click derecho y `Import To Collection`.
 
-## Notas para Aifficator
+## Notas para Rau Studio
 
-- El XML exportado por Aifficator mantiene la coleccion completa.
+- El XML exportado por Rau Studio mantiene la coleccion completa.
 - Los tracks no convertidos conservan su `Location` original.
 - Los tracks convertidos apuntan a `converted/*.aiff`.
 - Si mueves la musica o borras una carpeta `converted/`, Rekordbox puede mostrar archivos faltantes.

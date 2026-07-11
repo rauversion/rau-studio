@@ -23,7 +23,7 @@ jobs:
         include:
           - label: macOS Apple Silicon
             os: macos-latest
-            artifact: aifficator-macos-arm64
+            artifact: rau-studio-macos-arm64
             tauri_args: --bundles app
             rust_target: ""
             build_target_arg: ""
@@ -34,7 +34,7 @@ jobs:
               target/release/bundle/**/*.app.tar.gz
           - label: macOS Intel
             os: macos-latest
-            artifact: aifficator-macos-intel
+            artifact: rau-studio-macos-intel
             tauri_args: --bundles app
             rust_target: x86_64-apple-darwin
             build_target_arg: --target x86_64-apple-darwin
@@ -45,7 +45,7 @@ jobs:
               target/x86_64-apple-darwin/release/bundle/**/*.app.tar.gz
           - label: Windows
             os: windows-latest
-            artifact: aifficator-windows
+            artifact: rau-studio-windows
             tauri_args: --bundles nsis,msi
             rust_target: ""
             build_target_arg: ""
@@ -56,7 +56,7 @@ jobs:
               target/release/bundle/**/*.exe
           - label: Linux
             os: ubuntu-22.04
-            artifact: aifficator-linux
+            artifact: rau-studio-linux
             tauri_args: --bundles appimage,deb
             rust_target: ""
             build_target_arg: ""
@@ -110,9 +110,9 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          xattr -cr "${{ matrix.bundle_dir }}/macos/Aifficator.app"
-          codesign --force --deep --sign - "${{ matrix.bundle_dir }}/macos/Aifficator.app"
-          codesign --verify --deep --strict --verbose=2 "${{ matrix.bundle_dir }}/macos/Aifficator.app"
+          xattr -cr "${{ matrix.bundle_dir }}/macos/Rau Studio.app"
+          codesign --force --deep --sign - "${{ matrix.bundle_dir }}/macos/Rau Studio.app"
+          codesign --verify --deep --strict --verbose=2 "${{ matrix.bundle_dir }}/macos/Rau Studio.app"
 
       - name: Archive macOS app bundle
         if: runner.os == 'macOS'
@@ -121,8 +121,8 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           arch="${{ matrix.mac_artifact_arch }}"
           tar -C "${{ matrix.bundle_dir }}/macos" \
-            -czf "${{ matrix.bundle_dir }}/Aifficator_${version}_${arch}.app.tar.gz" \
-            Aifficator.app
+            -czf "${{ matrix.bundle_dir }}/RauStudio_${version}_${arch}.app.tar.gz" \
+            "Rau Studio.app"
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
@@ -168,6 +168,6 @@ jobs:
           fi
 
           gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1 || \
-            gh release create "$TAG_NAME" --repo "$GH_REPO" --title "Aifficator $TAG_NAME" --generate-notes
+            gh release create "$TAG_NAME" --repo "$GH_REPO" --title "Rau Studio $TAG_NAME" --generate-notes
 
           gh release upload "$TAG_NAME" "${files[@]}" --repo "$GH_REPO" --clobber

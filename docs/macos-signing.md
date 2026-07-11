@@ -1,6 +1,6 @@
 # Firma y notarizacion en macOS
 
-Aifficator puede compilar bundles para macOS sin certificado, pero esos builds no pasan Gatekeeper para usuarios finales. La firma ad-hoc evita bundles rotos en Apple Silicon, pero no reemplaza la firma con **Developer ID Application** ni la notarizacion de Apple.
+Rau Studio puede compilar bundles para macOS sin certificado, pero esos builds no pasan Gatekeeper para usuarios finales. La firma ad-hoc evita bundles rotos en Apple Silicon, pero no reemplaza la firma con **Developer ID Application** ni la notarizacion de Apple.
 
 ## Estado actual
 
@@ -11,9 +11,9 @@ Aifficator puede compilar bundles para macOS sin certificado, pero esos builds n
 
 ```sh
 cd ~/Downloads
-tar -xzf Aifficator_0.1.5_arm64.app.tar.gz
-xattr -dr com.apple.quarantine Aifficator.app
-open Aifficator.app
+tar -xzf RauStudio_0.1.6_arm64.app.tar.gz
+xattr -dr com.apple.quarantine "Rau Studio.app"
+open "Rau Studio.app"
 ```
 
 ## Para distribuir sin aviso de Gatekeeper

@@ -1,8 +1,8 @@
 [package]
-name = "aifficator"
-version = "0.1.5"
-description = "Convert Rekordbox playlist exports to AIFF-compatible exports"
-authors = ["Aifficator"]
+name = "rau-studio"
+version = "0.1.6"
+description = "Local audio toolkit for DJs and producers"
+authors = ["Rauversion"]
 edition = "2021"
 
 [lib]

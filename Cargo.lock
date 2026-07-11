@@ -18,26 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aifficator"
-version = "0.1.5"
-dependencies = [
- "aifficator-core",
- "base64 0.22.1",
- "chrono",
- "regex",
- "reqwest",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-shell",
- "uuid",
-]
-
-[[package]]
 name = "aifficator-core"
 version = "0.1.0"
 dependencies = [
@@ -2668,6 +2648,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core",
+]
+
+[[package]]
+name = "rau-studio"
+version = "0.1.6"
+dependencies = [
+ "aifficator-core",
+ "base64 0.22.1",
+ "chrono",
+ "regex",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-shell",
+ "uuid",
 ]
 
 [[package]]

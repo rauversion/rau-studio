@@ -103,7 +103,7 @@ Al abrir un grupo, sus archivos pasan a ser la importacion actual.
 
 ## Persistencia SQLite
 
-Todo se guarda en `aifficator.sqlite3`, dentro del directorio de datos de la app.
+Todo se guarda en SQLite local, actualmente en el archivo legacy `aifficator.sqlite3` dentro del directorio de datos de la app.
 
 Tablas principales:
 

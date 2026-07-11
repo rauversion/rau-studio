@@ -1,6 +1,6 @@
-# Aifficator
+# Rau Studio
 
-Aplicacion nativa para preparar audio para Rekordbox, convertir archivos a AIFF y experimentar con mastering local asistido por AI.
+Suite nativa local para preparar audio, convertir archivos, trabajar playlists de Rekordbox, generar masters y crear visuales para releases.
 
 El proyecto usa Tauri 2, Rust, React, TypeScript, SQLite y `ffmpeg`. La app evita modificar archivos originales: los convertidos se escriben en salidas nuevas y el historial queda guardado localmente.
 
@@ -10,7 +10,7 @@ El proyecto usa Tauri 2, Rust, React, TypeScript, SQLite y `ffmpeg`. La app evit
 - [File Importer](docs/file-importer.md): importa archivos o carpetas locales, crea grupos de trabajo, convierte a AIFF y mantiene historial en SQLite.
 - [Mastering](docs/mastering.md): genera masters AIFF con presets, metadata, cover, analisis tecnico, eventos en tiempo real y reintentos.
 - [Turn](docs/turn.md): genera videos MP4 de discos girando desde cover y audio local, con preview por rango, progreso realtime e historial.
-- [Importar XML en Rekordbox](docs/rekordbox-import/README.md): guia visual para importar el XML exportado por Aifficator.
+- [Importar XML en Rekordbox](docs/rekordbox-import/README.md): guia visual para importar el XML exportado por Rau Studio.
 - [Arquitectura](docs/architecture.md): notas tecnicas de la estructura interna.
 
 ## Principios
@@ -96,8 +96,8 @@ Opciones:
 Ejemplo:
 
 ```sh
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 ### macOS no firmado
@@ -108,16 +108,16 @@ Para probarla localmente, descomprime el `.app.tar.gz` y quita la marca de quara
 
 ```sh
 cd ~/Downloads
-tar -xzf Aifficator_0.1.5_arm64.app.tar.gz
-xattr -dr com.apple.quarantine Aifficator.app
-open Aifficator.app
+tar -xzf RauStudio_0.1.6_arm64.app.tar.gz
+xattr -dr com.apple.quarantine "Rau Studio.app"
+open "Rau Studio.app"
 ```
 
 Si ya la copiaste a `/Applications`:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/Aifficator.app
-open /Applications/Aifficator.app
+xattr -dr com.apple.quarantine "/Applications/Rau Studio.app"
+open "/Applications/Rau Studio.app"
 ```
 
 El bypass es solo para testing local. Para distribuir sin advertencias hay que firmar y notarizar; los detalles estan en [docs/macos-signing.md](docs/macos-signing.md).

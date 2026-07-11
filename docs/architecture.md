@@ -2,7 +2,7 @@
 
 ## Objetivo
 
-Aifficator toma un XML exportado desde Rekordbox, permite elegir playlists, convierte los archivos seleccionados a AIFF y genera un nuevo XML importable. Los originales no se reemplazan: cada archivo convertido queda en una carpeta `converted` dentro del mismo directorio del archivo fuente.
+Rau Studio toma un XML exportado desde Rekordbox, permite elegir playlists, convierte los archivos seleccionados a AIFF y genera un nuevo XML importable. Los originales no se reemplazan: cada archivo convertido queda en una carpeta `converted` dentro del mismo directorio del archivo fuente.
 
 Ejemplo:
 

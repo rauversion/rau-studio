@@ -1,6 +1,6 @@
 # Turn
 
-Turn genera mockups de discos girando en video MP4 desde una portada y un archivo de audio local. Esta seccion porta la idea del flujo `turn` de Rauversion, pero en Aifficator todo queda local: no se sube a ActiveStorage, no se envia email y el resultado se abre desde la carpeta del archivo generado.
+Turn genera mockups de discos girando en video MP4 desde una portada y un archivo de audio local. Esta seccion porta la idea del flujo `turn` de Rauversion, pero en Rau Studio todo queda local: no se sube a ActiveStorage, no se envia email y el resultado se abre desde la carpeta del archivo generado.
 
 ## Objetivo
 
@@ -156,7 +156,7 @@ El terminal inferior muestra eventos del job activo, incluyendo logs relevantes 
 
 ## Persistencia SQLite
 
-Todo se guarda en `aifficator.sqlite3`, dentro del directorio de datos de la app.
+Todo se guarda en SQLite local, actualmente en el archivo legacy `aifficator.sqlite3` dentro del directorio de datos de la app.
 
 Tablas principales:
 
@@ -190,7 +190,7 @@ Campos relevantes de `turn_jobs`:
 
 ## Diferencias con Rauversion
 
-| Rauversion | Aifficator |
+| Rauversion | Rau Studio |
 | --- | --- |
 | Sube archivos a ActiveStorage | Usa paths locales |
 | Encola job Rails | Encola worker local Tauri/Rust |

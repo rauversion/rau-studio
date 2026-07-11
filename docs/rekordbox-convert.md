@@ -5,7 +5,7 @@ Rekordbox Convert importa un XML exportado desde Rekordbox, permite seleccionar 
 ## Flujo
 
 1. Exporta tu libreria o playlists desde Rekordbox como XML.
-2. Abre Aifficator en **File Conversion > Rekordbox Convert**.
+2. Abre Rau Studio en **File Conversion > Rekordbox Convert**.
 3. Importa el XML.
 4. Revisa playlists, tracks y reporte.
 5. Selecciona una o varias playlists.
@@ -22,7 +22,7 @@ Guia visual de importacion: [Importar XML en Rekordbox](rekordbox-import/README.
 El XML original queda intacto. El export genera un archivo nuevo con extension sugerida:
 
 ```text
-original.aifficator.aiff.xml
+original.rau-studio.aiff.xml
 ```
 
 El export mantiene toda la coleccion del XML original:

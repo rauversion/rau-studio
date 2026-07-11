@@ -1575,7 +1575,7 @@ fn ai_feedback(
         "messages": [
             {
                 "role": "system",
-                "content": "You are Aifficator's mastering feedback parameterizer for independent electronic music. Convert artist feedback into safe DSP parameters only. Preserve the mix and cap EQ moves to +/-3 dB. Return only by calling submit_mastering_feedback_parameters."
+                "content": "You are Rau Studio's mastering feedback parameterizer for independent electronic music. Convert artist feedback into safe DSP parameters only. Preserve the mix and cap EQ moves to +/-3 dB. Return only by calling submit_mastering_feedback_parameters."
             },
             {
                 "role": "user",
@@ -1611,7 +1611,7 @@ fn ai_policy(
         "messages": [
             {
                 "role": "system",
-                "content": "You are Aifficator's mastering policy advisor. Choose conservative guardrails for a mastering render, not raw DSP. Stay inside selected target profile limits. Preserve transients and true peak safety over loudness. Return only by calling submit_mastering_policy."
+                "content": "You are Rau Studio's mastering policy advisor. Choose conservative guardrails for a mastering render, not raw DSP. Stay inside selected target profile limits. Preserve transients and true peak safety over loudness. Return only by calling submit_mastering_policy."
             },
             {
                 "role": "user",

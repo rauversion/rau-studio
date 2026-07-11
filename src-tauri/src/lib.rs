@@ -1284,5 +1284,5 @@ pub fn run() {
             turn::turn_delete_job
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Aifficator");
+        .expect("error while running Rau Studio");
 }
