@@ -42,6 +42,7 @@ import {
 } from "./components/ui/dropdown-menu";
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
 import { cn } from "./lib/utils";
+import { FileConversionPage } from "./FileConversionPage";
 import { MasteringPage } from "./MasteringPage";
 import type * as React from "react";
 
@@ -259,6 +260,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
           <Route path="/rekordbox-convert" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
           <Route path="/file-conversion" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
+          <Route path="/file-conversion/local" element={<FileConversionPage />} />
           <Route path="/file-conversion/rekordbox-convert" element={<RekordboxConvertPage />} />
           <Route path="/mastering" element={<MasteringPage />} />
           <Route
@@ -1928,6 +1930,9 @@ function AppSidebar() {
 
       <nav className="grid gap-5 max-lg:flex max-lg:gap-3 max-lg:overflow-x-auto">
         <SidebarSection title="File Conversion">
+          <SidebarLink to="/file-conversion/local" icon={<Upload className="h-4 w-4" />}>
+            File Conversion
+          </SidebarLink>
           <SidebarLink to="/file-conversion/rekordbox-convert" icon={<FileAudio2 className="h-4 w-4" />}>
             Rekordbox Convert
           </SidebarLink>

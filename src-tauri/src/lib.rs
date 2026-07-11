@@ -20,6 +20,7 @@ use std::thread;
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Emitter};
 
+mod local_conversion;
 mod mastering;
 mod settings;
 
@@ -1223,6 +1224,13 @@ pub fn run() {
             get_openai_api_key_status,
             save_openai_api_key,
             clear_openai_api_key,
+            local_conversion::local_conversion_list_items,
+            local_conversion::local_conversion_list_groups,
+            local_conversion::local_conversion_group_items,
+            local_conversion::local_conversion_add_files,
+            local_conversion::local_conversion_scan_folder,
+            local_conversion::local_conversion_convert_items,
+            local_conversion::local_conversion_delete_item,
             mastering::mastering_profiles,
             mastering::mastering_list_jobs,
             mastering::mastering_get_job,
