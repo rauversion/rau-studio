@@ -4,6 +4,9 @@ Suite nativa local para preparar audio, convertir archivos, trabajar playlists d
 
 El proyecto usa Tauri 2, Rust, React, TypeScript, SQLite y `ffmpeg`. La app evita modificar archivos originales: los convertidos se escriben en salidas nuevas y el historial queda guardado localmente.
 
+<img width="1262" height="783" alt="image" src="https://github.com/user-attachments/assets/6f9d3936-4506-4246-9ddf-35682078e9b7" />
+
+
 ## Modulos
 
 - [Rekordbox Convert](docs/rekordbox-convert.md): importa XML de Rekordbox, convierte tracks de playlists a AIFF y exporta un XML seguro.
