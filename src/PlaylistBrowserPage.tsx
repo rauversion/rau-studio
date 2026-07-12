@@ -16,6 +16,7 @@ import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { translateBackendMessage, useI18n } from "./i18n";
 import { cn } from "./lib/utils";
+import { playbackErrorMessage } from "./playback";
 
 type BrowserKind = "artist" | "album";
 type ArtistDetailTab = "tracks" | "albums";
@@ -373,7 +374,9 @@ export function PlaylistBrowserPage({ kind }: { kind: BrowserKind }) {
 
     setPlayer({ path, label, url: convertFileSrc(path) });
     window.setTimeout(() => {
-      void audioElement.current?.play();
+      void audioElement.current?.play().catch((error) => {
+        setErrorMessage(playbackErrorMessage(t, label, path, error));
+      });
     }, 30);
   }
 
@@ -456,6 +459,7 @@ export function PlaylistBrowserPage({ kind }: { kind: BrowserKind }) {
             onPlay={() => setPlayerPlaying(true)}
             onPause={() => setPlayerPlaying(false)}
             onEnded={() => setPlayerPlaying(false)}
+            onError={() => setErrorMessage(playbackErrorMessage(t, player.label, player.path))}
           />
         ) : null}
       </Card>

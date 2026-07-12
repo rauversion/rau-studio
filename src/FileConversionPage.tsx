@@ -18,6 +18,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
 import { translateBackendMessage, useI18n } from "./i18n";
 import { cn } from "./lib/utils";
+import { playbackErrorMessage } from "./playback";
 
 type LocalConversionState =
   | "pending"
@@ -679,7 +680,13 @@ export function FileConversionPage() {
               {player ? (
                 <>
                   <div className="truncate text-sm font-semibold" title={player.path}>{player.label}</div>
-                  <audio className="w-full" controls autoPlay src={player.url} />
+                  <audio
+                    className="w-full"
+                    controls
+                    autoPlay
+                    src={player.url}
+                    onError={() => setErrorMessage(playbackErrorMessage(t, player.label, player.path))}
+                  />
                   <div className="break-words font-mono text-[11px] text-muted-foreground">{player.path}</div>
                   <Button variant="secondary" onClick={() => void openFolderFor(player.path)}>
                     <FolderOpen className="h-4 w-4" />

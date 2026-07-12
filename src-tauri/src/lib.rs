@@ -779,11 +779,7 @@ fn convert_track(app: &tauri::AppHandle, track: &Track) -> ConversionItemResult 
     if let Some(parent) = target_path.parent() {
         if let Err(error) = fs::create_dir_all(parent) {
             item.status = ConversionStatus::Failed;
-            item.message = Some(settings::localized(
-                app,
-                &format!("No se pudo crear la carpeta {}: {error}", parent.display()),
-                &format!("Could not create folder {}: {error}", parent.display()),
-            ));
+            item.message = Some(system::create_dir_error_message(app, parent, &error));
             emit_conversion_progress(app, item_progress_event(&item, None, None, None));
             emit_conversion_log(
                 app,

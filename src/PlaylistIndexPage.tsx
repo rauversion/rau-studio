@@ -29,6 +29,7 @@ import {
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
 import { cn } from "./lib/utils";
 import { translateBackendMessage, useI18n } from "./i18n";
+import { playbackErrorMessage } from "./playback";
 
 type PlaylistIndexLibrary = {
   id: string;
@@ -938,7 +939,7 @@ export function PlaylistIndexPage() {
       await audioElement.current?.play();
       setPlayerPlaying(true);
     } catch (error) {
-      setErrorMessage(`${t("No se pudo reproducir")} ${label}: ${String(error)}`);
+      setErrorMessage(playbackErrorMessage(t, label, path, error));
     }
   }
 
@@ -1094,6 +1095,7 @@ export function PlaylistIndexPage() {
             onPlay={() => setPlayerPlaying(true)}
             onPause={() => setPlayerPlaying(false)}
             onEnded={() => setPlayerPlaying(false)}
+            onError={() => setErrorMessage(playbackErrorMessage(t, player.label, player.path))}
           />
         ) : null}
         <Button variant="secondary" disabled={!player} onClick={() => player && void reveal(player.path)}>

@@ -3,7 +3,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 export type Locale = "es" | "en";
 
-type TranslationValues = Record<string, string | number | null | undefined>;
+export type TranslationValues = Record<string, string | number | null | undefined>;
 
 type I18nContextValue = {
   locale: Locale;
@@ -218,6 +218,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "Referencia": "Reference",
     "Refs rotas": "Broken refs",
     "Reporte": "Report",
+    "Revisa permisos del archivo o carpeta.": "Check the file or folder permissions.",
     "Resumen general": "General summary",
     "Agregar": "Add",
     "Agregar {count} tracks": "Add {count} tracks",
@@ -329,6 +330,8 @@ const translations: Record<Locale, Record<string, string>> = {
     "Seleccionadas:": "Selected:",
     "Severidad": "Severity",
     "Si no eliges ninguna, se planifica toda la libreria.": "If none are selected, the full library is planned.",
+    "Si el archivo esta en un disco externo, permite a Rau Studio acceder a Volumenes extraibles o agregalo a Acceso total al disco en macOS. Tambien revisa que el disco no este en solo lectura.":
+      "If the file is on an external drive, allow Rau Studio to access Removable Volumes or add it to Full Disk Access on macOS. Also verify that the drive is not read-only.",
     "Sin artista": "No artist",
     "Sin album": "No album",
     "Sin albums.": "No albums.",
