@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
+  Album,
   AlertTriangle,
   ChevronRight,
   ClipboardList,
@@ -29,6 +30,7 @@ import {
   Sun,
   Trash2,
   Upload,
+  UserRound,
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -45,6 +47,7 @@ import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-dra
 import { cn } from "./lib/utils";
 import { FileConversionPage } from "./FileConversionPage";
 import { MasteringPage } from "./MasteringPage";
+import { PlaylistBrowserPage } from "./PlaylistBrowserPage";
 import { PlaylistIndexPage } from "./PlaylistIndexPage";
 import { TurnPage } from "./TurnPage";
 import { languageLabel, translate, translateBackendMessage, useI18n, type Locale } from "./i18n";
@@ -295,6 +298,8 @@ export default function App() {
           <Route path="/file-conversion/local" element={<FileConversionPage />} />
           <Route path="/file-conversion/rekordbox-convert" element={<RekordboxConvertPage />} />
           <Route path="/playlists" element={<PlaylistIndexPage />} />
+          <Route path="/playlists/artists" element={<PlaylistBrowserPage kind="artist" />} />
+          <Route path="/playlists/albums" element={<PlaylistBrowserPage kind="album" />} />
           <Route path="/turn" element={<TurnPage />} />
           <Route path="/mastering" element={<MasteringPage />} />
           <Route
@@ -2310,8 +2315,14 @@ function AppSidebar({
         </SidebarSection>
 
         <SidebarSection title={t("Playlists")}>
-          <SidebarLink to="/playlists" icon={<ListMusic className="h-4 w-4" />}>
+          <SidebarLink to="/playlists" end icon={<ListMusic className="h-4 w-4" />}>
             {t("Playlist Library")}
+          </SidebarLink>
+          <SidebarLink to="/playlists/artists" icon={<UserRound className="h-4 w-4" />}>
+            {t("Artistas")}
+          </SidebarLink>
+          <SidebarLink to="/playlists/albums" icon={<Album className="h-4 w-4" />}>
+            {t("Albums")}
           </SidebarLink>
         </SidebarSection>
 
@@ -2485,15 +2496,18 @@ function SidebarSection({ title, children }: { title: string; children: React.Re
 function SidebarLink({
   to,
   icon,
+  end,
   children
 }: {
   to: string;
   icon: React.ReactNode;
+  end?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <NavLink
       to={to}
+      end={end}
       className={({ isActive }) =>
         cn(
           "flex min-h-10 min-w-0 items-center gap-2 rounded-md px-3 text-left text-sm font-medium transition-colors",

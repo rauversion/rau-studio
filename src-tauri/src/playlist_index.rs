@@ -1,4 +1,4 @@
-use crate::settings;
+use crate::{settings, system};
 use aifficator_core::exporter::export_with_new_playlist_xml;
 use aifficator_core::rekordbox::{parse_rekordbox_xml_file, Track};
 use chrono::Utc;
@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -58,6 +59,15 @@ pub struct PlaylistIndexTrack {
     bitrate: Option<u32>,
     source_exists: bool,
     search_text: String,
+    genre: Option<String>,
+    comments: Option<String>,
+    bpm: Option<String>,
+    key: Option<String>,
+    rating: Option<String>,
+    year: Option<String>,
+    label: Option<String>,
+    date_added: Option<String>,
+    attributes: BTreeMap<String, String>,
     embedding_ready: bool,
 }
 
@@ -66,6 +76,15 @@ pub struct PlaylistSearchResult {
     track: PlaylistIndexTrack,
     score: f64,
     mode: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistIndexGroup {
+    library_id: String,
+    kind: String,
+    value: String,
+    name: String,
+    track_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -788,6 +807,41 @@ pub fn playlist_index_search_tracks(
 }
 
 #[tauri::command]
+pub fn playlist_index_track_groups(
+    app: AppHandle,
+    library_id: String,
+    kind: String,
+    query: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<PlaylistIndexGroup>, String> {
+    let conn = open_db(&app)?;
+    let limit = limit.unwrap_or(200).clamp(1, 1000);
+    list_track_groups(&conn, &library_id, &kind, query.as_deref(), limit)
+}
+
+#[tauri::command]
+pub fn playlist_index_group_tracks(
+    app: AppHandle,
+    library_id: String,
+    kind: String,
+    value: String,
+    query: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<PlaylistIndexTrack>, String> {
+    let conn = open_db(&app)?;
+    let limit = limit.unwrap_or(500).clamp(1, 3000);
+    list_group_tracks(&conn, &library_id, &kind, &value, query.as_deref(), limit)
+}
+
+#[tauri::command]
+pub fn playlist_index_track_cover(
+    app: AppHandle,
+    source_path: String,
+) -> Result<Option<String>, String> {
+    extract_track_cover(&app, &source_path)
+}
+
+#[tauri::command]
 pub async fn playlist_index_generate_embeddings(
     app: AppHandle,
     library_id: String,
@@ -1049,6 +1103,7 @@ fn init_db(conn: &Connection) -> Result<(), String> {
           bitrate INTEGER,
           source_exists INTEGER NOT NULL DEFAULT 0,
           search_text TEXT NOT NULL,
+          attributes_json TEXT NOT NULL DEFAULT '{}',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           PRIMARY KEY(library_id, track_id),
@@ -1139,7 +1194,38 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         );
         ",
     )
-    .map_err(|error| format!("No se pudo inicializar SQLite playlist index: {error}"))
+    .map_err(|error| format!("No se pudo inicializar SQLite playlist index: {error}"))?;
+
+    ensure_playlist_index_track_column(conn, "attributes_json", "TEXT NOT NULL DEFAULT '{}'")?;
+
+    Ok(())
+}
+
+fn ensure_playlist_index_track_column(
+    conn: &Connection,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(playlist_index_tracks)")
+        .map_err(|error| format!("No se pudo inspeccionar playlist_index_tracks: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| {
+            format!("No se pudieron leer columnas de playlist_index_tracks: {error}")
+        })?;
+    let columns = rows.collect::<Result<Vec<_>, _>>().map_err(|error| {
+        format!("No se pudieron mapear columnas de playlist_index_tracks: {error}")
+    })?;
+
+    if columns.iter().any(|existing| existing == column) {
+        return Ok(());
+    }
+
+    let sql = format!("ALTER TABLE playlist_index_tracks ADD COLUMN {column} {definition}");
+    conn.execute(&sql, [])
+        .map_err(|error| format!("No se pudo agregar columna {column}: {error}"))?;
+    Ok(())
 }
 
 fn rebuild_fts(conn: &Connection) -> Result<(), String> {
@@ -1171,13 +1257,19 @@ fn insert_track(
         .map(|path| path.to_string_lossy().into_owned());
     let source_exists = track.file_path.as_ref().is_some_and(|path| path.is_file());
     let search_text = track_search_text(track, playlist_paths_by_track);
+    let attributes_json = serde_json::to_string(&track.attributes).map_err(|error| {
+        format!(
+            "No se pudo serializar metadata XML del track {}: {error}",
+            track.track_id
+        )
+    })?;
 
     conn.execute(
         "INSERT INTO playlist_index_tracks (
             library_id, track_id, name, artist, album, kind, location, source_path,
             size_bytes, total_time, sample_rate, bitrate, source_exists, search_text,
-            created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+            attributes_json, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
          ON CONFLICT(library_id, track_id) DO UPDATE SET
             name = excluded.name,
             artist = excluded.artist,
@@ -1191,6 +1283,7 @@ fn insert_track(
             bitrate = excluded.bitrate,
             source_exists = excluded.source_exists,
             search_text = excluded.search_text,
+            attributes_json = excluded.attributes_json,
             updated_at = excluded.updated_at",
         params![
             library_id,
@@ -1207,6 +1300,7 @@ fn insert_track(
             track.bitrate.map(|value| value as i64),
             if source_exists { 1_i64 } else { 0_i64 },
             &search_text,
+            &attributes_json,
             now
         ],
     )
@@ -1374,7 +1468,7 @@ fn lexical_search(
     let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<PlaylistSearchResult> {
         Ok(PlaylistSearchResult {
             track: row_to_track(row)?,
-            score: row.get::<_, f64>(15)?,
+            score: row.get::<_, f64>(16)?,
             mode: "lexical".to_string(),
         })
     };
@@ -1439,6 +1533,205 @@ fn list_tracks(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("No se pudieron mapear tracks: {error}"))
     }
+}
+
+fn list_track_groups(
+    conn: &Connection,
+    library_id: &str,
+    kind: &str,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<PlaylistIndexGroup>, String> {
+    let column = track_group_column(kind)?;
+    let value_expression = format!("COALESCE(NULLIF(TRIM(t.{column}), ''), '')");
+    let query_filter = query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|_| format!("AND LOWER({value_expression}) LIKE ?2"))
+        .unwrap_or_default();
+    let limit_param = if query_filter.is_empty() { "?2" } else { "?3" };
+    let sql = format!(
+        "SELECT {value_expression} AS value, COUNT(*) AS track_count
+         FROM playlist_index_tracks t
+         WHERE t.library_id = ?1
+         {query_filter}
+         GROUP BY value
+         ORDER BY CASE WHEN value = '' THEN 1 ELSE 0 END, value COLLATE NOCASE
+         LIMIT {limit_param}"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| format!("No se pudo preparar navegador de {kind}: {error}"))?;
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<PlaylistIndexGroup> {
+        let value: String = row.get(0)?;
+        Ok(PlaylistIndexGroup {
+            library_id: library_id.to_string(),
+            kind: kind.to_string(),
+            name: track_group_name(kind, &value),
+            value,
+            track_count: i64_to_usize(row.get(1)?),
+        })
+    };
+
+    if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+        let pattern = like_pattern(query);
+        let rows = stmt
+            .query_map(params![library_id, pattern, limit as i64], map_row)
+            .map_err(|error| format!("No se pudieron leer grupos de {kind}: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudieron mapear grupos de {kind}: {error}"))
+    } else {
+        let rows = stmt
+            .query_map(params![library_id, limit as i64], map_row)
+            .map_err(|error| format!("No se pudieron leer grupos de {kind}: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudieron mapear grupos de {kind}: {error}"))
+    }
+}
+
+fn list_group_tracks(
+    conn: &Connection,
+    library_id: &str,
+    kind: &str,
+    value: &str,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<PlaylistIndexTrack>, String> {
+    let column = track_group_column(kind)?;
+    let value_expression = format!("COALESCE(NULLIF(TRIM(t.{column}), ''), '')");
+    let query_filter = query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|_| "AND LOWER(t.search_text) LIKE ?3")
+        .unwrap_or_default();
+    let limit_param = if query_filter.is_empty() { "?3" } else { "?4" };
+    let sql = format!(
+        "SELECT {}
+         FROM playlist_index_tracks t
+         WHERE t.library_id = ?1
+           AND {value_expression} = ?2
+         {query_filter}
+         ORDER BY COALESCE(t.artist, ''), COALESCE(t.album, ''), COALESCE(t.name, ''), t.track_id
+         LIMIT {limit_param}",
+        track_select_clause()
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|error| format!("No se pudo preparar tracks de {kind}: {error}"))?;
+
+    if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+        let pattern = like_pattern(query);
+        let rows = stmt
+            .query_map(
+                params![library_id, value, pattern, limit as i64],
+                row_to_track,
+            )
+            .map_err(|error| format!("No se pudieron leer tracks de {kind}: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudieron mapear tracks de {kind}: {error}"))
+    } else {
+        let rows = stmt
+            .query_map(params![library_id, value, limit as i64], row_to_track)
+            .map_err(|error| format!("No se pudieron leer tracks de {kind}: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudieron mapear tracks de {kind}: {error}"))
+    }
+}
+
+fn track_group_column(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "artist" => Ok("artist"),
+        "album" => Ok("album"),
+        _ => Err(format!("Tipo de navegador no soportado: {kind}")),
+    }
+}
+
+fn track_group_name(kind: &str, value: &str) -> String {
+    if !value.trim().is_empty() {
+        return value.to_string();
+    }
+
+    match kind {
+        "artist" => "Sin artista".to_string(),
+        "album" => "Sin album".to_string(),
+        _ => "Sin metadata".to_string(),
+    }
+}
+
+fn like_pattern(query: &str) -> String {
+    format!("%{}%", query.trim().to_ascii_lowercase())
+}
+
+fn extract_track_cover(app: &AppHandle, source_path: &str) -> Result<Option<String>, String> {
+    let source = PathBuf::from(source_path);
+    if !source.is_file() {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(&source)
+        .map_err(|error| format!("No se pudo leer metadata del audio: {error}"))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    let cache_key = stable_hash(&format!(
+        "{}:{}:{}",
+        source.to_string_lossy(),
+        metadata.len(),
+        modified
+    ));
+    let cache_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("No se pudo resolver app data dir: {error}"))?
+        .join("cover-cache");
+    fs::create_dir_all(&cache_dir)
+        .map_err(|error| format!("No se pudo crear cache de portadas: {error}"))?;
+
+    let cover_path = cache_dir.join(format!("{cache_key}.jpg"));
+    let miss_path = cache_dir.join(format!("{cache_key}.none"));
+    if cover_path.is_file() {
+        return Ok(Some(cover_path.to_string_lossy().into_owned()));
+    }
+    if miss_path.is_file() {
+        return Ok(None);
+    }
+
+    let output = system::ffmpeg_command(app)
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(&source)
+        .arg("-an")
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-q:v")
+        .arg("2")
+        .arg(&cover_path)
+        .output();
+
+    match output {
+        Ok(output)
+            if output.status.success() && cover_path.is_file() && file_has_content(&cover_path) =>
+        {
+            Ok(Some(cover_path.to_string_lossy().into_owned()))
+        }
+        _ => {
+            let _ = fs::remove_file(&cover_path);
+            let _ = fs::write(&miss_path, b"");
+            Ok(None)
+        }
+    }
+}
+
+fn file_has_content(path: &PathBuf) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false)
 }
 
 fn semantic_search(
@@ -1507,7 +1800,7 @@ fn load_embedded_tracks(
     let map_row =
         |row: &rusqlite::Row<'_>| -> rusqlite::Result<(PlaylistIndexTrack, f64, Vec<f64>)> {
             let track = row_to_track(row)?;
-            let embedding_json: String = row.get(15)?;
+            let embedding_json: String = row.get(16)?;
             let embedding = serde_json::from_str::<Vec<f64>>(&embedding_json).unwrap_or_default();
             Ok((track, 0.0, embedding))
         };
@@ -1874,6 +2167,8 @@ fn draft_tracks(conn: &Connection, draft_id: &str) -> Result<Vec<PlaylistIndexTr
 }
 
 fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistIndexTrack> {
+    let attributes = parse_track_attributes_json(row.get::<_, Option<String>>(14)?);
+
     Ok(PlaylistIndexTrack {
         library_id: row.get(0)?,
         track_id: row.get(1)?,
@@ -1889,13 +2184,23 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistIndexTrack>
         bitrate: option_i64_to_u32(row.get(11)?),
         source_exists: row.get::<_, i64>(12)? == 1,
         search_text: row.get(13)?,
-        embedding_ready: row.get::<_, i64>(14)? == 1,
+        genre: attribute_value(&attributes, &["Genre"]),
+        comments: attribute_value(&attributes, &["Comments", "Comment"]),
+        bpm: attribute_value(&attributes, &["AverageBpm", "Bpm", "BPM"]),
+        key: attribute_value(&attributes, &["Tonality", "Key"]),
+        rating: attribute_value(&attributes, &["Rating"]),
+        year: attribute_value(&attributes, &["Year"]),
+        label: attribute_value(&attributes, &["Label"]),
+        date_added: attribute_value(&attributes, &["DateAdded", "Date"]),
+        attributes,
+        embedding_ready: row.get::<_, i64>(15)? == 1,
     })
 }
 
 fn track_select_clause() -> &'static str {
     "t.library_id, t.track_id, t.name, t.artist, t.album, t.kind, t.location, t.source_path,
      t.size_bytes, t.total_time, t.sample_rate, t.bitrate, t.source_exists, t.search_text,
+     t.attributes_json,
      EXISTS(
        SELECT 1 FROM playlist_track_embeddings e
        WHERE e.library_id = t.library_id
@@ -1903,6 +2208,33 @@ fn track_select_clause() -> &'static str {
          AND e.model = 'text-embedding-3-small'
          AND e.dimensions = 512
      ) AS embedding_ready"
+}
+
+fn parse_track_attributes_json(value: Option<String>) -> BTreeMap<String, String> {
+    value
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<BTreeMap<String, String>>(json).ok())
+        .unwrap_or_default()
+}
+
+fn attribute_value(attributes: &BTreeMap<String, String>, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = attributes
+            .get(*key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    attributes.iter().find_map(|(name, value)| {
+        keys.iter()
+            .any(|key| name.eq_ignore_ascii_case(key))
+            .then(|| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 fn playlist_paths_by_track(
@@ -1937,15 +2269,25 @@ fn track_search_text(
         .get(&track.track_id)
         .map(|paths| paths.join(" | "))
         .unwrap_or_default();
+    let metadata = track
+        .attributes
+        .iter()
+        .filter_map(|(key, value)| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| format!("{key}: {value}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     format!(
-        "title: {}\nartist: {}\nalbum: {}\nkind: {}\nplaylists: {}\nlocation: {}",
+        "title: {}\nartist: {}\nalbum: {}\nkind: {}\nplaylists: {}\nlocation: {}\nmetadata:\n{}",
         parts["title"],
         parts["artist"],
         parts["album"],
         parts["kind"],
         playlists,
-        parts["location"]
+        parts["location"],
+        metadata
     )
 }
 

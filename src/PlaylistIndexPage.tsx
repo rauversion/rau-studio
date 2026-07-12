@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   ChevronRight,
+  Columns3Cog,
   Database,
   FileOutput,
   FolderOpen,
@@ -19,6 +20,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type * as React from "react";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "./components/ui/dropdown-menu";
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
 import { cn } from "./lib/utils";
 import { translateBackendMessage, useI18n } from "./i18n";
@@ -61,6 +68,15 @@ type PlaylistIndexTrack = {
   bitrate?: number | null;
   source_exists: boolean;
   search_text: string;
+  genre?: string | null;
+  comments?: string | null;
+  bpm?: string | null;
+  key?: string | null;
+  rating?: string | null;
+  year?: string | null;
+  label?: string | null;
+  date_added?: string | null;
+  attributes?: Record<string, string>;
   embedding_ready: boolean;
 };
 
@@ -139,10 +155,26 @@ type PlayerState = {
 type PlaylistIndexTab = "index" | "search" | "playlist";
 type PlaylistIndexPlaylistStatus = "pending" | "queued" | "indexing" | "indexed";
 type TrackEmbeddingStatus = "pending" | "queued" | "embedding" | "embedded";
+type TrackTableColumnKey = "artist" | "album" | "genre" | "bpm" | "key" | "year" | "label" | "comments" | "kind" | "score";
 type DeleteIndexDialogState =
   | { kind: "library"; library: PlaylistIndexLibrary }
   | { kind: "playlists"; libraryId: string; playlistPaths: string[] }
   | { kind: "tracks"; libraryId: string; tracks: PlaylistIndexTrack[] };
+
+const trackTableColumnStorageKey = "rau-studio.playlist-index.track-columns";
+const defaultTrackTableColumns: TrackTableColumnKey[] = ["artist", "album", "genre", "bpm", "key", "kind", "score"];
+const trackTableColumns: Array<{ key: TrackTableColumnKey; label: string; width: number }> = [
+  { key: "artist", label: "Artista", width: 220 },
+  { key: "album", label: "Album", width: 220 },
+  { key: "genre", label: "Genero", width: 160 },
+  { key: "bpm", label: "BPM", width: 86 },
+  { key: "key", label: "Key", width: 90 },
+  { key: "year", label: "Ano", width: 80 },
+  { key: "label", label: "Label", width: 180 },
+  { key: "comments", label: "Comentarios", width: 280 },
+  { key: "kind", label: "Formato", width: 120 },
+  { key: "score", label: "Score", width: 80 }
+];
 
 export function PlaylistIndexPage() {
   const { locale, t } = useI18n();
@@ -181,6 +213,7 @@ export function PlaylistIndexPage() {
   const [detailTrack, setDetailTrack] = useState<PlaylistIndexTrack | null>(null);
   const [detailSheetOpen, setDetailSheetOpen] = useState(false);
   const [deleteIndexDialog, setDeleteIndexDialog] = useState<DeleteIndexDialogState | null>(null);
+  const [visibleTrackTableColumns, setVisibleTrackTableColumns] = useState<Set<TrackTableColumnKey>>(() => readTrackTableColumns());
 
   const audioElement = useRef<HTMLAudioElement | null>(null);
   const terminalElement = useRef<HTMLDivElement | null>(null);
@@ -225,6 +258,12 @@ export function PlaylistIndexPage() {
       .map((result) => result.track)
       .filter((track) => selectedIds.has(track.track_id));
   }, [searchResults, selectedTrackIds]);
+  const visibleTrackColumns = useMemo(
+    () => trackTableColumns.filter((column) => visibleTrackTableColumns.has(column.key)),
+    [visibleTrackTableColumns]
+  );
+  const trackTableGridTemplate = useMemo(() => trackTableTemplate(visibleTrackColumns), [visibleTrackColumns]);
+  const trackTableMinWidth = useMemo(() => trackTableWidth(visibleTrackColumns), [visibleTrackColumns]);
   const embeddedPercent = activeLibrary && activeLibrary.track_count > 0
     ? Math.round((activeLibrary.embedded_track_count / activeLibrary.track_count) * 100)
     : 0;
@@ -262,6 +301,25 @@ export function PlaylistIndexPage() {
       for (const unlisten of unlisteners) unlisten();
     };
   }, []);
+
+  function toggleTrackTableColumn(column: TrackTableColumnKey) {
+    setVisibleTrackTableColumns((current) => {
+      const next = new Set(current);
+      if (next.has(column)) {
+        next.delete(column);
+      } else {
+        next.add(column);
+      }
+      saveTrackTableColumns(next);
+      return next;
+    });
+  }
+
+  function resetTrackTableColumns() {
+    const next = new Set(defaultTrackTableColumns);
+    saveTrackTableColumns(next);
+    setVisibleTrackTableColumns(next);
+  }
 
   async function loadLibraries(selectId?: string) {
     setErrorMessage("");
@@ -1276,6 +1334,12 @@ export function PlaylistIndexPage() {
                     </span>
                   </div>
                   <div className="flex flex-wrap items-center justify-end gap-2">
+                    <TrackColumnMenu
+                      columns={trackTableColumns}
+                      visibleColumns={visibleTrackTableColumns}
+                      onToggle={toggleTrackTableColumn}
+                      onReset={resetTrackTableColumns}
+                    />
                     <Button variant="secondary" size="sm" disabled={searchResults.length === 0} onClick={selectAllSearchResults}>
                       {selectedTrackIds.size === searchResults.length ? t("Deseleccionar") : t("Todos")}
                     </Button>
@@ -1316,22 +1380,29 @@ export function PlaylistIndexPage() {
                     </Button>
                   </div>
                 </CardHeader>
-                <CardContent className="overflow-x-hidden overflow-y-auto">
-                  <div className="playlist-index-track-grid sticky top-0 z-10 bg-secondary text-xs font-semibold text-muted-foreground">
+                <CardContent className="min-h-0 overflow-auto p-0">
+                  <div
+                    className="playlist-index-track-table-grid sticky top-0 z-10 bg-secondary text-xs font-semibold text-muted-foreground"
+                    style={{ gridTemplateColumns: trackTableGridTemplate, minWidth: trackTableMinWidth }}
+                  >
                     <span />
                     <span />
                     <span>{t("Tema")}</span>
-                    <span>{t("Artista")}</span>
-                    <span>{t("Album")}</span>
-                    <span>{t("Formato")}</span>
-                    <span>{t("Score")}</span>
-                    <span>{t("Acciones")}</span>
+                    {visibleTrackColumns.map((column) => (
+                      <span key={column.key}>{t(column.label)}</span>
+                    ))}
+                    <span className="sticky right-0 z-20 flex h-full items-center justify-end border-l border-border bg-secondary px-2">
+                      {t("Acciones")}
+                    </span>
                   </div>
                   {searchResults.length === 0 ? <EmptyRow>{t("Busca tracks indexados o deja la busqueda vacia para listar.")}</EmptyRow> : null}
                   {searchResults.map((result) => (
                     <TrackRow
                       key={`${result.track.library_id}-${result.track.track_id}`}
                       track={result.track}
+                      columns={visibleTrackColumns}
+                      gridTemplate={trackTableGridTemplate}
+                      minWidth={trackTableMinWidth}
                       selected={selectedTrackIds.has(result.track.track_id)}
                       score={scoreLabel(result)}
                       onToggle={() => toggleSearchTrack(result.track.track_id)}
@@ -1410,6 +1481,11 @@ export function PlaylistIndexPage() {
                         <div className="min-w-0">
                           <strong className="block truncate">{track.name ?? track.track_id}</strong>
                           <span className="block truncate text-muted-foreground">{track.artist ?? ""}</span>
+                          {trackMetadataSummary(track) ? (
+                            <span className="block truncate text-[11px] text-muted-foreground" title={trackMetadataSummary(track)}>
+                              {trackMetadataSummary(track)}
+                            </span>
+                          ) : null}
                         </div>
                         <TrackIndexBadges track={track} />
                         <Button variant="ghost" size="icon" title={t("Quitar")} onClick={() => void removeDraftTrack(track.track_id)}>
@@ -1531,6 +1607,9 @@ export function PlaylistIndexPage() {
 
 function TrackRow({
   track,
+  columns,
+  gridTemplate,
+  minWidth,
   selected,
   score,
   playing,
@@ -1544,6 +1623,9 @@ function TrackRow({
   onDelete
 }: {
   track: PlaylistIndexTrack;
+  columns: Array<{ key: TrackTableColumnKey; label: string; width: number }>;
+  gridTemplate: string;
+  minWidth: number;
   selected: boolean;
   score: string;
   playing: boolean;
@@ -1557,14 +1639,16 @@ function TrackRow({
   onDelete: () => void;
 }) {
   const { t } = useI18n();
+  const metadataSummary = trackMetadataSummary(track);
 
   return (
     <div
       className={cn(
-        "playlist-index-track-grid relative overflow-hidden border-b border-border text-xs",
+        "playlist-index-track-table-grid relative border-b border-border bg-background text-xs",
         !track.source_exists && "bg-red-50 dark:bg-red-950/30",
         (embeddingStatus === "queued" || embeddingStatus === "embedding") && "bg-amber-50/60 dark:bg-amber-950/20"
       )}
+      style={{ gridTemplateColumns: gridTemplate, minWidth }}
     >
       <input type="checkbox" checked={selected} onChange={onToggle} />
       <Button variant={playing ? "default" : "secondary"} size="icon" disabled={!track.source_exists || !track.source_path} onClick={onPlay}>
@@ -1572,20 +1656,31 @@ function TrackRow({
       </Button>
       <span className="flex min-w-0 items-center gap-2" title={track.name ?? track.track_id}>
         <TrackEmbeddingStatusDot status={embeddingStatus} />
-        <button
-          type="button"
-          className="min-w-0 truncate text-left font-medium underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={onDetails}
-        >
-          {track.name ?? track.track_id}
-        </button>
+        <span className="min-w-0 flex-1">
+          <button
+            type="button"
+            className="block max-w-full truncate text-left font-medium underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={onDetails}
+          >
+            {track.name ?? track.track_id}
+          </button>
+          {metadataSummary ? (
+            <span className="mt-0.5 block truncate text-[11px] leading-tight text-muted-foreground" title={metadataSummary}>
+              {metadataSummary}
+            </span>
+          ) : null}
+        </span>
         <TrackIndexBadges track={track} embeddingStatus={embeddingStatus} />
       </span>
-      <span className="truncate" title={track.artist ?? ""}>{track.artist ?? ""}</span>
-      <span className="truncate" title={track.album ?? ""}>{track.album ?? ""}</span>
-      <span className="truncate">{track.kind ?? ""}</span>
-      <span className="truncate tabular-nums">{score}</span>
-      <div className="flex justify-end gap-1">
+      {columns.map((column) => {
+        const value = trackTableColumnValue(track, column.key, score);
+        return (
+          <span key={column.key} className="truncate" title={value}>
+            {value}
+          </span>
+        );
+      })}
+      <div className="sticky right-0 z-10 flex h-full items-center justify-end gap-1 border-l border-border bg-inherit px-2">
         <Button variant="secondary" size="icon" disabled={!track.source_path} title={t("Mostrar en Finder")} onClick={onReveal}>
           <ChevronRight className="h-3.5 w-3.5" />
         </Button>
@@ -1611,6 +1706,55 @@ function TrackRow({
         </span>
       ) : null}
     </div>
+  );
+}
+
+function TrackColumnMenu({
+  columns,
+  visibleColumns,
+  onToggle,
+  onReset
+}: {
+  columns: Array<{ key: TrackTableColumnKey; label: string; width: number }>;
+  visibleColumns: Set<TrackTableColumnKey>;
+  onToggle: (column: TrackTableColumnKey) => void;
+  onReset: () => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="secondary" size="sm">
+          <Columns3Cog className="h-3.5 w-3.5" />
+          {t("Columnas")}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[220px]">
+        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">{t("Mostrar columnas")}</div>
+        {columns.map((column) => (
+          <DropdownMenuItem
+            key={column.key}
+            onSelect={(event) => {
+              event.preventDefault();
+              onToggle(column.key);
+            }}
+          >
+            <input type="checkbox" readOnly checked={visibleColumns.has(column.key)} className="h-3.5 w-3.5" />
+            <span>{t(column.label)}</span>
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuItem
+          onSelect={(event) => {
+            event.preventDefault();
+            onReset();
+          }}
+        >
+          <RefreshCcw className="h-3.5 w-3.5" />
+          {t("Restaurar columnas")}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -1760,11 +1904,20 @@ function PlaylistTrackDetailSheet({
 
   if (!open || !track) return null;
 
+  const xmlAttributes = Object.entries(track.attributes ?? {}).filter(([, value]) => String(value).trim() !== "");
   const rows: Array<[string, React.ReactNode]> = [
     ["Track ID", track.track_id],
     [t("Titulo"), track.name],
     [t("Artista"), track.artist],
     ["Album", track.album],
+    [t("Genero"), track.genre],
+    ["BPM", track.bpm],
+    ["Key", track.key],
+    [t("Ano"), track.year],
+    ["Label", track.label],
+    ["Rating", track.rating],
+    [t("Comentarios"), track.comments],
+    [t("Fecha XML"), track.date_added],
     [t("Formato"), track.kind],
     ["Location", track.location]
   ];
@@ -1806,6 +1959,16 @@ function PlaylistTrackDetailSheet({
               ))}
             </div>
           </SheetBlock>
+
+          {xmlAttributes.length > 0 ? (
+            <SheetBlock title={t("Atributos XML")}>
+              <div className="grid gap-2">
+                {xmlAttributes.map(([label, value]) => (
+                  <DetailRow key={label} label={label} value={value} />
+                ))}
+              </div>
+            </SheetBlock>
+          ) : null}
 
           <SheetBlock title={t("Rutas")}>
             <PathBlock label={t("Original")} value={track.source_path} missing={!track.source_exists} />
@@ -2000,6 +2163,8 @@ function CompactTrackRow({
   playing: boolean;
   onPlay: () => void;
 }) {
+  const metadataSummary = trackMetadataSummary(track);
+
   return (
     <div className="grid min-h-10 grid-cols-[32px_minmax(0,1fr)_96px_72px] items-center gap-2 border-b border-border px-3 text-xs">
       <Button variant={playing ? "default" : "secondary"} size="icon" disabled={!track.source_exists || !track.source_path} onClick={onPlay}>
@@ -2008,6 +2173,11 @@ function CompactTrackRow({
       <div className="min-w-0">
         <strong className="block truncate">{track.name ?? track.track_id}</strong>
         <span className="block truncate text-muted-foreground">{track.artist ?? ""}</span>
+        {metadataSummary ? (
+          <span className="block truncate text-[11px] text-muted-foreground" title={metadataSummary}>
+            {metadataSummary}
+          </span>
+        ) : null}
       </div>
       <TrackIndexBadges track={track} />
       <span className="truncate text-right text-muted-foreground">{track.kind ?? ""}</span>
@@ -2046,6 +2216,87 @@ function scoreLabel(result: PlaylistSearchResult) {
   if (result.mode === "semantic") return result.score.toFixed(3);
   if (result.mode === "lexical") return result.score.toFixed(2);
   return "-";
+}
+
+function readTrackTableColumns() {
+  if (typeof window === "undefined") return new Set(defaultTrackTableColumns);
+
+  try {
+    const raw = window.localStorage.getItem(trackTableColumnStorageKey);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!Array.isArray(parsed)) return new Set(defaultTrackTableColumns);
+
+    const allowed = new Set(trackTableColumns.map((column) => column.key));
+    const validColumns = parsed.filter((column): column is TrackTableColumnKey => allowed.has(column));
+    return new Set(validColumns.length > 0 ? validColumns : defaultTrackTableColumns);
+  } catch {
+    return new Set(defaultTrackTableColumns);
+  }
+}
+
+function saveTrackTableColumns(columns: Set<TrackTableColumnKey>) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(trackTableColumnStorageKey, JSON.stringify(Array.from(columns)));
+  } catch {
+    // Column selection is a UI preference; losing it should not block the table.
+  }
+}
+
+function trackTableTemplate(columns: Array<{ key: TrackTableColumnKey; label: string; width: number }>) {
+  return [
+    "28px",
+    "36px",
+    "minmax(520px, 1fr)",
+    ...columns.map((column) => `${column.width}px`),
+    "168px"
+  ].join(" ");
+}
+
+function trackTableWidth(columns: Array<{ key: TrackTableColumnKey; label: string; width: number }>) {
+  const baseWidth = 28 + 36 + 520 + 168;
+  const columnWidth = columns.reduce((total, column) => total + column.width, 0);
+  const gapWidth = (columns.length + 3) * 8;
+  return baseWidth + columnWidth + gapWidth;
+}
+
+function trackTableColumnValue(track: PlaylistIndexTrack, column: TrackTableColumnKey, score: string) {
+  switch (column) {
+    case "artist":
+      return track.artist ?? "";
+    case "album":
+      return track.album ?? "";
+    case "genre":
+      return track.genre ?? "";
+    case "bpm":
+      return track.bpm ?? "";
+    case "key":
+      return track.key ?? "";
+    case "year":
+      return track.year ?? "";
+    case "label":
+      return track.label ?? "";
+    case "comments":
+      return track.comments ?? "";
+    case "kind":
+      return track.kind ?? "";
+    case "score":
+      return score;
+  }
+}
+
+function trackMetadataSummary(track: PlaylistIndexTrack) {
+  return [
+    track.genre,
+    track.bpm ? `${track.bpm} BPM` : null,
+    track.key,
+    track.year,
+    track.label
+  ]
+    .map((value) => value?.trim())
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function defaultExportPath(sourcePath: string, playlistName: string) {

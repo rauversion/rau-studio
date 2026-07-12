@@ -115,6 +115,20 @@
       88px 70px 144px;
   }
 
+  .playlist-index-track-table-grid {
+    display: grid;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-height: 2.75rem;
+    padding-left: 0.625rem;
+  }
+
+  .playlist-index-track-table-grid > span,
+  .playlist-index-track-table-grid > div {
+    min-width: 0;
+  }
+
   .plan-grid {
     grid-template-columns: minmax(0, 1.1fr) 112px minmax(0, 1.45fr) 74px;
   }

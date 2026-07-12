@@ -158,12 +158,9 @@ fn export_with_new_playlist_xml_appends_rau_studio_playlist() {
   </PLAYLISTS>
 </DJ_PLAYLISTS>"#;
 
-    let exported = export_with_new_playlist_xml(
-        xml,
-        "Generated Set",
-        &["1".to_string(), "2".to_string()],
-    )
-    .unwrap();
+    let exported =
+        export_with_new_playlist_xml(xml, "Generated Set", &["1".to_string(), "2".to_string()])
+            .unwrap();
 
     assert!(exported.contains("Name=\"Rau Studio\""));
     assert!(exported.contains("Name=\"Generated Set\""));
