@@ -268,6 +268,9 @@ export function PlaylistIndexPage() {
   const embeddedPercent = activeLibrary && activeLibrary.track_count > 0
     ? Math.round((activeLibrary.embedded_track_count / activeLibrary.track_count) * 100)
     : 0;
+  const missingEmbeddingCount = activeLibrary
+    ? Math.max(0, activeLibrary.track_count - activeLibrary.embedded_track_count)
+    : 0;
   const playerProgress =
     playerDuration > 0 ? Math.min(100, (playerCurrentTime / playerDuration) * 100) : 0;
 
@@ -561,7 +564,7 @@ export function PlaylistIndexPage() {
     }
   }
 
-  async function generateEmbeddings(trackIds?: string[]) {
+  async function generateEmbeddings(trackIds?: string[], limitOverride?: number) {
     if (!activeLibraryId) return;
 
     const requestedTrackIds = Array.from(new Set((trackIds ?? []).filter(Boolean)));
@@ -588,7 +591,9 @@ export function PlaylistIndexPage() {
     try {
       const result = await invoke<PlaylistEmbeddingResult>("playlist_index_generate_embeddings", {
         libraryId: activeLibraryId,
-        limit: requestedTrackIds.length > 0 ? requestedTrackIds.length : 2000,
+        limit: requestedTrackIds.length > 0
+          ? requestedTrackIds.length
+          : limitOverride ?? activeLibrary?.track_count ?? 2000,
         trackIds: requestedTrackIds.length > 0 ? requestedTrackIds : null
       });
       if (requestedTrackIds.length > 0) {
@@ -1017,6 +1022,21 @@ export function PlaylistIndexPage() {
             <Upload className="h-4 w-4" />
             {t("Elegir XML")}
           </Button>
+          <InfoPopover
+            title={t("Indexar vectores")}
+            body={t("Genera embeddings de metadata de tracks con OpenAI y los guarda en SQLite local. No sube audio; solo texto como titulo, artista, album, playlists y location.")}
+          >
+            <Button
+              variant="secondary"
+              disabled={busy || !activeLibraryId || missingEmbeddingCount === 0}
+              onClick={() => void generateEmbeddings(undefined, activeLibrary?.track_count)}
+            >
+              <Sparkles className="h-4 w-4" />
+              {missingEmbeddingCount > 0
+                ? t("Indexar {count} vectores", { count: missingEmbeddingCount })
+                : t("Vectores listos")}
+            </Button>
+          </InfoPopover>
           <Button variant="secondary" onClick={() => void loadLibraries()} disabled={busy}>
             <RefreshCcw className="h-4 w-4" />
             {t("Refrescar")}

@@ -200,13 +200,24 @@ pub struct PlaylistCopilotRequest {
     library_id: String,
     prompt: String,
     target_count: Option<usize>,
+    session_id: Option<String>,
+    mode: Option<String>,
+    language: Option<String>,
+    answered_question_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaylistCopilotResponse {
+    session_id: String,
+    candidate_set_id: String,
     message: String,
     interpreted: PlaylistCopilotInterpretation,
     questions: Vec<String>,
+    guided_questions: Vec<PlaylistCopilotQuestion>,
+    steps: Vec<PlaylistCopilotStep>,
+    reasoning_summary: Vec<String>,
+    title_suggestions: Vec<PlaylistCopilotTitleSuggestion>,
+    coverage: PlaylistCopilotCoverage,
     candidates: Vec<PlaylistCopilotCandidate>,
     used_openai: bool,
 }
@@ -216,6 +227,46 @@ pub struct PlaylistCopilotCandidate {
     track: PlaylistIndexTrack,
     score: f64,
     reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistCopilotStep {
+    label: String,
+    status: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistCopilotQuestion {
+    id: String,
+    question: String,
+    options: Vec<PlaylistCopilotQuestionOption>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistCopilotQuestionOption {
+    label: String,
+    value: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistCopilotTitleSuggestion {
+    title: String,
+    rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistCopilotCoverage {
+    track_count: usize,
+    source_missing_count: usize,
+    bpm_min: Option<f64>,
+    bpm_max: Option<f64>,
+    bpm_average: Option<f64>,
+    genres: Vec<TaxonomyCount>,
+    keys: Vec<TaxonomyCount>,
+    formats: Vec<TaxonomyCount>,
+    top_artists: Vec<TaxonomyCount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1329,6 +1380,51 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_playlist_draft_tracks_position
           ON playlist_draft_tracks(draft_id, position);
 
+        CREATE TABLE IF NOT EXISTS playlist_copilot_sessions (
+          id TEXT PRIMARY KEY,
+          library_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(library_id) REFERENCES playlist_index_libraries(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_copilot_sessions_library
+          ON playlist_copilot_sessions(library_id, updated_at);
+
+        CREATE TABLE IF NOT EXISTS playlist_copilot_messages (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES playlist_copilot_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_copilot_messages_session
+          ON playlist_copilot_messages(session_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS playlist_copilot_candidate_sets (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          interpretation_json TEXT NOT NULL,
+          reasoning_json TEXT NOT NULL,
+          coverage_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(session_id) REFERENCES playlist_copilot_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_copilot_candidate_sets_session
+          ON playlist_copilot_candidate_sets(session_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS playlist_copilot_candidate_tracks (
+          candidate_set_id TEXT NOT NULL,
+          track_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          score REAL NOT NULL,
+          reasons_json TEXT NOT NULL,
+          PRIMARY KEY(candidate_set_id, track_id),
+          FOREIGN KEY(candidate_set_id) REFERENCES playlist_copilot_candidate_sets(id) ON DELETE CASCADE
+        );
+
         CREATE VIRTUAL TABLE IF NOT EXISTS playlist_track_fts USING fts5(
           library_id UNINDEXED,
           track_id UNINDEXED,
@@ -2356,6 +2452,88 @@ fn playlist_copilot_generate_blocking(
     interpreted.target_count = Some(target_count);
     interpreted = normalize_copilot_interpretation(interpreted);
 
+    let guided_mode = request.mode.as_deref() == Some("guided");
+    let english = copilot_uses_english(request.language.as_deref());
+    let answered_question_ids = request.answered_question_ids.clone().unwrap_or_default();
+    let planned_guided_questions = playlist_copilot_guided_questions(&interpreted, &profile, english);
+    if guided_mode {
+        if let Some(next_question) =
+            next_unanswered_copilot_question(&planned_guided_questions, &answered_question_ids)
+        {
+            let candidates = Vec::<PlaylistCopilotCandidate>::new();
+            let coverage = playlist_copilot_coverage(&candidates);
+            let reasoning_summary = if english {
+                vec![
+                    "I am collecting the playlist brief one decision at a time before searching SQLite."
+                        .to_string(),
+                    format!(
+                        "{} guided decision(s) captured, next decision: {}.",
+                        answered_question_ids.len(),
+                        next_question.question
+                    ),
+                ]
+            } else {
+                vec![
+                    "Estoy reuniendo el brief de la playlist una decision a la vez antes de buscar en SQLite."
+                        .to_string(),
+                    format!(
+                        "{} decision(es) guiadas capturadas; siguiente decision: {}.",
+                        answered_question_ids.len(),
+                        next_question.question
+                    ),
+                ]
+            };
+            let steps = playlist_copilot_brief_steps(
+                &profile,
+                &interpreted,
+                &answered_question_ids,
+                &next_question,
+                used_openai,
+                english,
+            );
+            let mut message = if english {
+                format!(
+                    "I am going step by step. Before searching tracks I need to define: {}",
+                    next_question.question
+                )
+            } else {
+                format!(
+                    "Voy paso a paso. Antes de buscar tracks necesito definir: {}",
+                    next_question.question
+                )
+            };
+            if let Some(error) = openai_error {
+                message.push_str(&format!(" OpenAI no respondio correctamente: {error}"));
+            }
+            let (session_id, candidate_set_id) = persist_playlist_copilot_run(
+                &conn,
+                &request.library_id,
+                request.session_id.as_deref(),
+                &prompt,
+                &message,
+                &interpreted,
+                &reasoning_summary,
+                &coverage,
+                &candidates,
+            )?;
+
+            return Ok(PlaylistCopilotResponse {
+                session_id,
+                candidate_set_id,
+                message,
+                interpreted,
+                questions: Vec::new(),
+                guided_questions: vec![next_question],
+                steps,
+                reasoning_summary,
+                title_suggestions: Vec::new(),
+                coverage,
+                candidates,
+                used_openai,
+            });
+        }
+    }
+
     let semantic_scores = if api_key.is_some() && tracks.iter().any(|track| track.embedding_ready) {
         playlist_copilot_semantic_scores(&app, &conn, &request.library_id, &prompt)
     } else {
@@ -2368,16 +2546,42 @@ fn playlist_copilot_generate_blocking(
         target_count,
         &semantic_scores,
     );
-    let questions = playlist_copilot_questions(&interpreted, candidates.len());
+    let coverage = playlist_copilot_coverage(&candidates);
+    let questions = if guided_mode {
+        Vec::new()
+    } else {
+        playlist_copilot_questions(&interpreted, candidates.len())
+    };
+    let guided_questions = if guided_mode {
+        Vec::new()
+    } else {
+        playlist_copilot_guided_questions(&interpreted, &profile, english)
+    };
+    let reasoning_summary = playlist_copilot_reasoning_summary(
+        &interpreted,
+        &coverage,
+        &candidates,
+        used_openai,
+        !semantic_scores.is_empty(),
+    );
+    let steps = playlist_copilot_steps(
+        &profile,
+        &interpreted,
+        &coverage,
+        &candidates,
+        used_openai,
+        !semantic_scores.is_empty(),
+    );
+    let title_suggestions = playlist_copilot_title_suggestions(&prompt, &interpreted, &coverage);
     let mut message = if used_openai {
         format!(
-            "Interprete el brief con OpenAI y encontre {} candidato(s) en {}.",
+            "Interprete el brief con OpenAI, revise SQLite y arme {} candidato(s) en {}.",
             candidates.len(),
             library.source_name
         )
     } else {
         format!(
-            "Use ranking local y encontre {} candidato(s) en {}.",
+            "Use ranking local por pasos y arme {} candidato(s) en {}.",
             candidates.len(),
             library.source_name
         )
@@ -2385,11 +2589,29 @@ fn playlist_copilot_generate_blocking(
     if let Some(error) = openai_error {
         message.push_str(&format!(" OpenAI no respondio correctamente: {error}"));
     }
+    let (session_id, candidate_set_id) = persist_playlist_copilot_run(
+        &conn,
+        &request.library_id,
+        request.session_id.as_deref(),
+        &prompt,
+        &message,
+        &interpreted,
+        &reasoning_summary,
+        &coverage,
+        &candidates,
+    )?;
 
     Ok(PlaylistCopilotResponse {
+        session_id,
+        candidate_set_id,
         message,
         interpreted,
         questions,
+        guided_questions,
+        steps,
+        reasoning_summary,
+        title_suggestions,
+        coverage,
         candidates,
         used_openai,
     })
@@ -2420,6 +2642,748 @@ fn playlist_copilot_profile(tracks: &[PlaylistIndexTrack]) -> PlaylistCopilotPro
         bpm_min,
         bpm_max,
     }
+}
+
+fn playlist_copilot_coverage(candidates: &[PlaylistCopilotCandidate]) -> PlaylistCopilotCoverage {
+    let mut genre_counts = BTreeMap::<String, usize>::new();
+    let mut key_counts = BTreeMap::<String, usize>::new();
+    let mut format_counts = BTreeMap::<String, usize>::new();
+    let mut artist_counts = BTreeMap::<String, usize>::new();
+    let mut source_missing_count = 0_usize;
+    let mut bpm_known_count = 0_usize;
+    let mut bpm_sum = 0.0_f64;
+    let mut bpm_min: Option<f64> = None;
+    let mut bpm_max: Option<f64> = None;
+
+    for candidate in candidates {
+        let track = &candidate.track;
+        increment_count(&mut genre_counts, taxonomy_value(track.genre.as_deref()));
+        increment_count(&mut key_counts, taxonomy_value(track.key.as_deref()));
+        increment_count(&mut format_counts, taxonomy_value(track.kind.as_deref()));
+        increment_count(&mut artist_counts, taxonomy_value(track.artist.as_deref()));
+        if !track.source_exists {
+            source_missing_count += 1;
+        }
+        if let Some(bpm) = track_bpm_value(track) {
+            bpm_known_count += 1;
+            bpm_sum += bpm;
+            bpm_min = Some(bpm_min.map_or(bpm, |current| current.min(bpm)));
+            bpm_max = Some(bpm_max.map_or(bpm, |current| current.max(bpm)));
+        }
+    }
+
+    PlaylistCopilotCoverage {
+        track_count: candidates.len(),
+        source_missing_count,
+        bpm_min,
+        bpm_max,
+        bpm_average: (bpm_known_count > 0).then_some(bpm_sum / bpm_known_count as f64),
+        genres: counts_to_taxonomy("genre", &genre_counts, "Sin genero", 8, false),
+        keys: counts_to_taxonomy("key", &key_counts, "Sin key", 10, false),
+        formats: counts_to_taxonomy("format", &format_counts, "Formato desconocido", 8, false),
+        top_artists: counts_to_taxonomy("artist", &artist_counts, "Sin artista", 10, false),
+    }
+}
+
+fn playlist_copilot_steps(
+    profile: &PlaylistCopilotProfile,
+    interpreted: &PlaylistCopilotInterpretation,
+    coverage: &PlaylistCopilotCoverage,
+    candidates: &[PlaylistCopilotCandidate],
+    used_openai: bool,
+    used_vectors: bool,
+) -> Vec<PlaylistCopilotStep> {
+    vec![
+        PlaylistCopilotStep {
+            label: "Library scan".to_string(),
+            status: "done".to_string(),
+            detail: format!(
+                "Read {} indexed tracks, {} genre signals and {} key signals from SQLite.",
+                profile.track_count,
+                profile.genres.len(),
+                profile.keys.len()
+            ),
+        },
+        PlaylistCopilotStep {
+            label: "Brief interpretation".to_string(),
+            status: "done".to_string(),
+            detail: if used_openai {
+                "OpenAI structured the brief; local rules normalized the filters.".to_string()
+            } else {
+                "Local parser inferred BPM, genre, artist, key, mood and exclusions.".to_string()
+            },
+        },
+        PlaylistCopilotStep {
+            label: "Search tools".to_string(),
+            status: "done".to_string(),
+            detail: if used_vectors {
+                "Combined metadata scoring with available vector similarity.".to_string()
+            } else {
+                "Used local SQLite metadata, text terms, BPM and key matching.".to_string()
+            },
+        },
+        PlaylistCopilotStep {
+            label: "Ranking and diversity".to_string(),
+            status: "done".to_string(),
+            detail: format!(
+                "Ranked candidates, softened repeated artists and kept {} selected tracks.",
+                candidates.len()
+            ),
+        },
+        PlaylistCopilotStep {
+            label: "Coverage check".to_string(),
+            status: if coverage.source_missing_count > 0 {
+                "warning".to_string()
+            } else {
+                "done".to_string()
+            },
+            detail: playlist_copilot_coverage_sentence(coverage, interpreted),
+        },
+    ]
+}
+
+fn playlist_copilot_brief_steps(
+    profile: &PlaylistCopilotProfile,
+    interpreted: &PlaylistCopilotInterpretation,
+    answered_question_ids: &[String],
+    next_question: &PlaylistCopilotQuestion,
+    used_openai: bool,
+    english: bool,
+) -> Vec<PlaylistCopilotStep> {
+    vec![
+        PlaylistCopilotStep {
+            label: if english { "Library scan" } else { "Lectura de libreria" }.to_string(),
+            status: "done".to_string(),
+            detail: if english {
+                format!(
+                    "Read {} indexed tracks and prepared local genre, artist, key and BPM signals.",
+                    profile.track_count
+                )
+            } else {
+                format!(
+                    "Lei {} tracks indexados y prepare senales locales de genero, artista, key y BPM.",
+                    profile.track_count
+                )
+            },
+        },
+        PlaylistCopilotStep {
+            label: if english { "Brief interpretation" } else { "Interpretacion del brief" }
+                .to_string(),
+            status: "done".to_string(),
+            detail: if used_openai && english {
+                "Interpreted the conversation with OpenAI before asking the next question."
+                    .to_string()
+            } else if used_openai {
+                "Interprete la conversacion con OpenAI antes de preguntar el siguiente paso."
+                    .to_string()
+            } else if english {
+                "Interpreted the conversation with local metadata matching before asking the next question."
+                    .to_string()
+            } else {
+                "Interprete la conversacion con metadata local antes de preguntar el siguiente paso."
+                    .to_string()
+            },
+        },
+        PlaylistCopilotStep {
+            label: if english { "Guided brief" } else { "Brief guiado" }.to_string(),
+            status: "warning".to_string(),
+            detail: if english {
+                format!(
+                    "Waiting for one answer: {}. Captured {} decision(s) so far.",
+                    next_question.question,
+                    answered_question_ids.len()
+                )
+            } else {
+                format!(
+                    "Esperando una respuesta: {}. He capturado {} decision(es) hasta ahora.",
+                    next_question.question,
+                    answered_question_ids.len()
+                )
+            },
+        },
+        PlaylistCopilotStep {
+            label: if english { "Search" } else { "Busqueda" }.to_string(),
+            status: "warning".to_string(),
+            detail: if english {
+                "Paused candidate ranking until the guided brief has enough context."
+            } else {
+                "Pause el ranking de candidatos hasta que el brief guiado tenga suficiente contexto."
+            }
+            .to_string(),
+        },
+        PlaylistCopilotStep {
+            label: if english { "Current signals" } else { "Senales actuales" }.to_string(),
+            status: "done".to_string(),
+            detail: format!(
+                "{}: {}; {}: {}; BPM: {}.",
+                if english { "Genres" } else { "Generos" },
+                interpreted.genres.join(", "),
+                if english { "artists" } else { "artistas" },
+                interpreted.artists.join(", "),
+                match (interpreted.bpm_min, interpreted.bpm_max) {
+                    (Some(min), Some(max)) => format!("{min:.0}-{max:.0}"),
+                    (Some(min), None) => format!("{min:.0}+"),
+                    (None, Some(max)) if english => format!("up to {max:.0}"),
+                    (None, Some(max)) => format!("hasta {max:.0}"),
+                    (None, None) if english => "not set".to_string(),
+                    (None, None) => "sin definir".to_string(),
+                }
+            ),
+        },
+    ]
+}
+
+fn playlist_copilot_reasoning_summary(
+    interpreted: &PlaylistCopilotInterpretation,
+    coverage: &PlaylistCopilotCoverage,
+    candidates: &[PlaylistCopilotCandidate],
+    used_openai: bool,
+    used_vectors: bool,
+) -> Vec<String> {
+    let mut summary = Vec::new();
+    summary.push(if used_openai {
+        "The brief was interpreted with OpenAI, then normalized and executed against local SQLite data.".to_string()
+    } else {
+        "The brief was interpreted locally, so no AI request was required for planning.".to_string()
+    });
+    if used_vectors {
+        summary.push(
+            "Vector similarity was available and boosted tracks semantically close to the prompt."
+                .to_string(),
+        );
+    }
+    if let (Some(min), Some(max)) = (interpreted.bpm_min, interpreted.bpm_max) {
+        summary.push(format!(
+            "BPM matching prioritized tracks between {min:.0} and {max:.0}."
+        ));
+    }
+    if !interpreted.genres.is_empty() {
+        summary.push(format!(
+            "Genre matching prioritized: {}.",
+            interpreted.genres.join(", ")
+        ));
+    }
+    if !interpreted.keys.is_empty() {
+        summary.push(format!(
+            "Key matching prioritized: {}.",
+            interpreted.keys.join(", ")
+        ));
+    }
+    if coverage.source_missing_count > 0 {
+        summary.push(format!(
+            "{} candidate(s) have missing source files and should be reviewed before export.",
+            coverage.source_missing_count
+        ));
+    }
+    if let Some(top) = candidates.first() {
+        summary.push(format!(
+            "Top candidate: {} because {}.",
+            top.track.name.as_deref().unwrap_or(&top.track.track_id),
+            top.reasons
+                .first()
+                .map(String::as_str)
+                .unwrap_or("it matched the strongest metadata signals")
+        ));
+    }
+    summary
+}
+
+fn playlist_copilot_guided_questions(
+    interpreted: &PlaylistCopilotInterpretation,
+    profile: &PlaylistCopilotProfile,
+    english: bool,
+) -> Vec<PlaylistCopilotQuestion> {
+    let mut questions = Vec::new();
+
+    if interpreted.genres.is_empty()
+        && interpreted.artists.is_empty()
+        && interpreted.mood.is_none()
+        && interpreted.energy.is_none()
+    {
+        let first_genre = profile
+            .genres
+            .first()
+            .cloned()
+            .unwrap_or_else(|| {
+                if english {
+                    "the strongest local genre cluster".to_string()
+                } else {
+                    "el cluster de genero local mas fuerte".to_string()
+                }
+            });
+        let second_genre = profile
+            .genres
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| {
+                if english {
+                    "a contrasting but compatible direction".to_string()
+                } else {
+                    "una direccion contrastante pero compatible".to_string()
+                }
+            });
+        questions.push(PlaylistCopilotQuestion {
+            id: "style_focus".to_string(),
+            question: if english {
+                "What musical direction should I prioritize?"
+            } else {
+                "Que direccion musical deberia priorizar?"
+            }
+            .to_string(),
+            options: if english {
+                vec![
+                    copilot_option(
+                        &format!("Lean into {first_genre}"),
+                        &format!(
+                            "Prioritize {first_genre} as the main musical direction for the playlist."
+                        ),
+                        "Uses a strong genre cluster from your indexed library.",
+                    ),
+                    copilot_option(
+                        &format!("Explore {second_genre}"),
+                        &format!(
+                            "Explore {second_genre} while keeping the playlist coherent and mixable."
+                        ),
+                        "Keeps the brief focused but opens a second lane.",
+                    ),
+                    copilot_option(
+                        "Mood first",
+                        "Prioritize mood, energy and flow over strict genre matching.",
+                        "Good when the playlist is about a feeling more than a genre.",
+                    ),
+                ]
+            } else {
+                vec![
+                    copilot_option(
+                        &format!("Ir hacia {first_genre}"),
+                        &format!(
+                            "Prioriza {first_genre} como direccion musical principal de la playlist."
+                        ),
+                        "Usa un cluster de genero fuerte de tu libreria indexada.",
+                    ),
+                    copilot_option(
+                        &format!("Explorar {second_genre}"),
+                        &format!(
+                            "Explora {second_genre} manteniendo la playlist coherente y mezclable."
+                        ),
+                        "Mantiene el brief enfocado pero abre una segunda direccion.",
+                    ),
+                    copilot_option(
+                        "Primero el mood",
+                        "Prioriza mood, energia y flujo por sobre una coincidencia estricta de genero.",
+                        "Sirve cuando la playlist va mas por sensacion que por genero.",
+                    ),
+                ]
+            },
+        });
+    }
+
+    questions.push(PlaylistCopilotQuestion {
+        id: "set_shape".to_string(),
+        question: if english {
+            "What shape should the playlist have?"
+        } else {
+            "Que forma deberia tener la playlist?"
+        }
+        .to_string(),
+        options: if english {
+            vec![
+                copilot_option(
+                    "Slow build",
+                    "Make the set a slow energy build, starting restrained and getting more intense near the end.",
+                    "Good for opening sets and long transitions.",
+                ),
+                copilot_option(
+                    "Flat warmup",
+                    "Keep the playlist as a consistent warmup with controlled energy and no peak-time tracks.",
+                    "Keeps the room stable instead of pushing too early.",
+                ),
+                copilot_option(
+                    "Energy ramp",
+                    "Build a clear energy ramp with stronger tracks in the last third.",
+                    "Useful when preparing a handoff into a harder set.",
+                ),
+            ]
+        } else {
+            vec![
+                copilot_option(
+                    "Construccion lenta",
+                    "Arma una subida de energia lenta, partiendo contenida y subiendo intensidad hacia el final.",
+                    "Bueno para openings y transiciones largas.",
+                ),
+                copilot_option(
+                    "Warmup estable",
+                    "Mantiene la playlist como warmup consistente, energia controlada y sin tracks peak-time.",
+                    "Mantiene la pista estable sin empujar demasiado temprano.",
+                ),
+                copilot_option(
+                    "Rampa de energia",
+                    "Construye una rampa clara con tracks mas fuertes en el ultimo tercio.",
+                    "Util para preparar una entrega hacia un set mas fuerte.",
+                ),
+            ]
+        },
+    });
+
+    if interpreted.keys.is_empty() {
+        questions.push(PlaylistCopilotQuestion {
+            id: "harmony".to_string(),
+            question: if english {
+                "How strict should harmonic compatibility be?"
+            } else {
+                "Que tan estricta debe ser la compatibilidad armonica?"
+            }
+            .to_string(),
+            options: if english {
+                vec![
+                    copilot_option(
+                        "Strict key flow",
+                        "Prioritize a strict harmonic key flow and remove tracks that break the key cluster.",
+                        "Best when key metadata is reliable.",
+                    ),
+                    copilot_option(
+                        "Loose key flow",
+                        "Use key as a soft preference, but keep strong genre and energy matches.",
+                        "Balanced for imperfect Rekordbox key analysis.",
+                    ),
+                    copilot_option(
+                        "Ignore key",
+                        "Ignore key compatibility and focus on mood, genre, BPM and artist flow.",
+                        "Useful when key metadata is incomplete.",
+                    ),
+                ]
+            } else {
+                vec![
+                    copilot_option(
+                        "Key estricta",
+                        "Prioriza un flujo armonico estricto y elimina tracks que rompan el cluster de key.",
+                        "Mejor cuando la metadata de key es confiable.",
+                    ),
+                    copilot_option(
+                        "Key flexible",
+                        "Usa key como preferencia suave, manteniendo matches fuertes de genero y energia.",
+                        "Balanceado para analisis imperfecto de Rekordbox.",
+                    ),
+                    copilot_option(
+                        "Ignorar key",
+                        "Ignora compatibilidad armonica y enfocate en mood, genero, BPM y flujo de artistas.",
+                        "Util cuando la metadata de key esta incompleta.",
+                    ),
+                ]
+            },
+        });
+    }
+
+    questions.push(PlaylistCopilotQuestion {
+        id: "discovery".to_string(),
+        question: if english {
+            "Should the assistant favor known anchors or discoveries?"
+        } else {
+            "Deberia favorecer anclas conocidas o descubrimientos?"
+        }
+        .to_string(),
+        options: if english {
+            vec![
+                copilot_option(
+                    "Balanced",
+                    "Balance familiar artists with deeper discoveries and avoid overusing one artist.",
+                    "A reliable default for exportable playlists.",
+                ),
+                copilot_option(
+                    "More known artists",
+                    "Favor familiar artists and labels that already appear often in the library.",
+                    "Makes the result feel safer and more recognizable.",
+                ),
+                copilot_option(
+                    "Discovery mode",
+                    "Favor lesser-used artists and hidden tracks while keeping the same musical brief.",
+                    "Better for finding material outside the obvious picks.",
+                ),
+            ]
+        } else {
+            vec![
+                copilot_option(
+                    "Balanceado",
+                    "Balancea artistas familiares con descubrimientos profundos y evita repetir demasiado un artista.",
+                    "Default confiable para playlists exportables.",
+                ),
+                copilot_option(
+                    "Mas conocidos",
+                    "Favorece artistas y labels familiares que ya aparecen seguido en la libreria.",
+                    "Hace que el resultado se sienta mas seguro y reconocible.",
+                ),
+                copilot_option(
+                    "Modo descubrimiento",
+                    "Favorece artistas menos usados y tracks ocultos manteniendo el mismo brief musical.",
+                    "Mejor para encontrar material fuera de lo obvio.",
+                ),
+            ]
+        },
+    });
+
+    if interpreted.bpm_min.is_none() && interpreted.bpm_max.is_none() {
+        questions.push(PlaylistCopilotQuestion {
+            id: "tempo".to_string(),
+            question: if english {
+                "Should tempo be constrained?"
+            } else {
+                "Deberiamos acotar el tempo?"
+            }
+            .to_string(),
+            options: if english {
+                vec![
+                    copilot_option(
+                        "Tight BPM range",
+                        "Constrain the playlist to a tight BPM range around the strongest tempo cluster.",
+                        "Makes mixing easier.",
+                    ),
+                    copilot_option(
+                        "Flexible tempo",
+                        "Allow a flexible BPM range if mood and genre match strongly.",
+                        "Finds better musical matches with looser mixing constraints.",
+                    ),
+                ]
+            } else {
+                vec![
+                    copilot_option(
+                        "Rango BPM cerrado",
+                        "Acota la playlist a un rango BPM estrecho cerca del cluster de tempo mas fuerte.",
+                        "Hace la mezcla mas facil.",
+                    ),
+                    copilot_option(
+                        "Tempo flexible",
+                        "Permite un rango BPM flexible si mood y genero matchean fuerte.",
+                        "Encuentra mejores matches musicales con restricciones mas abiertas.",
+                    ),
+                ]
+            },
+        });
+    }
+
+    questions.truncate(5);
+    questions
+}
+
+fn copilot_uses_english(language: Option<&str>) -> bool {
+    language
+        .map(|value| value.eq_ignore_ascii_case("en"))
+        .unwrap_or(false)
+}
+
+fn next_unanswered_copilot_question(
+    questions: &[PlaylistCopilotQuestion],
+    answered_question_ids: &[String],
+) -> Option<PlaylistCopilotQuestion> {
+    questions
+        .iter()
+        .find(|question| !answered_question_ids.iter().any(|answered| answered == &question.id))
+        .cloned()
+}
+
+fn copilot_option(label: &str, value: &str, description: &str) -> PlaylistCopilotQuestionOption {
+    PlaylistCopilotQuestionOption {
+        label: label.to_string(),
+        value: value.to_string(),
+        description: description.to_string(),
+    }
+}
+
+fn playlist_copilot_title_suggestions(
+    prompt: &str,
+    interpreted: &PlaylistCopilotInterpretation,
+    coverage: &PlaylistCopilotCoverage,
+) -> Vec<PlaylistCopilotTitleSuggestion> {
+    let mood = interpreted
+        .mood
+        .as_deref()
+        .or(interpreted.energy.as_deref())
+        .unwrap_or("Session");
+    let genre = interpreted
+        .genres
+        .first()
+        .cloned()
+        .or_else(|| coverage.genres.first().map(|item| item.name.clone()))
+        .unwrap_or_else(|| "Selections".to_string());
+    let bpm = match (coverage.bpm_min, coverage.bpm_max) {
+        (Some(min), Some(max)) => format!("{min:.0}-{max:.0} BPM"),
+        _ => "Open Tempo".to_string(),
+    };
+    let compact_prompt = prompt
+        .split_whitespace()
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    vec![
+        PlaylistCopilotTitleSuggestion {
+            title: format!("{genre} {mood}"),
+            rationale: "Uses the dominant genre and mood from the brief.".to_string(),
+        },
+        PlaylistCopilotTitleSuggestion {
+            title: format!("{bpm} Run"),
+            rationale: "Names the playlist around its tempo corridor.".to_string(),
+        },
+        PlaylistCopilotTitleSuggestion {
+            title: format!("{genre} Draft {}", coverage.track_count),
+            rationale: "Practical export name with track count context.".to_string(),
+        },
+        PlaylistCopilotTitleSuggestion {
+            title: if compact_prompt.is_empty() {
+                "Copilot Session".to_string()
+            } else {
+                title_case(&compact_prompt)
+            },
+            rationale: "Condenses the original prompt into a short working title.".to_string(),
+        },
+    ]
+}
+
+fn playlist_copilot_coverage_sentence(
+    coverage: &PlaylistCopilotCoverage,
+    interpreted: &PlaylistCopilotInterpretation,
+) -> String {
+    let bpm = match (coverage.bpm_min, coverage.bpm_max, coverage.bpm_average) {
+        (Some(min), Some(max), Some(avg)) => format!("BPM {min:.0}-{max:.0}, avg {avg:.0}"),
+        _ => "BPM coverage is incomplete".to_string(),
+    };
+    let genre = coverage
+        .genres
+        .first()
+        .map(|item| item.name.clone())
+        .or_else(|| interpreted.genres.first().cloned())
+        .unwrap_or_else(|| "mixed genres".to_string());
+    format!(
+        "{} candidate(s), top genre {}, {}, {} missing source file(s).",
+        coverage.track_count, genre, bpm, coverage.source_missing_count
+    )
+}
+
+fn persist_playlist_copilot_run(
+    conn: &Connection,
+    library_id: &str,
+    session_id: Option<&str>,
+    prompt: &str,
+    assistant_message: &str,
+    interpreted: &PlaylistCopilotInterpretation,
+    reasoning_summary: &[String],
+    coverage: &PlaylistCopilotCoverage,
+    candidates: &[PlaylistCopilotCandidate],
+) -> Result<(String, String), String> {
+    let now = timestamp();
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM playlist_copilot_sessions WHERE id = ?1",
+            params![&session_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo leer sesion Copilot: {error}"))?
+        .is_some();
+    if exists {
+        conn.execute(
+            "UPDATE playlist_copilot_sessions SET updated_at = ?2 WHERE id = ?1",
+            params![&session_id, &now],
+        )
+        .map_err(|error| format!("No se pudo actualizar sesion Copilot: {error}"))?;
+    } else {
+        conn.execute(
+            "INSERT INTO playlist_copilot_sessions (id, library_id, title, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![&session_id, library_id, copilot_session_title(prompt), &now],
+        )
+        .map_err(|error| format!("No se pudo crear sesion Copilot: {error}"))?;
+    }
+
+    insert_copilot_message(conn, &session_id, "user", prompt, &now)?;
+    insert_copilot_message(conn, &session_id, "assistant", assistant_message, &now)?;
+
+    let candidate_set_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO playlist_copilot_candidate_sets (
+            id, session_id, prompt, interpretation_json, reasoning_json, coverage_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &candidate_set_id,
+            &session_id,
+            prompt,
+            serde_json::to_string(interpreted).map_err(|error| format!(
+                "No se pudo serializar interpretacion Copilot: {error}"
+            ))?,
+            serde_json::to_string(reasoning_summary)
+                .map_err(|error| format!("No se pudo serializar reasoning Copilot: {error}"))?,
+            serde_json::to_string(coverage)
+                .map_err(|error| format!("No se pudo serializar coverage Copilot: {error}"))?,
+            &now
+        ],
+    )
+    .map_err(|error| format!("No se pudo guardar candidate set Copilot: {error}"))?;
+
+    for (position, candidate) in candidates.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO playlist_copilot_candidate_tracks (
+                candidate_set_id, track_id, position, score, reasons_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &candidate_set_id,
+                &candidate.track.track_id,
+                position as i64,
+                candidate.score,
+                serde_json::to_string(&candidate.reasons)
+                    .map_err(|error| format!("No se pudo serializar razones Copilot: {error}"))?
+            ],
+        )
+        .map_err(|error| format!("No se pudo guardar track candidato Copilot: {error}"))?;
+    }
+
+    Ok((session_id, candidate_set_id))
+}
+
+fn insert_copilot_message(
+    conn: &Connection,
+    session_id: &str,
+    role: &str,
+    content: &str,
+    now: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO playlist_copilot_messages (id, session_id, role, content, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![Uuid::new_v4().to_string(), session_id, role, content, now],
+    )
+    .map_err(|error| format!("No se pudo guardar mensaje Copilot: {error}"))?;
+    Ok(())
+}
+
+fn copilot_session_title(prompt: &str) -> String {
+    let compact = prompt
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if compact.is_empty() {
+        "Copilot Session".to_string()
+    } else {
+        format!("Copilot - {}", title_case(&compact))
+    }
+}
+
+fn title_case(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn top_profile_values(counts: &BTreeMap<String, usize>, limit: usize) -> Vec<String> {
@@ -3132,7 +4096,7 @@ fn generate_embeddings_blocking(
         return Err(format!("Libreria indexada no encontrada: {library_id}"));
     }
 
-    let max_items = limit.unwrap_or(500).clamp(1, 5000);
+    let max_items = limit.unwrap_or(500).clamp(1, 10000);
     let selected_track_ids = track_ids
         .unwrap_or_default()
         .into_iter()

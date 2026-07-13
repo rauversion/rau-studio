@@ -129,8 +129,37 @@ The Copilot:
 3. optionally asks OpenAI to interpret the prompt into filters;
 4. falls back to local prompt parsing if OpenAI is unavailable;
 5. ranks local tracks by metadata, BPM, key, prompt terms, optional vector similarity, source availability, and diversity;
-6. returns candidate tracks with explanations;
-7. preselects the candidates so they can be quickly added to a draft playlist.
+6. stores the prompt, assistant response, candidate set, reasoning summary, and coverage snapshot in SQLite;
+7. returns candidate tracks with explanations;
+8. preselects the candidates so they can be quickly added to a draft playlist.
+
+### Guided Sessions
+
+Each Copilot run belongs to a local session. A session can receive follow-up prompts such as:
+
+```text
+Make it darker and keep the last third more energetic.
+```
+
+or:
+
+```text
+Use loose key flow, but avoid tracks with missing source files.
+```
+
+The UI shows:
+
+- chat history for the current working session;
+- a structured interpretation card;
+- a decision trace with each planning step;
+- one guided question at a time, with clickable answer options;
+- suggested playlist titles;
+- coverage metrics for BPM, genre, key, format, artists, and missing source files;
+- candidate tracks with row-level reasons.
+
+The decision trace is a user-facing summary of how the result was built. It is not raw model chain-of-thought.
+
+In guided mode, the assistant does not ask every possible question at once. It asks one question, waits for the user's answer, uses that answer as context, and then continues with the next useful decision.
 
 ### What Goes to OpenAI
 
@@ -191,6 +220,10 @@ Main playlist-intelligence tables:
 - `playlist_track_embeddings`
 - `playlist_drafts`
 - `playlist_draft_tracks`
+- `playlist_copilot_sessions`
+- `playlist_copilot_messages`
+- `playlist_copilot_candidate_sets`
+- `playlist_copilot_candidate_tracks`
 
 ## Tauri Commands
 
