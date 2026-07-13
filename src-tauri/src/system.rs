@@ -1,6 +1,7 @@
 use crate::settings;
 use serde::Serialize;
 use std::env;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::AppHandle;
@@ -74,6 +75,36 @@ pub(crate) fn binary_status(app: &AppHandle, name: &str) -> BinaryStatus {
             message: Some(format!("No se pudo ejecutar {name}: {error}")),
         },
     }
+}
+
+pub(crate) fn create_dir_error_message(app: &AppHandle, path: &Path, error: &io::Error) -> String {
+    let base_es = format!("No se pudo crear la carpeta {}: {error}", path.display());
+    let base_en = format!("Could not create folder {}: {error}", path.display());
+
+    if error.kind() != io::ErrorKind::PermissionDenied {
+        return settings::localized(app, &base_es, &base_en);
+    }
+
+    let hint_es = if is_external_volume_path(path) {
+        "macOS bloqueo el acceso al disco externo. En Ajustes del Sistema > Privacidad y seguridad, permite a Rau Studio acceder a Volumenes extraibles o agrega Rau Studio a Acceso total al disco. Tambien verifica en Finder que el disco no este en solo lectura y que puedas crear carpetas ahi."
+    } else {
+        "macOS bloqueo el acceso a esa carpeta. Revisa permisos de la carpeta o agrega Rau Studio a Acceso total al disco en Ajustes del Sistema > Privacidad y seguridad."
+    };
+    let hint_en = if is_external_volume_path(path) {
+        "macOS blocked access to the external drive. In System Settings > Privacy & Security, allow Rau Studio to access Removable Volumes or add Rau Studio to Full Disk Access. Also verify in Finder that the drive is not read-only and that you can create folders there."
+    } else {
+        "macOS blocked access to that folder. Check the folder permissions or add Rau Studio to Full Disk Access in System Settings > Privacy & Security."
+    };
+
+    settings::localized(
+        app,
+        &format!("{base_es}. {hint_es}"),
+        &format!("{base_en}. {hint_en}"),
+    )
+}
+
+pub(crate) fn is_external_volume_path(path: &Path) -> bool {
+    path.starts_with("/Volumes")
 }
 
 fn binary_command(app: &AppHandle, name: &str) -> Command {

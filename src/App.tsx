@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
+  Album,
   AlertTriangle,
   ChevronRight,
   ClipboardList,
@@ -17,6 +18,7 @@ import {
   HardDrive,
   Info,
   KeyRound,
+  ListMusic,
   Monitor,
   Moon,
   MoreHorizontal,
@@ -24,10 +26,12 @@ import {
   Play,
   RefreshCcw,
   Settings,
+  Sparkles,
   Square,
   Sun,
   Trash2,
   Upload,
+  UserRound,
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -44,8 +48,13 @@ import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-dra
 import { cn } from "./lib/utils";
 import { FileConversionPage } from "./FileConversionPage";
 import { MasteringPage } from "./MasteringPage";
+import { PlaylistBrowserPage } from "./PlaylistBrowserPage";
+import { PlaylistCopilotPage } from "./PlaylistCopilotPage";
+import { PlaylistIndexPage } from "./PlaylistIndexPage";
+import { TaxonomyPage } from "./TaxonomyPage";
 import { TurnPage } from "./TurnPage";
-import { I18nProvider, languageLabel, translate, translateBackendMessage, useI18n, type Locale } from "./i18n";
+import { languageLabel, translate, translateBackendMessage, useI18n, type Locale } from "./i18n";
+import { playbackErrorMessage } from "./playback";
 import packageMetadata from "../package.json";
 import type * as React from "react";
 
@@ -118,22 +127,6 @@ type ConvertedFile = {
   target_path: string;
   source_exists: boolean;
   target_exists: boolean;
-};
-
-type AudioFolderResponse = {
-  root_path: string;
-  recursive: boolean;
-  files: AudioFile[];
-  skipped_errors: string[];
-};
-
-type AudioFile = {
-  name: string;
-  extension: string;
-  path: string;
-  parent_path: string;
-  size_bytes: number;
-  modified_ms?: number;
 };
 
 type PlaylistTrackFile = {
@@ -284,26 +277,29 @@ function detectInitialDarkMode() {
 
 export default function App() {
   return (
-    <I18nProvider>
-      <HashRouter>
-        <Routes>
-          <Route element={<AppShell />}>
-            <Route path="/" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
-            <Route path="/rekordbox-convert" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
-            <Route path="/file-conversion" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
-            <Route path="/file-conversion/local" element={<FileConversionPage />} />
-            <Route path="/file-conversion/rekordbox-convert" element={<RekordboxConvertPage />} />
-            <Route path="/turn" element={<TurnPage />} />
-            <Route path="/mastering" element={<MasteringPage />} />
-            <Route
-              path="/settings"
-              element={<SettingsPage />}
-            />
-            <Route path="*" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
-          </Route>
-        </Routes>
-      </HashRouter>
-    </I18nProvider>
+    <HashRouter>
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route path="/" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
+          <Route path="/rekordbox-convert" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
+          <Route path="/file-conversion" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
+          <Route path="/file-conversion/local" element={<FileConversionPage />} />
+          <Route path="/file-conversion/rekordbox-convert" element={<RekordboxConvertPage />} />
+          <Route path="/playlists" element={<PlaylistIndexPage />} />
+          <Route path="/playlists/copilot" element={<PlaylistCopilotPage />} />
+          <Route path="/playlists/artists" element={<PlaylistBrowserPage kind="artist" />} />
+          <Route path="/playlists/albums" element={<PlaylistBrowserPage kind="album" />} />
+          <Route path="/playlists/taxonomies" element={<TaxonomyPage />} />
+          <Route path="/turn" element={<TurnPage />} />
+          <Route path="/mastering" element={<MasteringPage />} />
+          <Route
+            path="/settings"
+            element={<SettingsPage />}
+          />
+          <Route path="*" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
+        </Route>
+      </Routes>
+    </HashRouter>
   );
 }
 
@@ -339,6 +335,7 @@ function AppShell() {
       "local-conversion-progress",
       "local-conversion-log",
       "mastering-progress",
+      "playlist-index-progress",
       "turn-progress"
     ];
 
@@ -809,17 +806,12 @@ function SettingsPage() {
 }
 
 function RekordboxConvertPage() {
-  const { darkMode, setDarkMode } = useOutletContext<AppShellContext>();
   const { locale, t } = useI18n();
   const [detectedLogicalCores] = useState(() => detectLogicalCores());
   const [xmlPath, setXmlPath] = useState("");
   const [recentXmlPaths, setRecentXmlPaths] = useState<string[]>([]);
   const [importResult, setImportResult] = useState<ImportResponse | null>(null);
   const [convertedFiles, setConvertedFiles] = useState<ConvertedFile[]>([]);
-  const [folderPath, setFolderPath] = useState("");
-  const [folderRecursive, setFolderRecursive] = useState(true);
-  const [audioFiles, setAudioFiles] = useState<AudioFile[]>([]);
-  const [folderSkippedErrors, setFolderSkippedErrors] = useState<string[]>([]);
   const [activePlaylistPath, setActivePlaylistPath] = useState("");
   const [playlistFiles, setPlaylistFiles] = useState<PlaylistTrackFile[]>([]);
   const [playlistLoading, setPlaylistLoading] = useState(false);
@@ -1136,48 +1128,6 @@ function RekordboxConvertPage() {
         : [];
     } catch {
       return [];
-    }
-  }
-
-  async function chooseFolder() {
-    setErrorMessage("");
-
-    const selected = await open({
-      multiple: false,
-      directory: true
-    });
-
-    if (typeof selected !== "string") return;
-
-    setFolderPath(selected);
-    await refreshAudioFiles(selected);
-  }
-
-  function clearFolderExplorer() {
-    setErrorMessage("");
-    setFolderPath("");
-    setAudioFiles([]);
-    setFolderSkippedErrors([]);
-  }
-
-  async function refreshAudioFiles(path = folderPath, recursive = folderRecursive) {
-    if (!path) return;
-
-    setBusy(true);
-    setErrorMessage("");
-
-    try {
-      const response = await invoke<AudioFolderResponse>("list_audio_files", {
-        folderPath: path,
-        recursive
-      });
-      setFolderPath(response.root_path);
-      setAudioFiles(response.files);
-      setFolderSkippedErrors(response.skipped_errors);
-    } catch (error) {
-      setErrorMessage(String(error));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -1567,7 +1517,7 @@ function RekordboxConvertPage() {
       await audioElement.current?.play();
       setPlayerPlaying(true);
     } catch (error) {
-      setErrorMessage(`No se pudo reproducir ${label}: ${String(error)}`);
+      setErrorMessage(playbackErrorMessage(t, label, path, error));
     }
   }
 
@@ -1632,13 +1582,6 @@ function RekordboxConvertPage() {
     return `${minutes}:${remainingSeconds}`;
   }
 
-  function formatSize(bytes: number) {
-    if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${bytes} B`;
-  }
-
   async function reveal(path: string) {
     try {
       await invoke("reveal_path", { path });
@@ -1667,10 +1610,6 @@ function RekordboxConvertPage() {
             <Upload className="h-4 w-4" />
             {t("Importar XML")}
           </Button>
-          <Button variant="secondary" onClick={chooseFolder} disabled={busy}>
-            <FolderOpen className="h-4 w-4" />
-            {t("Explorar carpeta")}
-          </Button>
           <CreatePlanButton
             disabled={busy || !importResult}
             selectedCount={selectedPlaylists.size}
@@ -1679,14 +1618,6 @@ function RekordboxConvertPage() {
           <Button onClick={exportXml} disabled={busy || conversionBusy || !importResult}>
             <FileOutput className="h-4 w-4" />
             {t("Exportar XML")}
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => setDarkMode((current) => !current)}
-            title={darkMode ? t("Cambiar a modo claro") : t("Cambiar a modo oscuro")}
-          >
-            {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            {darkMode ? t("Claro") : t("Oscuro")}
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -1813,92 +1744,12 @@ function RekordboxConvertPage() {
             onPlay={() => setPlayerPlaying(true)}
             onPause={() => setPlayerPlaying(false)}
             onEnded={finishPlayback}
+            onError={() => setErrorMessage(playbackErrorMessage(t, player.label, player.path))}
           />
         ) : null}
         <Button variant="secondary" disabled={!player} onClick={() => player && void reveal(player.path)}>
           Finder
         </Button>
-      </Card>
-
-      <Card className="mb-3 max-h-[38vh] min-h-[220px]">
-        <CardHeader>
-          <div className="min-w-0">
-            <CardTitle>{t("Originales")}</CardTitle>
-            <span className="block truncate text-xs text-muted-foreground" title={folderPath}>
-              {folderPath || t("Sin carpeta seleccionada")}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={folderRecursive}
-                onChange={(event) => {
-                  const recursive = event.currentTarget.checked;
-                  setFolderRecursive(recursive);
-                  void refreshAudioFiles(folderPath, recursive);
-                }}
-              />
-              {t("Recursivo")}
-            </label>
-            <span className="text-xs text-muted-foreground">{t("{count} archivos", { count: audioFiles.length })}</span>
-            <Button variant="secondary" size="sm" disabled={busy || !folderPath} onClick={() => void refreshAudioFiles()}>
-              <RefreshCcw className="h-3.5 w-3.5" />
-              {t("Refrescar")}
-            </Button>
-            <Button variant="secondary" size="sm" disabled={busy || !folderPath} onClick={clearFolderExplorer}>
-              <X className="h-3.5 w-3.5" />
-              {t("Cerrar")}
-            </Button>
-            <Button size="sm" disabled={busy} onClick={chooseFolder}>
-              {t("Elegir")}
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="file-grid file-grid-browser sticky top-0 z-10 bg-secondary text-xs font-semibold text-muted-foreground">
-            <span>{t("Archivo")}</span>
-            <span>{t("Formato")}</span>
-            <span>{t("Tamano")}</span>
-            <span>{t("Carpeta")}</span>
-            <span>{t("Acciones")}</span>
-          </div>
-          {!folderPath ? <EmptyRow>{t("Elige una carpeta para navegar archivos de audio originales.")}</EmptyRow> : null}
-          {folderPath && audioFiles.length === 0 ? <EmptyRow>{t("No se encontraron archivos de audio originales.")}</EmptyRow> : null}
-          {audioFiles.map((file) => (
-            <div key={file.path} className="file-grid file-grid-browser border-b border-border text-xs">
-              <span className="truncate" title={file.path}>
-                {file.name}
-              </span>
-              <span>{file.extension.toUpperCase()}</span>
-              <span>{formatSize(file.size_bytes)}</span>
-              <span className="truncate" title={file.parent_path}>
-                {file.parent_path}
-              </span>
-              <div className="flex justify-end gap-1">
-                <Button
-                  variant="secondary"
-                  size="icon"
-                  title={t("Escuchar archivo")}
-                  onClick={() => void togglePathPlayback(file.path, file.name)}
-                >
-                  {playbackIcon(file.path) === "stop" ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-                </Button>
-                <Button variant="secondary" size="icon" title={t("Mostrar en Finder")} onClick={() => void reveal(file.path)}>
-                  <ChevronRight className="h-3.5 w-3.5" />
-                </Button>
-                <Button variant="secondary" size="icon" title={t("Abrir carpeta")} onClick={() => void openFolder(file.path)}>
-                  <FolderOpen className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            </div>
-          ))}
-        </CardContent>
-        {folderSkippedErrors.length > 0 ? (
-          <div className="border-t border-border px-3 py-2 text-xs text-red-700 dark:text-red-300">
-            {t("{count} carpetas o archivos no se pudieron leer.", { count: folderSkippedErrors.length })}
-          </div>
-        ) : null}
       </Card>
 
       {importResult ? (
@@ -2307,6 +2158,24 @@ function AppSidebar({
           </SidebarLink>
         </SidebarSection>
 
+        <SidebarSection title={t("Playlists")}>
+          <SidebarLink to="/playlists" end icon={<ListMusic className="h-4 w-4" />}>
+            {t("Playlist Library")}
+          </SidebarLink>
+          <SidebarLink to="/playlists/copilot" icon={<Sparkles className="h-4 w-4" />}>
+            {t("Playlist Copilot")}
+          </SidebarLink>
+          <SidebarLink to="/playlists/artists" icon={<UserRound className="h-4 w-4" />}>
+            {t("Artistas")}
+          </SidebarLink>
+          <SidebarLink to="/playlists/albums" icon={<Album className="h-4 w-4" />}>
+            {t("Albums")}
+          </SidebarLink>
+          <SidebarLink to="/playlists/taxonomies" icon={<Database className="h-4 w-4" />}>
+            {t("Taxonomias")}
+          </SidebarLink>
+        </SidebarSection>
+
         <SidebarSection title={t("Mastering")}>
           <SidebarLink to="/mastering" icon={<Gauge className="h-4 w-4" />}>
             {t("Mastering")}
@@ -2477,15 +2346,18 @@ function SidebarSection({ title, children }: { title: string; children: React.Re
 function SidebarLink({
   to,
   icon,
+  end,
   children
 }: {
   to: string;
   icon: React.ReactNode;
+  end?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <NavLink
       to={to}
+      end={end}
       className={({ isActive }) =>
         cn(
           "flex min-h-10 min-w-0 items-center gap-2 rounded-md px-3 text-left text-sm font-medium transition-colors",

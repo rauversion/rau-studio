@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter};
 
 mod local_conversion;
 mod mastering;
+mod playlist_index;
 mod settings;
 mod system;
 mod turn;
@@ -778,11 +779,7 @@ fn convert_track(app: &tauri::AppHandle, track: &Track) -> ConversionItemResult 
     if let Some(parent) = target_path.parent() {
         if let Err(error) = fs::create_dir_all(parent) {
             item.status = ConversionStatus::Failed;
-            item.message = Some(settings::localized(
-                app,
-                &format!("No se pudo crear la carpeta {}: {error}", parent.display()),
-                &format!("Could not create folder {}: {error}", parent.display()),
-            ));
+            item.message = Some(system::create_dir_error_message(app, parent, &error));
             emit_conversion_progress(app, item_progress_event(&item, None, None, None));
             emit_conversion_log(
                 app,
@@ -1403,6 +1400,30 @@ pub fn run() {
             mastering::mastering_start_job,
             mastering::mastering_retry_job,
             mastering::mastering_delete_job,
+            playlist_index::playlist_index_libraries,
+            playlist_index::playlist_index_preview_xml,
+            playlist_index::playlist_index_import_xml,
+            playlist_index::playlist_index_library_playlists,
+            playlist_index::playlist_index_delete_library,
+            playlist_index::playlist_index_delete_playlists,
+            playlist_index::playlist_index_delete_tracks,
+            playlist_index::playlist_index_playlist_tracks,
+            playlist_index::playlist_index_search_tracks,
+            playlist_index::playlist_index_track_groups,
+            playlist_index::playlist_index_group_tracks,
+            playlist_index::playlist_index_taxonomy_overview,
+            playlist_index::playlist_index_taxonomy_graph,
+            playlist_index::playlist_index_taxonomy_tracks,
+            playlist_index::playlist_copilot_generate,
+            playlist_index::playlist_index_track_cover,
+            playlist_index::playlist_index_generate_embeddings,
+            playlist_index::playlist_index_drafts,
+            playlist_index::playlist_index_create_draft,
+            playlist_index::playlist_index_add_tracks_to_draft,
+            playlist_index::playlist_index_remove_draft_track,
+            playlist_index::playlist_index_delete_draft,
+            playlist_index::playlist_index_draft_tracks,
+            playlist_index::playlist_index_export_draft_xml,
             turn::turn_list_jobs,
             turn::turn_get_job,
             turn::turn_job_events,

@@ -475,11 +475,7 @@ fn convert_item(app: &AppHandle, mut item: LocalConversionItem) -> LocalConversi
 
     if let Some(parent) = target_path.parent() {
         if let Err(error) = fs::create_dir_all(parent) {
-            let message = settings::localized(
-                app,
-                &format!("No se pudo crear la carpeta {}: {error}", parent.display()),
-                &format!("Could not create folder {}: {error}", parent.display()),
-            );
+            let message = system::create_dir_error_message(app, parent, &error);
             item = fail_item(app, item, &message);
             return item;
         }

@@ -71,6 +71,7 @@
 @layer components {
   .file-grid,
   .playlist-track-grid,
+  .playlist-index-track-grid,
   .plan-grid,
   .issue-grid {
     display: grid;
@@ -86,14 +87,12 @@
   .file-grid > div,
   .playlist-track-grid > span,
   .playlist-track-grid > div,
+  .playlist-index-track-grid > span,
+  .playlist-index-track-grid > div,
   .plan-grid > span,
   .plan-grid > div,
   .issue-grid > span {
     min-width: 0;
-  }
-
-  .file-grid-browser {
-    grid-template-columns: minmax(0, 1.15fr) 72px 78px minmax(0, 1.35fr) 108px;
   }
 
   .file-grid-converted {
@@ -104,6 +103,26 @@
     grid-template-columns:
       32px 34px minmax(0, 1.25fr) minmax(0, 0.72fr) 72px
       minmax(0, 1.15fr) minmax(0, 0.85fr) 44px;
+  }
+
+  .playlist-index-track-grid {
+    grid-template-columns:
+      24px 32px minmax(0, 1.25fr) minmax(0, 0.75fr) minmax(0, 0.75fr)
+      88px 70px 144px;
+  }
+
+  .playlist-index-track-table-grid {
+    display: grid;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-height: 2.75rem;
+    padding-left: 0.625rem;
+  }
+
+  .playlist-index-track-table-grid > span,
+  .playlist-index-track-table-grid > div {
+    min-width: 0;
   }
 
   .plan-grid {
@@ -131,18 +150,19 @@
       transform: translate(-50%, -50%) rotate(360deg);
     }
   }
+
+  @keyframes playlist-index-row {
+    from {
+      transform: translateX(-110%);
+    }
+
+    to {
+      transform: translateX(310%);
+    }
+  }
 }
 
 @media (max-width: 820px) {
-  .file-grid-browser {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr) 108px;
-  }
-
-  .file-grid-browser > span:nth-child(2),
-  .file-grid-browser > span:nth-child(3) {
-    display: none;
-  }
-
   .file-grid-converted {
     grid-template-columns: minmax(0, 1fr) 108px;
   }
@@ -161,6 +181,17 @@
   .playlist-track-grid > span:nth-child(5),
   .playlist-track-grid > span:nth-child(6),
   .playlist-track-grid > span:nth-child(7) {
+    display: none;
+  }
+
+  .playlist-index-track-grid {
+    grid-template-columns: 24px 32px minmax(0, 1fr) 74px;
+  }
+
+  .playlist-index-track-grid > span:nth-child(4),
+  .playlist-index-track-grid > span:nth-child(5),
+  .playlist-index-track-grid > span:nth-child(6),
+  .playlist-index-track-grid > span:nth-child(7) {
     display: none;
   }
 
