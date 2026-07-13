@@ -11,7 +11,7 @@ Rau Studio can build macOS bundles without an Apple Developer certificate, but u
 
 ```sh
 cd ~/Downloads
-tar -xzf RauStudio_0.1.8_arm64.app.tar.gz
+tar -xzf RauStudio_0.1.9_arm64.app.tar.gz
 xattr -dr com.apple.quarantine "Rau Studio.app"
 open "Rau Studio.app"
 ```

@@ -108,8 +108,8 @@ Release options:
 Example:
 
 ```sh
-git tag v0.1.8
-git push origin v0.1.8
+git tag v0.1.9
+git push origin v0.1.9
 ```
 
 Expected artifacts:
@@ -127,7 +127,7 @@ For local testing, extract the `.app.tar.gz` and remove the quarantine attribute
 
 ```sh
 cd ~/Downloads
-tar -xzf RauStudio_0.1.8_arm64.app.tar.gz
+tar -xzf RauStudio_0.1.9_arm64.app.tar.gz
 xattr -dr com.apple.quarantine "Rau Studio.app"
 open "Rau Studio.app"
 ```
