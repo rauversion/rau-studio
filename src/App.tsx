@@ -49,6 +49,10 @@ import {
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
 import { cn } from "./lib/utils";
 import { EnrichmentPage } from "./EnrichmentPage";
+import type {
+  EnrichmentProviderDescriptor,
+  EnrichmentProviderTestResult
+} from "./enrichmentProviders";
 import { FileConversionPage } from "./FileConversionPage";
 import { MasteringPage } from "./MasteringPage";
 import { PlaylistBrowserPage } from "./PlaylistBrowserPage";
@@ -448,12 +452,16 @@ function SettingsPage() {
   const [savingApiKey, setSavingApiKey] = useState(false);
   const [loadingAudioTools, setLoadingAudioTools] = useState(true);
   const [savingAudioTools, setSavingAudioTools] = useState(false);
+  const [enrichmentProviders, setEnrichmentProviders] = useState<EnrichmentProviderDescriptor[]>([]);
+  const [providerCredentialValues, setProviderCredentialValues] = useState<Record<string, string>>({});
+  const [busyProviderId, setBusyProviderId] = useState("");
   const [settingsMessage, setSettingsMessage] = useState("");
   const [settingsError, setSettingsError] = useState("");
 
   useEffect(() => {
     void loadApiKeyStatus();
     void loadAudioToolSettings();
+    void loadEnrichmentProviders();
   }, []);
 
   async function loadApiKeyStatus() {
@@ -519,6 +527,84 @@ function SettingsPage() {
       setSettingsError(translateBackendMessage(locale, String(error)));
     } finally {
       setLoadingAudioTools(false);
+    }
+  }
+
+  async function loadEnrichmentProviders() {
+    try {
+      const providers = await invoke<EnrichmentProviderDescriptor[]>("enrichment_providers");
+      setEnrichmentProviders(providers);
+    } catch (error) {
+      setSettingsError(translateBackendMessage(locale, String(error)));
+    }
+  }
+
+  function updateEnrichmentProvider(provider: EnrichmentProviderDescriptor) {
+    setEnrichmentProviders((current) =>
+      current.map((candidate) => candidate.id === provider.id ? provider : candidate)
+    );
+  }
+
+  async function saveProviderCredential(
+    provider: EnrichmentProviderDescriptor,
+    credentialId: string
+  ) {
+    const inputKey = `${provider.id}:${credentialId}`;
+    const value = providerCredentialValues[inputKey]?.trim() ?? "";
+    if (!value) return;
+    setBusyProviderId(provider.id);
+    setSettingsMessage("");
+    setSettingsError("");
+    try {
+      const updated = await invoke<EnrichmentProviderDescriptor>("enrichment_save_provider_credential", {
+        providerId: provider.id,
+        credentialId,
+        value
+      });
+      updateEnrichmentProvider(updated);
+      setProviderCredentialValues((current) => ({ ...current, [inputKey]: "" }));
+      setSettingsMessage(t("Credencial de {provider} guardada.", { provider: provider.label }));
+    } catch (error) {
+      setSettingsError(translateBackendMessage(locale, String(error)));
+    } finally {
+      setBusyProviderId("");
+    }
+  }
+
+  async function clearProviderCredential(
+    provider: EnrichmentProviderDescriptor,
+    credentialId: string
+  ) {
+    setBusyProviderId(provider.id);
+    setSettingsMessage("");
+    setSettingsError("");
+    try {
+      const updated = await invoke<EnrichmentProviderDescriptor>("enrichment_clear_provider_credential", {
+        providerId: provider.id,
+        credentialId
+      });
+      updateEnrichmentProvider(updated);
+      setSettingsMessage(t("Credencial de {provider} eliminada.", { provider: provider.label }));
+    } catch (error) {
+      setSettingsError(translateBackendMessage(locale, String(error)));
+    } finally {
+      setBusyProviderId("");
+    }
+  }
+
+  async function testEnrichmentProvider(provider: EnrichmentProviderDescriptor) {
+    setBusyProviderId(provider.id);
+    setSettingsMessage("");
+    setSettingsError("");
+    try {
+      const response = await invoke<EnrichmentProviderTestResult>("enrichment_test_provider", {
+        providerId: provider.id
+      });
+      setSettingsMessage(`${provider.label}: ${response.message}`);
+    } catch (error) {
+      setSettingsError(translateBackendMessage(locale, String(error)));
+    } finally {
+      setBusyProviderId("");
     }
   }
 
@@ -800,6 +886,93 @@ function SettingsPage() {
                 </Button>
               </div>
             </form>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Tags className="h-4 w-4" />
+              <CardTitle>{t("Fuentes de enrichment")}</CardTitle>
+            </div>
+            <span className="text-xs text-muted-foreground">
+              {t("Credenciales cifradas y capacidades declaradas por cada fuente.")}
+            </span>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {enrichmentProviders.map((provider) => (
+              <div key={provider.id} className="grid gap-3 rounded-md border border-border p-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <strong className="block">{provider.label}</strong>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">{provider.description}</span>
+                    <span className="mt-1 block font-mono text-[10px] text-muted-foreground">
+                      {provider.capabilities.join(" · ")}
+                    </span>
+                  </div>
+                  <span className={cn(
+                    "rounded-md border px-2 py-1 text-[10px] font-semibold uppercase",
+                    provider.ready
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"
+                      : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+                  )}>
+                    {provider.ready ? t("Lista") : t("Requiere credencial")}
+                  </span>
+                </div>
+
+                {provider.credentials.map((credential) => {
+                  const inputKey = `${provider.id}:${credential.id}`;
+                  return (
+                    <div key={credential.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end">
+                      <label className="grid gap-1 text-sm font-medium">
+                        {credential.label}
+                        <input
+                          className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring"
+                          type={credential.secret ? "password" : "text"}
+                          value={providerCredentialValues[inputKey] ?? ""}
+                          autoComplete="off"
+                          placeholder={credential.configured ? credential.preview ?? t("Configurada") : t("No configurada")}
+                          disabled={busyProviderId === provider.id}
+                          onChange={(event) => setProviderCredentialValues((current) => ({
+                            ...current,
+                            [inputKey]: event.currentTarget.value
+                          }))}
+                        />
+                      </label>
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={busyProviderId === provider.id || !(providerCredentialValues[inputKey]?.trim())}
+                        onClick={() => void saveProviderCredential(provider, credential.id)}
+                      >
+                        {t("Guardar")}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={busyProviderId === provider.id || !credential.configured}
+                        onClick={() => void clearProviderCredential(provider, credential.id)}
+                      >
+                        {t("Eliminar")}
+                      </Button>
+                    </div>
+                  );
+                })}
+
+                <div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    disabled={busyProviderId === provider.id || !provider.ready}
+                    onClick={() => void testEnrichmentProvider(provider)}
+                  >
+                    {busyProviderId === provider.id ? t("Probando...") : t("Probar conexión")}
+                  </Button>
+                </div>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </section>

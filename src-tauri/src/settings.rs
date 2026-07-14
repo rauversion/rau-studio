@@ -15,6 +15,7 @@ use std::os::unix::fs::OpenOptionsExt;
 const DB_FILE: &str = "aifficator.sqlite3";
 const SECRET_FILE: &str = "settings-secret.bin";
 const OPENAI_API_KEY_SETTING: &str = "openai_api_key";
+const ENRICHMENT_CREDENTIAL_PREFIX: &str = "enrichment.provider";
 const FFMPEG_PATH_SETTING: &str = "ffmpeg_path";
 const FFPROBE_PATH_SETTING: &str = "ffprobe_path";
 const LANGUAGE_SETTING: &str = "language";
@@ -201,6 +202,44 @@ pub(crate) fn load_openai_api_key(app: &AppHandle) -> Result<Option<String>, Str
     } else {
         Ok(Some(api_key))
     }
+}
+
+pub(crate) fn load_enrichment_credential(
+    app: &AppHandle,
+    provider_id: &str,
+    credential_id: &str,
+) -> Result<Option<String>, String> {
+    let key = enrichment_credential_key(provider_id, credential_id)?;
+    load_text_setting(app, &key)
+}
+
+pub(crate) fn save_enrichment_credential(
+    app: &AppHandle,
+    provider_id: &str,
+    credential_id: &str,
+    value: Option<String>,
+) -> Result<(), String> {
+    let key = enrichment_credential_key(provider_id, credential_id)?;
+    let value = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    save_optional_text_setting(app, &key, value)
+}
+
+fn enrichment_credential_key(provider_id: &str, credential_id: &str) -> Result<String, String> {
+    if !valid_setting_fragment(provider_id) || !valid_setting_fragment(credential_id) {
+        return Err("Proveedor o credencial de enrichment invalido.".to_string());
+    }
+    Ok(format!(
+        "{ENRICHMENT_CREDENTIAL_PREFIX}.{provider_id}.{credential_id}"
+    ))
+}
+
+fn valid_setting_fragment(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn load_text_setting(app: &AppHandle, key: &str) -> Result<Option<String>, String> {
@@ -463,11 +502,11 @@ fn normalize_language(value: &str) -> Option<String> {
 fn openai_key_status(api_key: &str) -> OpenAiApiKeyStatus {
     OpenAiApiKeyStatus {
         configured: true,
-        preview: Some(mask_secret(api_key)),
+        preview: Some(masked_secret(api_key)),
     }
 }
 
-fn mask_secret(value: &str) -> String {
+pub(crate) fn masked_secret(value: &str) -> String {
     let value = value.trim();
     let prefix = value.chars().take(7).collect::<String>();
     let suffix = value
@@ -488,4 +527,25 @@ fn mask_secret(value: &str) -> String {
 
 fn timestamp() -> String {
     Utc::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enrichment_setting_fragments_reject_key_injection() {
+        assert!(valid_setting_fragment("lastfm"));
+        assert!(valid_setting_fragment("api_key"));
+        assert!(!valid_setting_fragment("../lastfm"));
+        assert!(!valid_setting_fragment("api.key"));
+    }
+
+    #[test]
+    fn secret_previews_do_not_reveal_short_or_complete_values() {
+        assert_eq!(masked_secret("short-key"), "********");
+        let preview = masked_secret("abcdefghijklmno1234");
+        assert_eq!(preview, "abcdefg...1234");
+        assert!(!preview.contains("hijkl"));
+    }
 }

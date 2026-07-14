@@ -12,11 +12,13 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type * as React from "react";
+import { Link } from "react-router-dom";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
 import { translateBackendMessage, useI18n } from "./i18n";
 import { cn } from "./lib/utils";
+import type { EnrichmentProviderDescriptor } from "./enrichmentProviders";
 
 type PlaylistIndexLibrary = {
   id: string;
@@ -82,6 +84,7 @@ type EnrichmentItem = {
 };
 
 type EnrichmentRunResult = {
+  run_id: string;
   library_id: string;
   processed_total: number;
   matched_total: number;
@@ -142,9 +145,10 @@ export function EnrichmentPage() {
   const [gap, setGap] = useState<GapFilter>("missing_metadata");
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(100);
-  const [useMusicBrainz, setUseMusicBrainz] = useState(true);
-  const [useLastFm, setUseLastFm] = useState(false);
-  const [lastfmApiKey, setLastfmApiKey] = useState("");
+  const [providers, setProviders] = useState<EnrichmentProviderDescriptor[]>([]);
+  const [selectedProviderIds, setSelectedProviderIds] = useState<Set<string>>(
+    new Set(["musicbrainz"])
+  );
   const [lastResult, setLastResult] = useState<EnrichmentRunResult | null>(null);
   const [progress, setProgress] = useState<EnrichmentProgressEvent | null>(null);
   const [message, setMessage] = useState("");
@@ -168,6 +172,7 @@ export function EnrichmentPage() {
 
   useEffect(() => {
     void loadLibraries();
+    void loadProviders();
     const unlisteners: UnlistenFn[] = [];
     listen<EnrichmentProgressEvent>("track-enrichment-progress", (event) => {
       setProgress(event.payload);
@@ -183,6 +188,21 @@ export function EnrichmentPage() {
       for (const unlisten of unlisteners) unlisten();
     };
   }, []);
+
+  async function loadProviders() {
+    try {
+      const response = await invoke<EnrichmentProviderDescriptor[]>("enrichment_providers");
+      setProviders(response);
+      setSelectedProviderIds((current) => {
+        const available = new Set(response.filter((provider) => provider.ready).map((provider) => provider.id));
+        const selected = new Set(Array.from(current).filter((providerId) => available.has(providerId)));
+        if (selected.size === 0 && available.has("musicbrainz")) selected.add("musicbrainz");
+        return selected;
+      });
+    } catch (error) {
+      setErrorMessage(translateBackendMessage(locale, String(error)));
+    }
+  }
 
   async function loadLibraries(preferredLibraryId = activeLibraryId) {
     setLoading(true);
@@ -277,8 +297,7 @@ export function EnrichmentPage() {
         libraryId: activeLibraryId,
         providers,
         limit,
-        trackIds: selectedTrackIds.size > 0 ? Array.from(selectedTrackIds) : null,
-        lastfmApiKey: lastfmApiKey.trim() || null
+        trackIds: selectedTrackIds.size > 0 ? Array.from(selectedTrackIds) : null
       });
       setLastResult(response);
       setMessage(
@@ -340,10 +359,18 @@ export function EnrichmentPage() {
   }
 
   function selectedProviders() {
-    const providers: string[] = [];
-    if (useMusicBrainz) providers.push("musicbrainz");
-    if (useLastFm) providers.push("lastfm");
-    return providers;
+    return providers
+      .filter((provider) => provider.ready && selectedProviderIds.has(provider.id))
+      .map((provider) => provider.id);
+  }
+
+  function toggleProvider(providerId: string) {
+    setSelectedProviderIds((current) => {
+      const next = new Set(current);
+      if (next.has(providerId)) next.delete(providerId);
+      else next.add(providerId);
+      return next;
+    });
   }
 
   function appendTerminalLog(entry: Omit<TerminalLogEntry, "id" | "time">) {
@@ -497,22 +524,40 @@ export function EnrichmentPage() {
               </div>
             </CardHeader>
             <CardContent className="grid gap-3">
-              <label className="flex min-h-9 items-center gap-2 rounded-md border border-border px-3 text-sm">
-                <input type="checkbox" checked={useMusicBrainz} disabled={running} onChange={(event) => setUseMusicBrainz(event.currentTarget.checked)} />
-                <span className="font-medium">MusicBrainz</span>
-              </label>
-              <label className="flex min-h-9 items-center gap-2 rounded-md border border-border px-3 text-sm">
-                <input type="checkbox" checked={useLastFm} disabled={running} onChange={(event) => setUseLastFm(event.currentTarget.checked)} />
-                <span className="font-medium">Last.fm</span>
-              </label>
-              <input
-                className="h-10 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                type="password"
-                value={lastfmApiKey}
-                disabled={!useLastFm || running}
-                placeholder="Last.fm API key"
-                onChange={(event) => setLastfmApiKey(event.currentTarget.value)}
-              />
+              {providers.map((provider) => (
+                <label
+                  key={provider.id}
+                  className={cn(
+                    "grid min-h-14 grid-cols-[auto_minmax(0,1fr)] items-start gap-2 rounded-md border border-border px-3 py-2 text-sm",
+                    !provider.ready && "opacity-60"
+                  )}
+                >
+                  <input
+                    className="mt-1"
+                    type="checkbox"
+                    checked={selectedProviderIds.has(provider.id)}
+                    disabled={running || !provider.ready}
+                    onChange={() => toggleProvider(provider.id)}
+                  />
+                  <span className="min-w-0">
+                    <span className="flex items-center justify-between gap-2">
+                      <strong>{provider.label}</strong>
+                      <span className={cn("text-[10px] font-semibold uppercase", provider.ready ? "text-emerald-600" : "text-amber-600")}>
+                        {provider.ready ? t("Lista") : t("Requiere credencial")}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">{provider.description}</span>
+                    <span className="mt-1 block truncate font-mono text-[10px] text-muted-foreground">
+                      {provider.capabilities.join(" · ")}
+                    </span>
+                  </span>
+                </label>
+              ))}
+              {providers.some((provider) => !provider.ready) ? (
+                <Link className="text-xs font-medium text-primary hover:underline" to="/settings">
+                  {t("Configurar credenciales en Settings")}
+                </Link>
+              ) : null}
               <div className="h-2 rounded-full bg-secondary">
                 <div
                   className="h-2 rounded-full bg-primary transition-all"

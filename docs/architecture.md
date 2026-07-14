@@ -28,7 +28,7 @@ Major domains:
 - Mastering jobs and events.
 - Turn jobs and events.
 - Indexed playlist libraries, memberships, draft playlists, and embeddings.
-- Encrypted settings, including the OpenAI API key and audio tool paths.
+- Encrypted settings, including OpenAI and enrichment-provider credentials and audio tool paths.
 
 The app never stores raw audio in SQLite. It stores file paths, metadata snapshots, derived analysis, and event logs.
 
@@ -146,6 +146,12 @@ The app shell listens to these events to report bridge health, while each featur
 11. Select tracks and add them to local draft playlists.
 12. Export draft playlists back to Rekordbox XML.
 
+## Metadata Enrichment Pipeline
+
+Track enrichment is a modular provider pipeline. The planner routes missing fields only to providers that declare the relevant capability. Provider adapters own authentication, request construction, retries, and rate limits. Successful calls create append-only field observations; a field-aware resolver selects canonical suggestions while retaining every provider value as provenance.
+
+Provider credentials are encrypted in local settings and loaded only by the Rust backend. The frontend receives configuration status and masked previews, never stored secret values. See [Metadata Enrichment](enrichment.md) for the provider contract, persistence model, and application policy.
+
 ## AI Boundaries
 
 AI is optional and scoped:
@@ -186,6 +192,7 @@ If OpenAI is not configured or a request fails, the app uses local deterministic
 
 - `src-tauri/src/lib.rs`
 - `src-tauri/src/local_conversion.rs`
+- `src-tauri/src/enrichment/*`
 - `src-tauri/src/mastering.rs`
 - `src-tauri/src/playlist_copilot.rs`
 - `src-tauri/src/playlist_index.rs`

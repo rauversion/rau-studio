@@ -20,6 +20,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
+mod enrichment;
 mod local_conversion;
 mod mastering;
 mod playlist_copilot;
@@ -1387,6 +1388,10 @@ pub fn run() {
             save_audio_tool_settings,
             get_language_settings,
             save_language_settings,
+            enrichment::enrichment_providers,
+            enrichment::enrichment_save_provider_credential,
+            enrichment::enrichment_clear_provider_credential,
+            enrichment::enrichment_test_provider,
             local_conversion::local_conversion_list_items,
             local_conversion::local_conversion_list_groups,
             local_conversion::local_conversion_group_items,

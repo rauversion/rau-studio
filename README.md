@@ -13,6 +13,7 @@ Rau Studio uses Tauri 2, Rust, React, TypeScript, SQLite, OpenAI-compatible AI f
 - [Mastering](docs/mastering.md): generate AIFF masters with presets, metadata, cover art, technical analysis, realtime events, and retryable history.
 - [Turn](docs/turn.md): generate MP4 spinning-record mockups from local cover art and audio, with range preview and realtime progress.
 - [Smart Playlists](docs/smart-playlists.md): index Rekordbox XML into SQLite, run lexical/vector search, browse artists/albums, inspect taxonomies, and generate playlist suggestions with Playlist Copilot.
+- [Metadata Enrichment](docs/enrichment.md): fill metadata gaps through capability-aware providers, encrypted credentials, durable observations, and field-level resolution.
 - [Import Rau Studio XML into Rekordbox](docs/rekordbox-import/README.md): visual guide for importing exported XML back into Rekordbox.
 - [macOS Signing and Notarization](docs/macos-signing.md): distribution notes for unsigned local builds and signed releases.
 - [Architecture](docs/architecture.md): technical notes about the desktop, Rust, SQLite, and UI structure.

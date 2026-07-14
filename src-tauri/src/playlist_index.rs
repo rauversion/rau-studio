@@ -1,4 +1,5 @@
 use crate::{
+    enrichment,
     playlist_copilot::{
         apply_guided_answer, rank_and_sequence_with_seed, DiscoveryMode, EnergyCurve, GuidedAnswer,
         HarmonicPolicy, PlaylistIntent as PlaylistCopilotInterpretation, SourcePolicy, TempoPolicy,
@@ -17,7 +18,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -373,6 +374,7 @@ pub struct PlaylistEnrichmentItem {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaylistEnrichmentRunResult {
+    run_id: String,
     library_id: String,
     processed_total: usize,
     matched_total: usize,
@@ -402,18 +404,6 @@ struct TrackEnrichmentProgressEvent {
     processed: usize,
     total: usize,
     timestamp: String,
-}
-
-#[derive(Debug, Clone)]
-struct ProviderSuggestion {
-    provider: String,
-    provider_key: Option<String>,
-    status: String,
-    confidence: f64,
-    fields: BTreeMap<String, String>,
-    payload: Value,
-    message: Option<String>,
-    source_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1243,11 +1233,10 @@ pub async fn playlist_enrichment_run(
     providers: Vec<String>,
     limit: Option<usize>,
     track_ids: Option<Vec<String>>,
-    lastfm_api_key: Option<String>,
 ) -> Result<PlaylistEnrichmentRunResult, String> {
     let app_for_error = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        run_enrichment_blocking(app, library_id, providers, limit, track_ids, lastfm_api_key)
+        run_enrichment_blocking(app, library_id, providers, limit, track_ids)
     })
     .await
     .map_err(|error| {
@@ -1598,6 +1587,66 @@ fn init_db(conn: &Connection) -> Result<(), String> {
           ON playlist_track_enrichments(library_id, updated_at);
         CREATE INDEX IF NOT EXISTS idx_playlist_track_enrichments_status
           ON playlist_track_enrichments(library_id, status, provider);
+
+        CREATE TABLE IF NOT EXISTS playlist_enrichment_runs (
+          id TEXT PRIMARY KEY,
+          library_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          providers_json TEXT NOT NULL DEFAULT '[]',
+          requested_fields_json TEXT NOT NULL DEFAULT '[]',
+          total_work INTEGER NOT NULL DEFAULT 0,
+          processed_total INTEGER NOT NULL DEFAULT 0,
+          matched_total INTEGER NOT NULL DEFAULT 0,
+          no_match_total INTEGER NOT NULL DEFAULT 0,
+          failed_total INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          completed_at TEXT,
+          FOREIGN KEY(library_id) REFERENCES playlist_index_libraries(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_enrichment_runs_library
+          ON playlist_enrichment_runs(library_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS playlist_enrichment_tasks (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          library_id TEXT NOT NULL,
+          track_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          status TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 1,
+          error_kind TEXT,
+          message TEXT,
+          started_at TEXT NOT NULL,
+          finished_at TEXT,
+          UNIQUE(run_id, track_id, provider),
+          FOREIGN KEY(run_id) REFERENCES playlist_enrichment_runs(id) ON DELETE CASCADE,
+          FOREIGN KEY(library_id, track_id)
+            REFERENCES playlist_index_tracks(library_id, track_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_enrichment_tasks_run
+          ON playlist_enrichment_tasks(run_id, status, provider);
+
+        CREATE TABLE IF NOT EXISTS playlist_enrichment_observations (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          library_id TEXT NOT NULL,
+          track_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          field TEXT NOT NULL,
+          value TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0,
+          provider_key TEXT,
+          source_url TEXT,
+          observed_at TEXT NOT NULL,
+          FOREIGN KEY(task_id) REFERENCES playlist_enrichment_tasks(id) ON DELETE CASCADE,
+          FOREIGN KEY(run_id) REFERENCES playlist_enrichment_runs(id) ON DELETE CASCADE,
+          FOREIGN KEY(library_id, track_id)
+            REFERENCES playlist_index_tracks(library_id, track_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_enrichment_observations_track
+          ON playlist_enrichment_observations(library_id, track_id, field, observed_at DESC);
 
         CREATE TABLE IF NOT EXISTS playlist_drafts (
           id TEXT PRIMARY KEY,
@@ -5616,14 +5665,14 @@ fn run_enrichment_blocking(
     providers: Vec<String>,
     limit: Option<usize>,
     track_ids: Option<Vec<String>>,
-    lastfm_api_key: Option<String>,
 ) -> Result<PlaylistEnrichmentRunResult, String> {
     let conn = open_db(&app)?;
     if get_library(&conn, &library_id)?.is_none() {
         return Err(format!("Libreria indexada no encontrada: {library_id}"));
     }
 
-    let providers = normalize_enrichment_providers(providers, lastfm_api_key.as_deref())?;
+    let providers = enrichment::normalize_provider_ids(providers)?;
+    let provider_clients = enrichment::load_provider_clients(&app, &providers)?;
     let selected_track_ids = track_ids
         .unwrap_or_default()
         .into_iter()
@@ -5639,7 +5688,21 @@ fn run_enrichment_blocking(
         tracks.retain(|track| selected_track_ids.contains(&track.track_id));
     }
 
-    let total_work = tracks.len() * providers.len();
+    let force_selected = !selected_track_ids.is_empty();
+    let total_work = tracks
+        .iter()
+        .map(enrichment_track_input)
+        .map(|track| {
+            enrichment::planned_provider_ids(&track, &provider_clients, force_selected).len()
+        })
+        .sum::<usize>();
+    let run_id = create_enrichment_run(
+        &conn,
+        &library_id,
+        &providers,
+        &provider_clients,
+        total_work,
+    )?;
     if total_work == 0 {
         emit_enrichment_progress(
             &app,
@@ -5652,7 +5715,9 @@ fn run_enrichment_blocking(
             0,
             0,
         );
+        update_enrichment_run_progress(&conn, &run_id, 0, 0, 0, 0, true)?;
         return Ok(PlaylistEnrichmentRunResult {
+            run_id,
             library_id,
             processed_total: 0,
             matched_total: 0,
@@ -5674,19 +5739,28 @@ fn run_enrichment_blocking(
         total_work,
     );
 
-    let lastfm_api_key = lastfm_api_key.unwrap_or_default();
     let mut processed_total = 0_usize;
     let mut matched_total = 0_usize;
     let mut no_match_total = 0_usize;
     let mut failed_total = 0_usize;
 
+    let mut last_provider_calls = HashMap::<String, Instant>::new();
     for track in &tracks {
-        for provider in &providers {
+        let mut enrichment_track = enrichment_track_input(track);
+        let planned_providers =
+            enrichment::planned_provider_ids(&enrichment_track, &provider_clients, force_selected)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+        for provider_client in &provider_clients {
+            let provider = provider_client.id();
+            if !planned_providers.contains(provider) {
+                continue;
+            }
             emit_enrichment_progress(
                 &app,
                 &library_id,
                 Some(track.track_id.clone()),
-                Some(provider.clone()),
+                Some(provider.to_string()),
                 Some("running".to_string()),
                 "info",
                 &format!(
@@ -5697,15 +5771,21 @@ fn run_enrichment_blocking(
                 total_work,
             );
 
-            let suggestion = match provider.as_str() {
-                "musicbrainz" => enrich_with_musicbrainz(track),
-                "lastfm" => enrich_with_lastfm(track, &lastfm_api_key),
-                _ => Ok(no_match_suggestion(
-                    provider,
-                    "Proveedor de enrichment no soportado.",
-                )),
+            let task_id =
+                create_enrichment_task(&conn, &run_id, &library_id, &track.track_id, provider)?;
+            wait_for_provider_rate_limit(provider_client, &last_provider_calls);
+            let suggestion = provider_client.enrich(&enrichment_track);
+            last_provider_calls.insert(provider.to_string(), Instant::now());
+
+            if suggestion.status == "matched" {
+                for key in ["musicbrainz_recording_id", "musicbrainz_release_id", "isrc"] {
+                    if let Some(value) = suggestion.fields.get(key) {
+                        enrichment_track
+                            .external_ids
+                            .insert(key.to_string(), value.clone());
+                    }
+                }
             }
-            .unwrap_or_else(|error| failed_suggestion(provider, &error));
 
             match suggestion.status.as_str() {
                 "matched" => matched_total += 1,
@@ -5714,13 +5794,30 @@ fn run_enrichment_blocking(
             }
 
             upsert_enrichment_result(&conn, &library_id, &track.track_id, &suggestion)?;
+            finish_enrichment_task(
+                &conn,
+                &task_id,
+                &run_id,
+                &library_id,
+                &track.track_id,
+                &suggestion,
+            )?;
             processed_total += 1;
+            update_enrichment_run_progress(
+                &conn,
+                &run_id,
+                processed_total,
+                matched_total,
+                no_match_total,
+                failed_total,
+                false,
+            )?;
 
             emit_enrichment_progress(
                 &app,
                 &library_id,
                 Some(track.track_id.clone()),
-                Some(provider.clone()),
+                Some(provider.to_string()),
                 Some(suggestion.status.clone()),
                 if suggestion.status == "failed" {
                     "error"
@@ -5734,12 +5831,6 @@ fn run_enrichment_blocking(
                 processed_total,
                 total_work,
             );
-
-            if provider == "musicbrainz" {
-                thread::sleep(Duration::from_millis(1100));
-            } else if provider == "lastfm" {
-                thread::sleep(Duration::from_millis(250));
-            }
         }
     }
 
@@ -5754,8 +5845,18 @@ fn run_enrichment_blocking(
         processed_total,
         total_work,
     );
+    update_enrichment_run_progress(
+        &conn,
+        &run_id,
+        processed_total,
+        matched_total,
+        no_match_total,
+        failed_total,
+        true,
+    )?;
 
     Ok(PlaylistEnrichmentRunResult {
+        run_id,
         library_id,
         processed_total,
         matched_total,
@@ -5765,37 +5866,207 @@ fn run_enrichment_blocking(
     })
 }
 
-fn normalize_enrichment_providers(
-    providers: Vec<String>,
-    lastfm_api_key: Option<&str>,
-) -> Result<Vec<String>, String> {
-    let mut normalized = Vec::new();
-    for provider in providers {
-        let provider = provider.trim().to_ascii_lowercase();
-        if provider.is_empty() || normalized.contains(&provider) {
-            continue;
+fn wait_for_provider_rate_limit(
+    provider: &enrichment::ProviderClient,
+    last_calls: &HashMap<String, Instant>,
+) {
+    let Some(last_call) = last_calls.get(provider.id()) else {
+        return;
+    };
+    let minimum = Duration::from_millis(provider.definition().min_interval_ms);
+    let elapsed = last_call.elapsed();
+    if elapsed < minimum {
+        thread::sleep(minimum - elapsed);
+    }
+}
+
+fn enrichment_track_input(track: &PlaylistIndexTrack) -> enrichment::EnrichmentTrack {
+    let mut external_ids = BTreeMap::new();
+    for (field, aliases) in [
+        (
+            "musicbrainz_recording_id",
+            &["MusicBrainzRecordingID", "MusicBrainz Track Id"][..],
+        ),
+        ("musicbrainz_release_id", &["MusicBrainzReleaseID"][..]),
+        ("isrc", &["ISRC", "Isrc"][..]),
+    ] {
+        if let Some(value) = attribute_value(&track.attributes, aliases) {
+            external_ids.insert(field.to_string(), value);
         }
-        normalized.push(provider);
     }
-    if normalized.is_empty() {
-        normalized.push("musicbrainz".to_string());
+    enrichment::EnrichmentTrack {
+        track_id: track.track_id.clone(),
+        title: track.name.clone(),
+        artist: track.artist.clone(),
+        album: track.album.clone(),
+        total_time: track.total_time,
+        genre: track.genre.clone(),
+        comments: track.comments.clone(),
+        bpm: track.bpm.clone(),
+        key: track.key.clone(),
+        year: track.year.clone(),
+        label: track.label.clone(),
+        external_ids,
     }
-    if normalized.iter().any(|provider| provider == "lastfm")
-        && lastfm_api_key
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-    {
-        return Err("Ingresa una Last.fm API key o desactiva Last.fm.".to_string());
+}
+
+fn create_enrichment_run(
+    conn: &Connection,
+    library_id: &str,
+    providers: &[String],
+    provider_clients: &[enrichment::ProviderClient],
+    total_work: usize,
+) -> Result<String, String> {
+    let run_id = Uuid::new_v4().to_string();
+    let now = timestamp();
+    let providers_json = serde_json::to_string(providers)
+        .map_err(|error| format!("No se pudieron serializar proveedores: {error}"))?;
+    let requested_fields = provider_clients
+        .iter()
+        .flat_map(|provider| provider.definition().capabilities.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let requested_fields_json = serde_json::to_string(&requested_fields)
+        .map_err(|error| format!("No se pudieron serializar capabilities: {error}"))?;
+    conn.execute(
+        "INSERT INTO playlist_enrichment_runs (
+            id, library_id, status, providers_json, requested_fields_json,
+            total_work, created_at, started_at
+         ) VALUES (?1, ?2, 'running', ?3, ?4, ?5, ?6, ?6)",
+        params![
+            &run_id,
+            library_id,
+            &providers_json,
+            &requested_fields_json,
+            total_work as i64,
+            &now,
+        ],
+    )
+    .map_err(|error| format!("No se pudo crear corrida de enrichment: {error}"))?;
+    Ok(run_id)
+}
+
+fn create_enrichment_task(
+    conn: &Connection,
+    run_id: &str,
+    library_id: &str,
+    track_id: &str,
+    provider: &str,
+) -> Result<String, String> {
+    let task_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO playlist_enrichment_tasks (
+            id, run_id, library_id, track_id, provider, status, started_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
+        params![
+            &task_id,
+            run_id,
+            library_id,
+            track_id,
+            provider,
+            timestamp(),
+        ],
+    )
+    .map_err(|error| format!("No se pudo crear tarea de enrichment: {error}"))?;
+    Ok(task_id)
+}
+
+fn finish_enrichment_task(
+    conn: &Connection,
+    task_id: &str,
+    run_id: &str,
+    library_id: &str,
+    track_id: &str,
+    suggestion: &enrichment::ProviderSuggestion,
+) -> Result<(), String> {
+    let now = timestamp();
+    let error_kind = suggestion.payload.get("error_kind").and_then(Value::as_str);
+    conn.execute(
+        "UPDATE playlist_enrichment_tasks
+         SET status = ?2, error_kind = ?3, message = ?4, finished_at = ?5
+         WHERE id = ?1",
+        params![
+            task_id,
+            &suggestion.status,
+            error_kind,
+            &suggestion.message,
+            &now,
+        ],
+    )
+    .map_err(|error| format!("No se pudo finalizar tarea de enrichment: {error}"))?;
+
+    if suggestion.status == "matched" {
+        for (field, value) in &suggestion.fields {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            conn.execute(
+                "INSERT INTO playlist_enrichment_observations (
+                    id, task_id, run_id, library_id, track_id, provider, field, value,
+                    confidence, provider_key, source_url, observed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    task_id,
+                    run_id,
+                    library_id,
+                    track_id,
+                    &suggestion.provider,
+                    field,
+                    value,
+                    suggestion.confidence,
+                    &suggestion.provider_key,
+                    &suggestion.source_url,
+                    &now,
+                ],
+            )
+            .map_err(|error| format!("No se pudo guardar observacion de enrichment: {error}"))?;
+        }
     }
-    Ok(normalized)
+    Ok(())
+}
+
+fn update_enrichment_run_progress(
+    conn: &Connection,
+    run_id: &str,
+    processed_total: usize,
+    matched_total: usize,
+    no_match_total: usize,
+    failed_total: usize,
+    finished: bool,
+) -> Result<(), String> {
+    let status = if !finished {
+        "running"
+    } else if failed_total > 0 {
+        "partial"
+    } else {
+        "completed"
+    };
+    let completed_at = finished.then(timestamp);
+    conn.execute(
+        "UPDATE playlist_enrichment_runs
+         SET status = ?2, processed_total = ?3, matched_total = ?4,
+             no_match_total = ?5, failed_total = ?6, completed_at = ?7
+         WHERE id = ?1",
+        params![
+            run_id,
+            status,
+            processed_total as i64,
+            matched_total as i64,
+            no_match_total as i64,
+            failed_total as i64,
+            completed_at,
+        ],
+    )
+    .map_err(|error| format!("No se pudo actualizar corrida de enrichment: {error}"))?;
+    Ok(())
 }
 
 fn upsert_enrichment_result(
     conn: &Connection,
     library_id: &str,
     track_id: &str,
-    suggestion: &ProviderSuggestion,
+    suggestion: &enrichment::ProviderSuggestion,
 ) -> Result<(), String> {
     let now = timestamp();
     let fields_json = serde_json::to_string(&suggestion.fields)
@@ -5838,472 +6109,6 @@ fn upsert_enrichment_result(
     Ok(())
 }
 
-fn enrich_with_musicbrainz(track: &PlaylistIndexTrack) -> Result<ProviderSuggestion, String> {
-    let Some(title) = clean_track_text(track.name.as_deref()) else {
-        return Ok(no_match_suggestion(
-            "musicbrainz",
-            "Track sin titulo para buscar.",
-        ));
-    };
-    let Some(artist) = clean_track_text(track.artist.as_deref()) else {
-        return Ok(no_match_suggestion(
-            "musicbrainz",
-            "Track sin artista para buscar.",
-        ));
-    };
-
-    let mut query = format!(
-        "recording:\"{}\" AND artist:\"{}\"",
-        escape_musicbrainz_query(&title),
-        escape_musicbrainz_query(&artist)
-    );
-    if let Some(album) = clean_track_text(track.album.as_deref()) {
-        query.push_str(&format!(
-            " AND release:\"{}\"",
-            escape_musicbrainz_query(&album)
-        ));
-    }
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(18))
-        .user_agent(format!(
-            "RauStudio/{}/playlist-enrichment",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .map_err(|error| format!("No se pudo crear cliente MusicBrainz: {error}"))?;
-    let url = reqwest::Url::parse_with_params(
-        "https://musicbrainz.org/ws/2/recording",
-        &[("query", query.as_str()), ("fmt", "json"), ("limit", "5")],
-    )
-    .map_err(|error| format!("No se pudo construir URL MusicBrainz: {error}"))?;
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|error| format!("MusicBrainz no respondio: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("MusicBrainz retorno error: {error}"))?
-        .json::<Value>()
-        .map_err(|error| format!("MusicBrainz retorno JSON invalido: {error}"))?;
-
-    let Some(recordings) = response.get("recordings").and_then(Value::as_array) else {
-        return Ok(no_match_suggestion(
-            "musicbrainz",
-            "MusicBrainz no retorno recordings.",
-        ));
-    };
-
-    let mut best: Option<(f64, &Value)> = None;
-    for recording in recordings {
-        let confidence = musicbrainz_recording_confidence(track, recording);
-        if best
-            .as_ref()
-            .map(|(current, _)| confidence > *current)
-            .unwrap_or(true)
-        {
-            best = Some((confidence, recording));
-        }
-    }
-
-    let Some((confidence, recording)) = best else {
-        return Ok(no_match_suggestion(
-            "musicbrainz",
-            "Sin candidatos MusicBrainz.",
-        ));
-    };
-    let fields = musicbrainz_recording_fields(recording);
-    let recording_id = fields.get("musicbrainz_recording_id").cloned();
-    let source_url = recording_id
-        .as_ref()
-        .map(|id| format!("https://musicbrainz.org/recording/{id}"));
-
-    if confidence < 0.65 {
-        return Ok(ProviderSuggestion {
-            provider: "musicbrainz".to_string(),
-            provider_key: recording_id,
-            status: "no_match".to_string(),
-            confidence,
-            fields,
-            payload: recording.clone(),
-            message: Some(
-                "MusicBrainz encontro candidatos, pero la confianza fue baja.".to_string(),
-            ),
-            source_url,
-        });
-    }
-
-    Ok(ProviderSuggestion {
-        provider: "musicbrainz".to_string(),
-        provider_key: recording_id,
-        status: "matched".to_string(),
-        confidence,
-        fields,
-        payload: recording.clone(),
-        message: Some(format!(
-            "Match MusicBrainz con confianza {:.0}%.",
-            confidence * 100.0
-        )),
-        source_url,
-    })
-}
-
-fn enrich_with_lastfm(
-    track: &PlaylistIndexTrack,
-    api_key: &str,
-) -> Result<ProviderSuggestion, String> {
-    let Some(title) = clean_track_text(track.name.as_deref()) else {
-        return Ok(no_match_suggestion(
-            "lastfm",
-            "Track sin titulo para buscar.",
-        ));
-    };
-    let Some(artist) = clean_track_text(track.artist.as_deref()) else {
-        return Ok(no_match_suggestion(
-            "lastfm",
-            "Track sin artista para buscar.",
-        ));
-    };
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(18))
-        .user_agent(format!(
-            "RauStudio/{}/playlist-enrichment",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .map_err(|error| format!("No se pudo crear cliente Last.fm: {error}"))?;
-    let url = reqwest::Url::parse_with_params(
-        "https://ws.audioscrobbler.com/2.0/",
-        &[
-            ("method", "track.getInfo"),
-            ("api_key", api_key),
-            ("artist", artist.as_str()),
-            ("track", title.as_str()),
-            ("autocorrect", "1"),
-            ("format", "json"),
-        ],
-    )
-    .map_err(|error| format!("No se pudo construir URL Last.fm: {error}"))?;
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|error| format!("Last.fm no respondio: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("Last.fm retorno error: {error}"))?
-        .json::<Value>()
-        .map_err(|error| format!("Last.fm retorno JSON invalido: {error}"))?;
-
-    if let Some(error_code) = response.get("error").and_then(Value::as_i64) {
-        let message = response
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Last.fm no encontro metadata.");
-        if error_code == 6 || error_code == 7 {
-            return Ok(no_match_suggestion("lastfm", message));
-        }
-        return Err(format!("Last.fm error {error_code}: {message}"));
-    }
-
-    let Some(track_payload) = response.get("track") else {
-        return Ok(no_match_suggestion("lastfm", "Last.fm no retorno track."));
-    };
-    let fields = lastfm_track_fields(track_payload);
-    let provider_key = fields
-        .get("lastfm_url")
-        .cloned()
-        .or_else(|| fields.get("title").cloned());
-    let source_url = fields.get("lastfm_url").cloned();
-    let confidence = lastfm_confidence(track, track_payload);
-
-    Ok(ProviderSuggestion {
-        provider: "lastfm".to_string(),
-        provider_key,
-        status: "matched".to_string(),
-        confidence,
-        fields,
-        payload: track_payload.clone(),
-        message: Some(format!(
-            "Tags Last.fm con confianza {:.0}%.",
-            confidence * 100.0
-        )),
-        source_url,
-    })
-}
-
-fn musicbrainz_recording_confidence(track: &PlaylistIndexTrack, recording: &Value) -> f64 {
-    let score = recording
-        .get("score")
-        .and_then(|value| {
-            value
-                .as_i64()
-                .map(|value| value as f64)
-                .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))
-        })
-        .unwrap_or(0.0)
-        / 100.0;
-    let title_score = string_match_score(
-        track.name.as_deref().unwrap_or_default(),
-        recording
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    );
-    let artist_score = string_match_score(
-        track.artist.as_deref().unwrap_or_default(),
-        &musicbrainz_artist_credit(recording).unwrap_or_default(),
-    );
-    let duration_score = musicbrainz_duration_score(track, recording);
-
-    (score * 0.55 + title_score * 0.2 + artist_score * 0.2 + duration_score * 0.05).clamp(0.0, 1.0)
-}
-
-fn musicbrainz_duration_score(track: &PlaylistIndexTrack, recording: &Value) -> f64 {
-    let Some(local_seconds) = track.total_time.map(|value| value as f64) else {
-        return 0.5;
-    };
-    let Some(remote_ms) = recording.get("length").and_then(Value::as_f64) else {
-        return 0.5;
-    };
-    let remote_seconds = remote_ms / 1000.0;
-    let diff = (local_seconds - remote_seconds).abs();
-    if diff <= 4.0 {
-        1.0
-    } else if diff <= 12.0 {
-        0.75
-    } else if diff <= 30.0 {
-        0.35
-    } else {
-        0.0
-    }
-}
-
-fn musicbrainz_recording_fields(recording: &Value) -> BTreeMap<String, String> {
-    let mut fields = BTreeMap::new();
-    insert_json_string(&mut fields, "musicbrainz_recording_id", recording.get("id"));
-    insert_json_string(&mut fields, "title", recording.get("title"));
-
-    if let Some(artist) = musicbrainz_artist_credit(recording) {
-        fields.insert("artist".to_string(), artist);
-    }
-    if let Some(artist_id) = recording
-        .get("artist-credit")
-        .and_then(Value::as_array)
-        .and_then(|credits| credits.first())
-        .and_then(|credit| credit.get("artist"))
-        .and_then(|artist| artist.get("id"))
-        .and_then(Value::as_str)
-    {
-        fields.insert("musicbrainz_artist_id".to_string(), artist_id.to_string());
-    }
-    if let Some(isrc) = recording
-        .get("isrcs")
-        .and_then(Value::as_array)
-        .and_then(|values| values.first())
-        .and_then(Value::as_str)
-    {
-        fields.insert("isrc".to_string(), isrc.to_string());
-    }
-    if let Some(genre) = musicbrainz_top_genre(recording) {
-        fields.insert("genre".to_string(), genre);
-    }
-    if let Some(release) = recording
-        .get("releases")
-        .and_then(Value::as_array)
-        .and_then(|releases| releases.first())
-    {
-        insert_json_string(&mut fields, "musicbrainz_release_id", release.get("id"));
-        insert_json_string(&mut fields, "album", release.get("title"));
-        if let Some(date) = release.get("date").and_then(Value::as_str) {
-            fields.insert("release_date".to_string(), date.to_string());
-            if let Some(year) = date
-                .get(0..4)
-                .filter(|year| year.chars().all(|c| c.is_ascii_digit()))
-            {
-                fields.insert("year".to_string(), year.to_string());
-            }
-        }
-        if let Some(label) = release
-            .get("label-info")
-            .and_then(Value::as_array)
-            .and_then(|labels| labels.first())
-            .and_then(|label| label.get("label"))
-            .and_then(|label| label.get("name"))
-            .and_then(Value::as_str)
-        {
-            fields.insert("label".to_string(), label.to_string());
-        }
-    }
-
-    fields
-}
-
-fn musicbrainz_artist_credit(recording: &Value) -> Option<String> {
-    let credits = recording.get("artist-credit")?.as_array()?;
-    let names = credits
-        .iter()
-        .filter_map(|credit| {
-            credit
-                .get("name")
-                .and_then(Value::as_str)
-                .or_else(|| credit.get("artist")?.get("name").and_then(Value::as_str))
-        })
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    (!names.is_empty()).then(|| names.join(", "))
-}
-
-fn musicbrainz_top_genre(recording: &Value) -> Option<String> {
-    let genres = recording
-        .get("genres")
-        .and_then(Value::as_array)
-        .or_else(|| recording.get("tags").and_then(Value::as_array))?;
-    genres
-        .iter()
-        .filter_map(|genre| {
-            let name = genre.get("name").and_then(Value::as_str)?;
-            let count = genre
-                .get("count")
-                .and_then(Value::as_i64)
-                .unwrap_or_default();
-            Some((count, name.trim()))
-        })
-        .filter(|(_, name)| !name.is_empty())
-        .max_by_key(|(count, _)| *count)
-        .map(|(_, name)| name.to_string())
-}
-
-fn lastfm_track_fields(track_payload: &Value) -> BTreeMap<String, String> {
-    let mut fields = BTreeMap::new();
-    insert_json_string(&mut fields, "title", track_payload.get("name"));
-    insert_json_string(&mut fields, "lastfm_url", track_payload.get("url"));
-    insert_json_string(&mut fields, "listeners", track_payload.get("listeners"));
-    insert_json_string(&mut fields, "playcount", track_payload.get("playcount"));
-    if let Some(artist) = track_payload
-        .get("artist")
-        .and_then(|artist| artist.get("name"))
-        .and_then(Value::as_str)
-    {
-        fields.insert("artist".to_string(), artist.to_string());
-    }
-    let tags = track_payload
-        .get("toptags")
-        .and_then(|tags| tags.get("tag"))
-        .and_then(Value::as_array)
-        .map(|tags| {
-            tags.iter()
-                .filter_map(|tag| tag.get("name").and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|tag| !tag.is_empty())
-                .take(8)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if let Some(first_tag) = tags.first() {
-        fields.insert("genre".to_string(), first_tag.clone());
-    }
-    if !tags.is_empty() {
-        fields.insert("tags".to_string(), tags.join(", "));
-    }
-    fields
-}
-
-fn lastfm_confidence(track: &PlaylistIndexTrack, track_payload: &Value) -> f64 {
-    let title_score = string_match_score(
-        track.name.as_deref().unwrap_or_default(),
-        track_payload
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    );
-    let artist_score = string_match_score(
-        track.artist.as_deref().unwrap_or_default(),
-        track_payload
-            .get("artist")
-            .and_then(|artist| artist.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    );
-    (0.55 + title_score * 0.25 + artist_score * 0.2).clamp(0.0, 1.0)
-}
-
-fn string_match_score(left: &str, right: &str) -> f64 {
-    let left = normalize_for_match(left);
-    let right = normalize_for_match(right);
-    if left.is_empty() || right.is_empty() {
-        return 0.0;
-    }
-    if left == right {
-        return 1.0;
-    }
-    if normalized_contains_phrase(&left, &right) || normalized_contains_phrase(&right, &left) {
-        return 0.75;
-    }
-    let left_tokens = left.split_whitespace().collect::<BTreeSet<_>>();
-    let right_tokens = right.split_whitespace().collect::<BTreeSet<_>>();
-    if left_tokens.is_empty() || right_tokens.is_empty() {
-        return 0.0;
-    }
-    let intersection = left_tokens.intersection(&right_tokens).count() as f64;
-    let union = left_tokens.union(&right_tokens).count() as f64;
-    (intersection / union).clamp(0.0, 1.0)
-}
-
-fn no_match_suggestion(provider: &str, message: &str) -> ProviderSuggestion {
-    ProviderSuggestion {
-        provider: provider.to_string(),
-        provider_key: None,
-        status: "no_match".to_string(),
-        confidence: 0.0,
-        fields: BTreeMap::new(),
-        payload: json!({}),
-        message: Some(message.to_string()),
-        source_url: None,
-    }
-}
-
-fn failed_suggestion(provider: &str, message: &str) -> ProviderSuggestion {
-    ProviderSuggestion {
-        provider: provider.to_string(),
-        provider_key: None,
-        status: "failed".to_string(),
-        confidence: 0.0,
-        fields: BTreeMap::new(),
-        payload: json!({ "error": message }),
-        message: Some(message.to_string()),
-        source_url: None,
-    }
-}
-
-fn clean_track_text(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn escape_musicbrainz_query(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn insert_json_string(fields: &mut BTreeMap<String, String>, key: &str, value: Option<&Value>) {
-    if let Some(value) = value.and_then(json_scalar_to_string) {
-        if !value.trim().is_empty() {
-            fields.insert(key.to_string(), value);
-        }
-    }
-}
-
-fn json_scalar_to_string(value: &Value) -> Option<String> {
-    value
-        .as_str()
-        .map(ToOwned::to_owned)
-        .or_else(|| value.as_i64().map(|value| value.to_string()))
-        .or_else(|| value.as_u64().map(|value| value.to_string()))
-        .or_else(|| value.as_f64().map(|value| value.to_string()))
-}
-
 fn apply_enrichment_results(
     conn: &mut Connection,
     library_id: &str,
@@ -6327,14 +6132,14 @@ fn apply_enrichment_results(
         .map_err(|error| format!("No se pudo iniciar transaccion de enrichment: {error}"))?;
     let mut applied_total = 0_usize;
     let mut skipped_total = 0_usize;
+    let mut by_track =
+        BTreeMap::<String, Vec<(String, String, f64, BTreeMap<String, String>)>>::new();
 
     for result_id in ids {
         let result = tx
             .query_row(
-                "SELECT e.id, e.provider, e.fields_json, e.status, t.track_id, t.attributes_json
+                "SELECT e.id, e.provider, e.fields_json, e.status, e.track_id, e.confidence
                  FROM playlist_track_enrichments e
-                 JOIN playlist_index_tracks t
-                   ON t.library_id = e.library_id AND t.track_id = e.track_id
                  WHERE e.library_id = ?1 AND e.id = ?2",
                 params![library_id, &result_id],
                 |row| {
@@ -6344,13 +6149,13 @@ fn apply_enrichment_results(
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, f64>(5)?,
                     ))
                 },
             )
             .optional()
             .map_err(|error| format!("No se pudo leer resultado de enrichment: {error}"))?;
-        let Some((id, provider, fields_json, status, track_id, attributes_json)) = result else {
+        let Some((id, provider, fields_json, status, track_id, confidence)) = result else {
             skipped_total += 1;
             continue;
         };
@@ -6361,37 +6166,63 @@ fn apply_enrichment_results(
 
         let fields =
             serde_json::from_str::<BTreeMap<String, String>>(&fields_json).unwrap_or_default();
-        let mut attributes = parse_track_attributes_json(attributes_json);
-        let changed = merge_enrichment_fields(&mut attributes, &provider, &fields);
-        if !changed {
-            skipped_total += 1;
-            continue;
-        }
+        by_track
+            .entry(track_id)
+            .or_default()
+            .push((id, provider, confidence, fields));
+    }
 
+    let mut metadata_changed = false;
+    for (track_id, results) in by_track {
         let track = get_index_track(&tx, library_id, &track_id)?
             .ok_or_else(|| format!("Track indexado no encontrado: {track_id}"))?;
-        let playlist_paths = indexed_playlist_paths_for_track(&tx, library_id, &track_id)?;
-        let search_text = indexed_track_search_text(&track, &attributes, &playlist_paths);
-        let attributes_json = serde_json::to_string(&attributes)
-            .map_err(|error| format!("No se pudo serializar attributes_json: {error}"))?;
+        let mut attributes = track.attributes.clone();
+        let mut changed = false;
+        for (_, provider, _, fields) in &results {
+            changed |= merge_enrichment_provenance(&mut attributes, provider, fields);
+        }
+        let resolution_inputs = results
+            .iter()
+            .map(
+                |(_, provider, confidence, fields)| enrichment::ResolutionInput {
+                    provider: provider.clone(),
+                    confidence: *confidence,
+                    fields: fields.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        changed |= apply_resolved_enrichment_fields(
+            &mut attributes,
+            &enrichment::resolve_fields(&resolution_inputs),
+        );
 
-        tx.execute(
-            "UPDATE playlist_index_tracks
-             SET attributes_json = ?3,
-                 search_text = ?4,
-                 updated_at = ?5
-             WHERE library_id = ?1 AND track_id = ?2",
-            params![library_id, &track_id, &attributes_json, &search_text, &now],
-        )
-        .map_err(|error| format!("No se pudo aplicar enrichment en {track_id}: {error}"))?;
-        tx.execute(
-            "UPDATE playlist_track_enrichments
-             SET applied_at = ?3, updated_at = ?3
-             WHERE library_id = ?1 AND id = ?2",
-            params![library_id, &id, &now],
-        )
-        .map_err(|error| format!("No se pudo marcar enrichment aplicado: {error}"))?;
-        applied_total += 1;
+        if changed {
+            let playlist_paths = indexed_playlist_paths_for_track(&tx, library_id, &track_id)?;
+            let search_text = indexed_track_search_text(&track, &attributes, &playlist_paths);
+            let attributes_json = serde_json::to_string(&attributes)
+                .map_err(|error| format!("No se pudo serializar attributes_json: {error}"))?;
+            tx.execute(
+                "UPDATE playlist_index_tracks
+                 SET attributes_json = ?3,
+                     search_text = ?4,
+                     updated_at = ?5
+                 WHERE library_id = ?1 AND track_id = ?2",
+                params![library_id, &track_id, &attributes_json, &search_text, &now],
+            )
+            .map_err(|error| format!("No se pudo aplicar enrichment en {track_id}: {error}"))?;
+            metadata_changed = true;
+        }
+
+        for (id, _, _, _) in &results {
+            tx.execute(
+                "UPDATE playlist_track_enrichments
+                 SET applied_at = ?3, updated_at = ?3
+                 WHERE library_id = ?1 AND id = ?2",
+                params![library_id, id, &now],
+            )
+            .map_err(|error| format!("No se pudo marcar enrichment aplicado: {error}"))?;
+        }
+        applied_total += results.len();
     }
 
     tx.execute(
@@ -6401,7 +6232,9 @@ fn apply_enrichment_results(
     .map_err(|error| format!("No se pudo actualizar libreria: {error}"))?;
     tx.commit()
         .map_err(|error| format!("No se pudo confirmar enrichment aplicado: {error}"))?;
-    rebuild_fts(conn)?;
+    if metadata_changed {
+        rebuild_fts(conn)?;
+    }
 
     Ok(PlaylistEnrichmentApplyResult {
         library_id: library_id.to_string(),
@@ -6446,7 +6279,7 @@ fn clear_enrichment_results(
     Ok(deleted)
 }
 
-fn merge_enrichment_fields(
+fn merge_enrichment_provenance(
     attributes: &mut BTreeMap<String, String>,
     provider: &str,
     fields: &BTreeMap<String, String>,
@@ -6465,40 +6298,33 @@ fn merge_enrichment_fields(
         }
     }
 
-    changed |= set_attribute_if_missing(attributes, &["Genre"], "Genre", fields.get("genre"));
-    changed |= set_attribute_if_missing(attributes, &["Year"], "Year", fields.get("year"));
-    changed |= set_attribute_if_missing(attributes, &["Label"], "Label", fields.get("label"));
-    changed |= set_attribute_if_missing(attributes, &["ISRC", "Isrc"], "ISRC", fields.get("isrc"));
-    changed |= set_attribute_if_missing(
-        attributes,
-        &["MusicBrainzRecordingID", "MusicBrainz Track Id"],
-        "MusicBrainzRecordingID",
-        fields.get("musicbrainz_recording_id"),
-    );
-    changed |= set_attribute_if_missing(
-        attributes,
-        &["MusicBrainzReleaseID"],
-        "MusicBrainzReleaseID",
-        fields.get("musicbrainz_release_id"),
-    );
+    changed
+}
 
-    if attribute_value(attributes, &["Comments", "Comment"]).is_none() {
-        let comment = fields
-            .get("tags")
-            .map(|tags| format!("Tags: {tags}"))
-            .or_else(|| {
-                fields
-                    .get("lastfm_url")
-                    .map(|url| format!("Last.fm: {url}"))
-            });
-        changed |= set_attribute_if_missing(
-            attributes,
-            &["Comments", "Comment"],
-            "Comments",
-            comment.as_ref(),
-        );
+fn apply_resolved_enrichment_fields(
+    attributes: &mut BTreeMap<String, String>,
+    resolved: &BTreeMap<String, enrichment::ResolvedField>,
+) -> bool {
+    let mut changed = false;
+    for (field, value) in resolved {
+        let (lookup_keys, canonical_key): (&[&str], &str) = match field.as_str() {
+            "genre" => (&["Genre"], "Genre"),
+            "year" => (&["Year"], "Year"),
+            "label" => (&["Label"], "Label"),
+            "isrc" => (&["ISRC", "Isrc"], "ISRC"),
+            "comments" => (&["Comments", "Comment"], "Comments"),
+            "bpm" => (&["AverageBpm", "Bpm", "BPM"], "AverageBpm"),
+            "key" => (&["Tonality", "Key"], "Tonality"),
+            "musicbrainz_recording_id" => (
+                &["MusicBrainzRecordingID", "MusicBrainz Track Id"],
+                "MusicBrainzRecordingID",
+            ),
+            "musicbrainz_release_id" => (&["MusicBrainzReleaseID"], "MusicBrainzReleaseID"),
+            _ => continue,
+        };
+        changed |=
+            set_attribute_if_missing(attributes, lookup_keys, canonical_key, Some(&value.value));
     }
-
     changed
 }
 
@@ -7148,6 +6974,11 @@ mod playlist_index_tests {
             .contains(&"ranker_version".into()));
         assert!(table_columns(&conn, "playlist_copilot_candidate_tracks")
             .contains(&"score_components_json".into()));
+        assert!(table_columns(&conn, "playlist_enrichment_runs").contains(&"providers_json".into()));
+        assert!(table_columns(&conn, "playlist_enrichment_tasks").contains(&"error_kind".into()));
+        assert!(
+            table_columns(&conn, "playlist_enrichment_observations").contains(&"confidence".into())
+        );
     }
 
     #[test]
@@ -7245,6 +7076,161 @@ mod playlist_index_tests {
         let recent = recent_copilot_suggestion_counts(&conn, "library-1", 8)
             .expect("load recent suggestions");
         assert_eq!(recent.get("track-1"), Some(&1));
+    }
+
+    #[test]
+    fn applying_multiple_sources_resolves_each_field_and_marks_all_results() {
+        let mut conn = Connection::open_in_memory().expect("open sqlite");
+        init_db(&conn).expect("initialize schema");
+        let now = timestamp();
+        conn.execute(
+            "INSERT INTO playlist_index_libraries (
+                id, source_path, source_name, indexed_at, updated_at
+             ) VALUES ('library-1', '/tmp/library.xml', 'library.xml', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert library");
+        conn.execute(
+            "INSERT INTO playlist_index_tracks (
+                library_id, track_id, name, artist, source_exists, search_text,
+                attributes_json, created_at, updated_at
+             ) VALUES ('library-1', 'track-1', 'Track', 'Artist', 1, 'Track Artist', '{}', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert track");
+        for (id, provider, confidence, fields) in [
+            (
+                "result-mb",
+                "musicbrainz",
+                0.94,
+                json!({ "genre": "Electronic", "year": "2022", "label": "Label" }),
+            ),
+            (
+                "result-lastfm",
+                "lastfm",
+                0.8,
+                json!({ "genre": "Deep House", "tags": "deep house, club" }),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO playlist_track_enrichments (
+                    id, library_id, track_id, provider, status, confidence,
+                    fields_json, payload_json, created_at, updated_at
+                 ) VALUES (?1, 'library-1', 'track-1', ?2, 'matched', ?3, ?4, '{}', ?5, ?5)",
+                params![id, provider, confidence, fields.to_string(), &now],
+            )
+            .expect("insert enrichment result");
+        }
+
+        let result = apply_enrichment_results(
+            &mut conn,
+            "library-1",
+            vec!["result-mb".to_string(), "result-lastfm".to_string()],
+        )
+        .expect("apply enrichment");
+        let attributes_json = conn
+            .query_row(
+                "SELECT attributes_json FROM playlist_index_tracks
+                 WHERE library_id = 'library-1' AND track_id = 'track-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read attributes");
+        let attributes = parse_track_attributes_json(Some(attributes_json));
+        let applied_count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_track_enrichments
+                 WHERE library_id = 'library-1' AND applied_at IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count applied");
+
+        assert_eq!(result.applied_total, 2);
+        assert_eq!(applied_count, 2);
+        assert_eq!(
+            attributes.get("Genre").map(String::as_str),
+            Some("Deep House")
+        );
+        assert_eq!(attributes.get("Year").map(String::as_str), Some("2022"));
+        assert_eq!(attributes.get("Label").map(String::as_str), Some("Label"));
+        assert_eq!(
+            attributes.get("Comments").map(String::as_str),
+            Some("Tags: deep house, club")
+        );
+    }
+
+    #[test]
+    fn enrichment_run_history_keeps_tasks_and_field_observations() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        init_db(&conn).expect("initialize schema");
+        let now = timestamp();
+        conn.execute(
+            "INSERT INTO playlist_index_libraries (
+                id, source_path, source_name, indexed_at, updated_at
+             ) VALUES ('library-1', '/tmp/library.xml', 'library.xml', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert library");
+        conn.execute(
+            "INSERT INTO playlist_index_tracks (
+                library_id, track_id, name, artist, source_exists, search_text,
+                attributes_json, created_at, updated_at
+             ) VALUES ('library-1', 'track-1', 'Track', 'Artist', 1, 'Track Artist', '{}', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert track");
+        let provider_ids = vec!["musicbrainz".to_string()];
+        let clients = enrichment::load_provider_clients_for_test(
+            &provider_ids,
+            enrichment::ProviderCredentials::default(),
+        )
+        .expect("provider clients");
+        let run_id = create_enrichment_run(&conn, "library-1", &provider_ids, &clients, 1)
+            .expect("create run");
+        let task_id = create_enrichment_task(&conn, &run_id, "library-1", "track-1", "musicbrainz")
+            .expect("create task");
+        let suggestion = enrichment::ProviderSuggestion {
+            provider: "musicbrainz".to_string(),
+            provider_key: Some("mbid".to_string()),
+            status: "matched".to_string(),
+            confidence: 0.91,
+            fields: BTreeMap::from([
+                ("musicbrainz_recording_id".to_string(), "mbid".to_string()),
+                ("year".to_string(), "2024".to_string()),
+            ]),
+            payload: json!({ "id": "mbid" }),
+            message: Some("ok".to_string()),
+            source_url: Some("https://musicbrainz.org/recording/mbid".to_string()),
+        };
+        finish_enrichment_task(
+            &conn,
+            &task_id,
+            &run_id,
+            "library-1",
+            "track-1",
+            &suggestion,
+        )
+        .expect("finish task");
+        update_enrichment_run_progress(&conn, &run_id, 1, 1, 0, 0, true).expect("finish run");
+
+        let status = conn
+            .query_row(
+                "SELECT status FROM playlist_enrichment_runs WHERE id = ?1",
+                params![&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read run");
+        let observations = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_enrichment_observations WHERE run_id = ?1",
+                params![&run_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count observations");
+
+        assert_eq!(status, "completed");
+        assert_eq!(observations, 2);
     }
 
     fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
