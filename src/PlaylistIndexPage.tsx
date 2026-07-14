@@ -28,6 +28,7 @@ import {
   DropdownMenuTrigger
 } from "./components/ui/dropdown-menu";
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
+import { TrackTable } from "./components/tracks/TrackList";
 import { cn } from "./lib/utils";
 import { translateBackendMessage, useI18n } from "./i18n";
 
@@ -1399,24 +1400,30 @@ export function PlaylistIndexPage() {
                   <CardContent className="overflow-y-auto">
                     {!activeDraftId ? <EmptyRow>{t("Crea o selecciona una playlist.")}</EmptyRow> : null}
                     {activeDraftId && draftTracks.length === 0 ? <EmptyRow>{t("Agrega tracks desde la busqueda o desde una playlist origen.")}</EmptyRow> : null}
-                    {draftTracks.map((track, index) => (
-                      <div key={`${track.track_id}-${index}`} className="grid min-h-10 grid-cols-[28px_minmax(0,1fr)_96px_28px] items-center gap-2 border-b border-border px-3 text-xs">
-                        <span className="text-muted-foreground">{index + 1}</span>
-                        <div className="min-w-0">
-                          <strong className="block truncate">{track.name ?? track.track_id}</strong>
-                          <span className="block truncate text-muted-foreground">{track.artist ?? ""}</span>
-                          {trackMetadataSummary(track) ? (
-                            <span className="block truncate text-[11px] text-muted-foreground" title={trackMetadataSummary(track)}>
-                              {trackMetadataSummary(track)}
-                            </span>
-                          ) : null}
-                        </div>
-                        <TrackIndexBadges track={track} />
-                        <Button variant="ghost" size="icon" title={t("Quitar")} onClick={() => void removeDraftTrack(track.track_id)}>
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    ))}
+                    {draftTracks.length > 0 ? (
+                      <TrackTable
+                        tracks={draftTracks}
+                        columns={["artist", "album", "kind"]}
+                        showPosition
+                        isPlaying={(track) => audioPlayer.isPlaying(track.source_path)}
+                        onPlay={(track) =>
+                          track.source_path &&
+                          void togglePathPlayback(track.source_path, track.name ?? track.source_path)
+                        }
+                        onDetails={(track) => openTrackDetail(track as PlaylistIndexTrack)}
+                        renderTitleAccessory={(track) => <TrackIndexBadges track={track} />}
+                        renderActions={(track) => (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title={t("Quitar")}
+                            onClick={() => void removeDraftTrack(track.track_id)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      />
+                    ) : null}
                   </CardContent>
                 </Card>
 
@@ -1436,14 +1443,21 @@ export function PlaylistIndexPage() {
                   <CardContent className="overflow-y-auto">
                     {!activePlaylistPath ? <EmptyRow>{t("Elige una playlist origen.")}</EmptyRow> : null}
                     {activePlaylistPath && playlistTracks.length === 0 ? <EmptyRow>{t("Playlist sin tracks.")}</EmptyRow> : null}
-                    {playlistTracks.map((track) => (
-                      <CompactTrackRow
-                        key={`${track.track_id}-${track.source_path ?? ""}`}
-                        track={track}
-                        onPlay={() => track.source_path && void togglePathPlayback(track.source_path, track.name ?? track.source_path)}
-                        playing={audioPlayer.isPlaying(track.source_path)}
+                    {playlistTracks.length > 0 ? (
+                      <TrackTable
+                        tracks={playlistTracks}
+                        columns={["artist", "album", "kind"]}
+                        showPosition
+                        isPlaying={(track) => audioPlayer.isPlaying(track.source_path)}
+                        onPlay={(track) =>
+                          track.source_path &&
+                          void togglePathPlayback(track.source_path, track.name ?? track.source_path)
+                        }
+                        onDetails={(track) => openTrackDetail(track as PlaylistIndexTrack)}
+                        onOpenFolder={(track) => void openFolder(track.source_path)}
+                        renderTitleAccessory={(track) => <TrackIndexBadges track={track} />}
                       />
-                    ))}
+                    ) : null}
                   </CardContent>
                 </Card>
               </section>
@@ -1706,7 +1720,7 @@ function TrackIndexBadges({
   track,
   embeddingStatus
 }: {
-  track: PlaylistIndexTrack;
+  track: { embedding_ready?: boolean };
   embeddingStatus?: TrackEmbeddingStatus;
 }) {
   const { t } = useI18n();
@@ -2075,37 +2089,6 @@ function PlaylistTabButton({
     <Button variant={active ? "default" : "ghost"} size="sm" className="h-8 px-3" onClick={onClick}>
       {children}
     </Button>
-  );
-}
-
-function CompactTrackRow({
-  track,
-  playing,
-  onPlay
-}: {
-  track: PlaylistIndexTrack;
-  playing: boolean;
-  onPlay: () => void;
-}) {
-  const metadataSummary = trackMetadataSummary(track);
-
-  return (
-    <div className="grid min-h-10 grid-cols-[32px_minmax(0,1fr)_96px_72px] items-center gap-2 border-b border-border px-3 text-xs">
-      <Button variant={playing ? "default" : "secondary"} size="icon" disabled={!track.source_exists || !track.source_path} onClick={onPlay}>
-        {playing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-      </Button>
-      <div className="min-w-0">
-        <strong className="block truncate">{track.name ?? track.track_id}</strong>
-        <span className="block truncate text-muted-foreground">{track.artist ?? ""}</span>
-        {metadataSummary ? (
-          <span className="block truncate text-[11px] text-muted-foreground" title={metadataSummary}>
-            {metadataSummary}
-          </span>
-        ) : null}
-      </div>
-      <TrackIndexBadges track={track} />
-      <span className="truncate text-right text-muted-foreground">{track.kind ?? ""}</span>
-    </div>
   );
 }
 

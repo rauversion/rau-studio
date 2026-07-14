@@ -125,13 +125,37 @@ Peak time melodic techno in Am or Em, no aggressive tracks
 The Copilot:
 
 1. reads the active indexed library from SQLite;
-2. builds a compact local profile from genres, artists, keys, and BPM range;
-3. optionally asks OpenAI to interpret the prompt into filters;
-4. falls back to local prompt parsing if OpenAI is unavailable;
-5. ranks local tracks by metadata, BPM, key, prompt terms, optional vector similarity, source availability, and diversity;
-6. stores the prompt, assistant response, candidate set, reasoning summary, and coverage snapshot in SQLite;
-7. returns candidate tracks with explanations;
-8. preselects the candidates so they can be quickly added to a draft playlist.
+2. restores the structured intent for the active Copilot session;
+3. applies a free-form message or a typed guided answer to that intent;
+4. optionally asks OpenAI to update the intent, with a deterministic local fallback;
+5. turns the brief into up to five focused probes for the complete brief, style, mood/energy, mix constraints, and adjacent discoveries;
+6. embeds those probes in one batch when vectors are available, loads local embeddings once, and combines each focused top list with weighted reciprocal-rank fusion;
+7. falls back to the same multi-probe flow over local metadata when embeddings are unavailable;
+8. ranks local tracks with fused retrieval evidence, metadata, continuous BPM distance, source policy, discovery policy, recent suggestion history, and per-run exploration;
+9. collapses duplicate Rekordbox IDs that represent the same artist, title, and duration into one musical identity;
+10. applies artist diversity and, for broad briefs, a soft genre cap before sequencing by BPM, Camelot-compatible key transitions, and energy curve;
+11. atomically stores raw messages, the current intent, score components, candidate order, reasoning, and coverage in SQLite;
+12. returns candidate tracks with explanations and preselects them for a draft playlist.
+
+### Structured Intent
+
+The Copilot keeps an executable intent instead of relying on the accumulated chat transcript. It includes:
+
+- genre, artist, key, BPM, mood, energy, and exclusion signals;
+- `energy_curve`: flat, slow build, or ramp;
+- `harmonic_policy`: ignore, soft, or strict;
+- `discovery_mode`: known, balanced, or discovery;
+- `tempo_policy`: flexible or tight;
+- `source_policy`: prefer available, available only, or allow missing;
+- maximum tracks per artist.
+
+Guided option values are machine-readable patches such as `harmony=strict` or `set_shape=energy_ramp`. The visible label is stored as the user message, while the patch changes the intent deterministically.
+
+Hard constraints are applied before scoring. The ranker can return fewer tracks than requested when the indexed library does not contain enough valid matches.
+
+In balanced and discovery modes, tracks present in the eight most recent candidate sets receive a bounded recency penalty. Close candidates also receive a deterministic exploration value that changes per library run. Known mode minimizes exploration and disables the history penalty. This rotates the result set without overriding hard constraints or strong artist, genre, BPM, and key matches.
+
+Genre diversity is conditional. A brief with one explicit genre is allowed to stay focused. A broad brief with at least three available genre clusters initially limits one genre to roughly 45% of the requested result set, then relaxes that cap only when needed to fill the playlist.
 
 ### Guided Sessions
 
@@ -151,7 +175,9 @@ The UI shows:
 
 - chat history for the current working session;
 - a structured interpretation card;
+- the implicit changes applied to the persisted brief after each message;
 - a decision trace with each planning step;
+- live progress events and the candidate count from every focused search probe;
 - one guided question at a time, with clickable answer options;
 - suggested playlist titles;
 - coverage metrics for BPM, genre, key, format, artists, and missing source files;
@@ -161,11 +187,14 @@ The decision trace is a user-facing summary of how the result was built. It is n
 
 In guided mode, the assistant does not ask every possible question at once. It asks one question, waits for the user's answer, uses that answer as context, and then continues with the next useful decision.
 
+Intermediate guided turns update the session intent but do not create empty candidate sets. A candidate set is persisted only after ranking has run.
+
 ### What Goes to OpenAI
 
 When an API key is configured, Playlist Copilot sends:
 
-- the user's prompt;
+- the latest user message;
+- the previous structured intent, when the session already exists;
 - a compact profile of the indexed library;
 - target track count.
 
@@ -204,7 +233,7 @@ Selected Copilot candidates use the same **Add to Playlist** dialog as browser a
 | Taxonomies | None |
 | Vector indexing | Sends text metadata to OpenAI embeddings |
 | Vector search | Sends search query text to OpenAI embeddings |
-| Playlist Copilot | Sends prompt + compact library profile to OpenAI chat, if configured |
+| Playlist Copilot | Sends prompt + compact library profile to OpenAI chat and a small batch of focused text probes to embeddings, if configured |
 
 Audio files stay local.
 
@@ -224,6 +253,8 @@ Main playlist-intelligence tables:
 - `playlist_copilot_messages`
 - `playlist_copilot_candidate_sets`
 - `playlist_copilot_candidate_tracks`
+
+`playlist_copilot_sessions.intent_json` stores the latest executable intent. Candidate tracks also store `score_components_json` so ranking decisions can be inspected and compared across ranker versions.
 
 ## Tauri Commands
 
@@ -273,4 +304,5 @@ Copilot:
 - `src/components/tracks/TrackCover.tsx`
 - `src/components/tracks/TrackDetailSheet.tsx`
 - `src/components/tracks/PlaylistAddDialog.tsx`
+- `src-tauri/src/playlist_copilot.rs`
 - `src-tauri/src/playlist_index.rs`

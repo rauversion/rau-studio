@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   BarChart3,
   Bot,
@@ -42,6 +43,7 @@ type PlaylistCopilotCandidate = {
   track: PlaylistCopilotTrack;
   score: number;
   reasons: string[];
+  score_components: Record<string, number>;
 };
 
 type PlaylistCopilotInterpretation = {
@@ -54,6 +56,13 @@ type PlaylistCopilotInterpretation = {
   energy?: string | null;
   exclude_terms: string[];
   target_count?: number | null;
+  energy_curve: "flat" | "slow_build" | "ramp" | string;
+  harmonic_policy: "ignore" | "soft" | "strict" | string;
+  discovery_mode: "known" | "balanced" | "discovery" | string;
+  tempo_policy: "tight" | "flexible" | string;
+  source_policy: "available_only" | "prefer_available" | "allow_missing" | string;
+  focus_policy: "genre" | "mood" | "balanced" | string;
+  max_tracks_per_artist: number;
 };
 
 type PlaylistCopilotResponse = {
@@ -64,11 +73,31 @@ type PlaylistCopilotResponse = {
   questions: string[];
   guided_questions: PlaylistCopilotQuestion[];
   steps: PlaylistCopilotStep[];
+  brief_changes: string[];
+  search_trace: PlaylistCopilotSearchTrace[];
   reasoning_summary: string[];
   title_suggestions: PlaylistCopilotTitleSuggestion[];
   coverage: PlaylistCopilotCoverage;
   candidates: PlaylistCopilotCandidate[];
   used_openai: boolean;
+  ranker_version: string;
+};
+
+type PlaylistCopilotSearchTrace = {
+  id: string;
+  label: string;
+  candidate_count: number;
+  top_similarity?: number | null;
+  detail: string;
+};
+
+type PlaylistCopilotProgressEvent = {
+  request_id: string;
+  stage: string;
+  status: "working" | "done" | "waiting" | "warning" | string;
+  message: string;
+  detail?: string | null;
+  timestamp: string;
 };
 
 type PlaylistCopilotStep = {
@@ -117,8 +146,12 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
-  kind?: "text" | "thinking" | "steps" | "choices" | "findings" | "titles" | "inference";
+  kind?: "text" | "thinking" | "progress" | "searches" | "steps" | "choices" | "findings" | "titles" | "inference";
+  stage?: string;
+  status?: string;
   steps?: PlaylistCopilotStep[];
+  searches?: PlaylistCopilotSearchTrace[];
+  briefChanges?: string[];
   questions?: PlaylistCopilotQuestion[];
   reasoning?: string[];
   coverage?: PlaylistCopilotCoverage;
@@ -133,6 +166,10 @@ type GenerateSuggestionsOptions = {
   appendUserMessage?: boolean;
   requestMode?: CopilotMode;
   thinkingText?: string;
+  guidedAnswer?: {
+    questionId: string;
+    value: string;
+  };
 };
 
 const copilotExamples = [
@@ -152,7 +189,7 @@ export function PlaylistCopilotPage() {
   const [sessionId, setSessionId] = useState("");
   const [selectedTitle, setSelectedTitle] = useState("");
   const [resultTab, setResultTab] = useState<CopilotResultTab>("candidates");
-  const [copilotMode, setCopilotMode] = useState<CopilotMode>("guided");
+  const [copilotMode, setCopilotMode] = useState<CopilotMode>("auto");
   const [answeredQuestionIds, setAnsweredQuestionIds] = useState<Set<string>>(new Set());
   const [pendingOptionKey, setPendingOptionKey] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
@@ -171,6 +208,7 @@ export function PlaylistCopilotPage() {
   const [message, setMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const activeRequestIdRef = useRef("");
   const trackPlayer = useTrackPlayer({ t, onError: setErrorMessage });
 
   const activeLibrary = libraries.find((library) => library.id === activeLibraryId) ?? null;
@@ -191,6 +229,42 @@ export function PlaylistCopilotPage() {
 
   useEffect(() => {
     void loadLibraries();
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    let unlisten: (() => void) | undefined;
+    void listen<PlaylistCopilotProgressEvent>("playlist-copilot-progress", ({ payload }) => {
+      if (!payload.request_id || payload.request_id !== activeRequestIdRef.current) return;
+      const id = `progress-${payload.request_id}-${payload.stage}`;
+      const progressMessage: ChatMessage = {
+        id,
+        role: "assistant",
+        kind: "progress",
+        stage: payload.stage,
+        status: payload.status,
+        text: payload.message,
+        reasoning: payload.detail ? [payload.detail] : []
+      };
+      setMessages((current) => {
+        const index = current.findIndex((item) => item.id === id);
+        if (index < 0) return [...current, progressMessage];
+        const next = [...current];
+        next[index] = progressMessage;
+        return next;
+      });
+    }).then((stopListening) => {
+      if (mounted) {
+        unlisten = stopListening;
+      } else {
+        stopListening();
+      }
+    });
+
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -221,6 +295,7 @@ export function PlaylistCopilotPage() {
   }
 
   async function changeLibrary(libraryId: string) {
+    activeRequestIdRef.current = "";
     setActiveLibraryId(libraryId);
     setResponse(null);
     setSessionId("");
@@ -274,6 +349,8 @@ export function PlaylistCopilotPage() {
     const answeredForResponse = answeredOverride ?? answeredQuestionIds;
     const requestMode = options.requestMode ?? copilotMode;
     const appendUserMessage = options.appendUserMessage !== false;
+    const requestId = crypto.randomUUID();
+    activeRequestIdRef.current = requestId;
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -294,23 +371,17 @@ export function PlaylistCopilotPage() {
     setMessage("");
 
     try {
-      const backendPrompt = [
-        copilotLanguageInstruction(locale),
-        conversationContext(messages),
-        currentPrompt,
-        requestMode === "guided"
-          ? "Conversation mode: ask exactly one clarifying question at a time. Continue only after the user answers. Explain the current step briefly in the chat."
-          : "Conversation mode: make a complete playlist pass from the provided brief. Do not restart the setup questions unless the brief is impossible to interpret."
-      ].filter(Boolean).join("\n\n");
       const result = await invoke<PlaylistCopilotResponse>("playlist_copilot_generate", {
         request: {
           libraryId: activeLibraryId,
-          prompt: backendPrompt,
+          message: currentPrompt,
+          requestId,
           targetCount,
           sessionId: sessionId || null,
           mode: requestMode,
           language: locale,
-          answeredQuestionIds: Array.from(answeredForResponse)
+          answeredQuestionIds: Array.from(answeredForResponse),
+          guidedAnswer: options.guidedAnswer ?? null
         }
       });
       setResponse(result);
@@ -327,7 +398,11 @@ export function PlaylistCopilotPage() {
       const translated = translateBackendMessage(locale, String(error));
       setErrorMessage(translated);
       setMessages((current) => [
-        ...current.filter((item) => item.id !== thinkingMessage.id),
+        ...current
+          .filter((item) => item.id !== thinkingMessage.id)
+          .map((item) => item.id.startsWith(`progress-${requestId}-`) && item.status === "working"
+            ? { ...item, status: "warning" }
+            : item),
         {
           id: crypto.randomUUID(),
           role: "system",
@@ -335,6 +410,9 @@ export function PlaylistCopilotPage() {
         }
       ]);
     } finally {
+      if (activeRequestIdRef.current === requestId) {
+        activeRequestIdRef.current = "";
+      }
       setLoading(false);
     }
   }
@@ -345,7 +423,12 @@ export function PlaylistCopilotPage() {
     nextAnsweredQuestionIds.add(question.id);
     setPendingOptionKey(optionKey);
     setAnsweredQuestionIds(nextAnsweredQuestionIds);
-    generateSuggestions(undefined, option.value, nextAnsweredQuestionIds).finally(() => {
+    generateSuggestions(undefined, option.label, nextAnsweredQuestionIds, {
+      guidedAnswer: {
+        questionId: question.id,
+        value: option.value
+      }
+    }).finally(() => {
       setPendingOptionKey((current) => (current === optionKey ? "" : current));
     });
   }
@@ -437,7 +520,7 @@ export function PlaylistCopilotPage() {
   }
 
   return (
-    <main className="min-w-0 p-4 pb-20">
+    <main className="min-w-0 p-4">
       {trackPlayer.audio}
       <header className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
         <div className="min-w-0">
@@ -815,6 +898,11 @@ function InterpretationPanel({ interpreted }: { interpreted: PlaylistCopilotInte
       <InterpretationGroup label="Mood" values={interpreted.mood ? [interpreted.mood] : []} />
       <InterpretationGroup label={t("Energia")} values={interpreted.energy ? [interpreted.energy] : []} />
       <InterpretationGroup label={t("Excluir")} values={interpreted.exclude_terms} />
+      <InterpretationGroup label={t("Curva")} values={[policyLabel(interpreted.energy_curve)]} />
+      <InterpretationGroup label={t("Armonia")} values={[policyLabel(interpreted.harmonic_policy)]} />
+      <InterpretationGroup label={t("Discovery")} values={[policyLabel(interpreted.discovery_mode)]} />
+      <InterpretationGroup label={t("Tempo")} values={[policyLabel(interpreted.tempo_policy)]} />
+      <InterpretationGroup label={t("Archivos")} values={[policyLabel(interpreted.source_policy)]} />
     </section>
   );
 }
@@ -862,6 +950,7 @@ function copilotResponseMessages(
       ? "Esto inferi del brief antes de hacer la siguiente pregunta."
       : "Esto inferi del brief antes de rankear candidatos.",
     interpreted: result.interpreted,
+    briefChanges: result.brief_changes,
     reasoning: result.reasoning_summary
   });
 
@@ -876,6 +965,15 @@ function copilotResponseMessages(
   });
 
   if (!isCollectingBrief) {
+    if (result.search_trace.length > 0) {
+      messages.push({
+        id: crypto.randomUUID(),
+        role: "assistant",
+        kind: "searches",
+        text: "Busque en varias direcciones y fusione los resultados.",
+        searches: result.search_trace
+      });
+    }
     messages.push({
       id: crypto.randomUUID(),
       role: "assistant",
@@ -954,12 +1052,53 @@ function CopilotChatBubble({
         </div>
       ) : null}
 
+      {message.kind === "progress" ? (
+        <div className="grid grid-cols-[18px_minmax(0,1fr)] gap-2">
+          {message.status === "working" ? (
+            <RefreshCcw className="mt-0.5 h-3.5 w-3.5 animate-spin text-primary" />
+          ) : message.status === "done" ? (
+            <CheckSquare className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />
+          ) : (
+            <span className="mt-1.5 h-2 w-2 rounded-full bg-amber-500" />
+          )}
+          <div className="min-w-0">
+            <strong className="block text-xs">{t(message.text)}</strong>
+            {(message.reasoning ?? []).map((detail) => (
+              <span key={detail} className="block text-[11px] text-muted-foreground">
+                {t(detail)}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {!message.kind || message.kind === "text" ? <span className="whitespace-pre-wrap">{t(message.text)}</span> : null}
 
       {message.kind === "inference" ? (
         <div className="grid gap-2">
           <strong>{t(message.text)}</strong>
-          <CopilotInferencePanel interpreted={message.interpreted ?? null} reasoning={message.reasoning ?? []} />
+          <CopilotInferencePanel
+            interpreted={message.interpreted ?? null}
+            reasoning={message.reasoning ?? []}
+            briefChanges={message.briefChanges ?? []}
+          />
+        </div>
+      ) : null}
+
+      {message.kind === "searches" ? (
+        <div className="grid gap-2">
+          <strong>{t(message.text)}</strong>
+          <div className="grid gap-1.5">
+            {(message.searches ?? []).map((search) => (
+              <div key={search.id} className="grid grid-cols-[18px_minmax(0,1fr)] gap-2 rounded-md bg-background/70 px-2 py-2 text-xs">
+                <CheckSquare className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />
+                <div className="min-w-0">
+                  <strong className="block">{t(search.label)}</strong>
+                  <span className="text-muted-foreground">{t(search.detail)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
 
@@ -1079,10 +1218,12 @@ function CopilotMetricChip({ label, value }: { label: string; value: React.React
 
 function CopilotInferencePanel({
   interpreted,
-  reasoning
+  reasoning,
+  briefChanges
 }: {
   interpreted: PlaylistCopilotInterpretation | null;
   reasoning: string[];
+  briefChanges: string[];
 }) {
   const { t } = useI18n();
 
@@ -1101,11 +1242,27 @@ function CopilotInferencePanel({
     { label: "BPM", values: bpmRange ? [bpmRange] : [] },
     { label: "Mood", values: interpreted.mood ? [interpreted.mood] : [] },
     { label: t("Energia"), values: interpreted.energy ? [interpreted.energy] : [] },
-    { label: t("Excluir"), values: interpreted.exclude_terms }
+    { label: t("Excluir"), values: interpreted.exclude_terms },
+    { label: t("Curva"), values: interpreted.energy_curve !== "flat" ? [policyLabel(interpreted.energy_curve)] : [] },
+    { label: t("Armonia"), values: [policyLabel(interpreted.harmonic_policy)] },
+    { label: t("Discovery"), values: [policyLabel(interpreted.discovery_mode)] },
+    { label: t("Tempo"), values: [policyLabel(interpreted.tempo_policy)] }
   ].filter((signal) => signal.values.length > 0);
 
   return (
     <div className="grid gap-2 rounded-md bg-background/70 p-2">
+      {briefChanges.length > 0 ? (
+        <div className="grid gap-1 border-b border-border pb-2">
+          <span className="text-[11px] font-semibold text-muted-foreground">
+            {t("Cambios aplicados al brief")}
+          </span>
+          {briefChanges.map((change) => (
+            <span key={change} className="text-xs">
+              {t(change)}
+            </span>
+          ))}
+        </div>
+      ) : null}
       {signals.length ? (
         <div className="flex flex-wrap gap-1.5">
           {signals.map((signal) => (
@@ -1402,7 +1559,10 @@ function CandidateReasonList({
                 {candidate.score.toFixed(1)}
               </span>
             </div>
-            <span className="text-muted-foreground">{candidate.reasons.slice(0, 3).join(" · ")}</span>
+              <span className="text-muted-foreground">{candidate.reasons.slice(0, 3).join(" · ")}</span>
+              <span className="text-[10px] text-muted-foreground">
+                {topScoreComponents(candidate.score_components)}
+              </span>
           </div>
         ))}
       </div>
@@ -1434,23 +1594,17 @@ function uniqueTrackIds(tracks: Array<{ track_id: string }>) {
   return Array.from(new Set(tracks.map((track) => track.track_id)));
 }
 
-function copilotLanguageInstruction(locale: string) {
-  if (locale === "en") {
-    return "Assistant language: English. Write every conversational answer, question, reasoning note and playlist title in English.";
-  }
-
-  return "Idioma del asistente: español. Escribe todas las respuestas conversacionales, preguntas, razonamientos y titulos de playlists en español.";
+function policyLabel(value: string) {
+  return value.split("_").join(" ");
 }
 
-function conversationContext(messages: ChatMessage[]) {
-  const relevant = messages
-    .filter((message) => message.role === "user" || (message.role === "assistant" && (!message.kind || message.kind === "text")))
-    .slice(-8)
-    .map((message) => `${message.role}: ${message.text.trim()}`)
-    .filter((line) => line.length > 0);
-
-  if (relevant.length === 0) return "";
-  return `Conversation so far:\n${relevant.join("\n")}`;
+function topScoreComponents(components: Record<string, number>) {
+  return Object.entries(components)
+    .filter(([, value]) => Math.abs(value) >= 0.1)
+    .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]))
+    .slice(0, 3)
+    .map(([name, value]) => `${policyLabel(name)} ${value >= 0 ? "+" : ""}${value.toFixed(1)}`)
+    .join(" · ");
 }
 
 function formatBpmCoverage(coverage: PlaylistCopilotCoverage) {

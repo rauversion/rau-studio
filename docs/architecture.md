@@ -81,6 +81,7 @@ Long-running tasks emit Tauri events:
 - `local-conversion-log`
 - `mastering-progress`
 - `playlist-index-progress`
+- `playlist-copilot-progress`
 - `turn-progress`
 
 The app shell listens to these events to report bridge health, while each feature page consumes the relevant stream for progress, row status, and terminal logs.
@@ -110,9 +111,14 @@ The app shell listens to these events to report bridge health, while each featur
 2. Store tracks, playlists, memberships, metadata attributes, and source paths in SQLite.
 3. Rebuild SQLite FTS for lexical search.
 4. Optionally generate OpenAI embeddings for selected tracks or the whole library.
-5. Search with lexical FTS, vector similarity, metadata browsing, taxonomy graphs, or Playlist Copilot.
-6. Select tracks and add them to local draft playlists.
-7. Export draft playlists back to Rekordbox XML.
+5. Search with lexical FTS, vector similarity, metadata browsing, or taxonomy graphs.
+6. Playlist Copilot reduces each message or guided answer into a revision of the persisted structured intent.
+7. A search planner creates focused probes for the brief, style, feel, mix constraints, and adjacent discovery.
+8. The backend batches probe embeddings, loads local vectors once, and fuses the focused top lists with reciprocal-rank fusion; metadata probes provide the offline fallback.
+9. Its pure Rust planner ranks and rotates candidates by relevance, recent history, BPM, harmonic compatibility, energy curve, source policy, artist diversity, and conditional genre diversity.
+10. The backend emits `playlist-copilot-progress` events so the chat can show brief changes, searches, ranking, and sequencing while the run is active.
+11. Select tracks and add them to local draft playlists.
+12. Export draft playlists back to Rekordbox XML.
 
 ## AI Boundaries
 
@@ -121,6 +127,8 @@ AI is optional and scoped:
 - Mastering can call OpenAI to interpret feedback and produce a processing policy.
 - Vector search sends text metadata to OpenAI embeddings, never audio.
 - Playlist Copilot sends the user's prompt and a compact library profile, not the full audio collection.
+- UI language instructions and rendered chat history are not used as embedding or ranking input.
+- OpenAI interprets intent only; local deterministic code owns filtering, scoring, sequencing, and persistence.
 
 If OpenAI is not configured or a request fails, the app uses local deterministic fallbacks where available.
 
@@ -153,6 +161,7 @@ If OpenAI is not configured or a request fails, the app uses local deterministic
 - `src-tauri/src/lib.rs`
 - `src-tauri/src/local_conversion.rs`
 - `src-tauri/src/mastering.rs`
+- `src-tauri/src/playlist_copilot.rs`
 - `src-tauri/src/playlist_index.rs`
 - `src-tauri/src/settings.rs`
 - `src-tauri/src/system.rs`

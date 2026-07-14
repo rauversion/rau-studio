@@ -18,6 +18,7 @@ export type TrackListItem = {
   source_exists: boolean;
   total_time?: number | null;
   attributes?: Record<string, string>;
+  embedding_ready?: boolean;
 };
 
 export type TrackListColumn = "artist" | "album" | "genre" | "bpm" | "key" | "year" | "kind";

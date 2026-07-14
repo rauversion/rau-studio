@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter};
 
 mod local_conversion;
 mod mastering;
+mod playlist_copilot;
 mod playlist_index;
 mod settings;
 mod system;
@@ -1417,6 +1418,12 @@ pub fn run() {
             playlist_index::playlist_copilot_generate,
             playlist_index::playlist_index_track_cover,
             playlist_index::playlist_index_generate_embeddings,
+            playlist_index::playlist_enrichment_overview,
+            playlist_index::playlist_enrichment_candidates,
+            playlist_index::playlist_enrichment_results,
+            playlist_index::playlist_enrichment_run,
+            playlist_index::playlist_enrichment_apply,
+            playlist_index::playlist_enrichment_clear,
             playlist_index::playlist_index_drafts,
             playlist_index::playlist_index_create_draft,
             playlist_index::playlist_index_add_tracks_to_draft,

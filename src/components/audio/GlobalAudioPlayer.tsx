@@ -240,17 +240,17 @@ export function SidebarAudioPlayer() {
   }
 
   return (
-    <section className="rounded-md border border-border bg-background p-2">
-      <div className="flex items-center justify-between gap-2">
+    <section className="min-w-0 overflow-hidden rounded-md border border-border bg-background p-2">
+      <div className="flex min-w-0 items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-2 text-xs font-semibold">
-          <Music2 className="h-3.5 w-3.5 text-muted-foreground" />
-          {t("Player")}
+          <Music2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate">{t("Player")}</span>
         </span>
         <Button
           type="button"
           variant="ghost"
           size="icon"
-          className="h-6 w-6"
+          className="h-6 w-6 shrink-0"
           aria-label={player.collapsed ? t("Expandir player") : t("Contraer player")}
           onClick={() => player.setCollapsed(!player.collapsed)}
         >
@@ -259,12 +259,22 @@ export function SidebarAudioPlayer() {
       </div>
 
       {player.collapsed ? (
-        <div className="mt-1 flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground" title={player.player?.path ?? ""}>
+        <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden">
+          <span
+            className="block min-w-0 max-w-full flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-muted-foreground"
+            title={player.player?.label ?? player.player?.path ?? ""}
+          >
             {player.player?.label ?? t("Sin archivo cargado")}
           </span>
           {player.player ? (
-            <Button type="button" variant="secondary" size="icon" className="h-6 w-6" onClick={() => void player.togglePlayer()}>
+            <Button
+              type="button"
+              variant="secondary"
+              size="icon"
+              className="h-6 w-6 shrink-0"
+              aria-label={player.playing ? t("Pause") : t("Play")}
+              onClick={() => void player.togglePlayer()}
+            >
               {player.playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
             </Button>
           ) : null}

@@ -29,6 +29,7 @@ import {
   Sparkles,
   Square,
   Sun,
+  Tags,
   Trash2,
   Upload,
   UserRound,
@@ -47,6 +48,7 @@ import {
 } from "./components/ui/dropdown-menu";
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
 import { cn } from "./lib/utils";
+import { EnrichmentPage } from "./EnrichmentPage";
 import { FileConversionPage } from "./FileConversionPage";
 import { MasteringPage } from "./MasteringPage";
 import { PlaylistBrowserPage } from "./PlaylistBrowserPage";
@@ -287,6 +289,7 @@ export default function App() {
             <Route path="/playlists/artists" element={<PlaylistBrowserPage kind="artist" />} />
             <Route path="/playlists/albums" element={<PlaylistBrowserPage kind="album" />} />
             <Route path="/playlists/taxonomies" element={<TaxonomyPage />} />
+            <Route path="/enrichment" element={<EnrichmentPage />} />
             <Route path="/turn" element={<TurnPage />} />
             <Route path="/mastering" element={<MasteringPage />} />
             <Route
@@ -334,6 +337,7 @@ function AppShell() {
       "local-conversion-log",
       "mastering-progress",
       "playlist-index-progress",
+      "track-enrichment-progress",
       "turn-progress"
     ];
 
@@ -410,7 +414,7 @@ function PlaceholderPage({
 }) {
   const { t } = useI18n();
   return (
-    <main className="min-w-0 p-4 pb-20">
+    <main className="min-w-0 p-4">
       <header className="mb-3 flex items-center gap-3 border-b border-border pb-3">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-border bg-secondary text-secondary-foreground">
           {icon}
@@ -585,7 +589,7 @@ function SettingsPage() {
   }
 
   return (
-    <main className="min-w-0 p-4 pb-20">
+    <main className="min-w-0 p-4">
       <header className="mb-3 flex items-center gap-3 border-b border-border pb-3">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-border bg-secondary text-secondary-foreground">
           <Settings className="h-5 w-5" />
@@ -1515,7 +1519,7 @@ function RekordboxConvertPage() {
   }
 
   return (
-    <main className={cn("min-w-0 p-4 pb-20", terminalExpanded && "pb-72")}>
+    <main className={cn("min-w-0 p-4", terminalExpanded && "pb-72")}>
       <header className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
         <div className="min-w-0">
           <h1 className="m-0 text-2xl font-semibold tracking-normal">Rekordbox Convert</h1>
@@ -2114,6 +2118,12 @@ function AppSidebar({
           </SidebarLink>
           <SidebarLink to="/playlists/taxonomies" icon={<Database className="h-4 w-4" />}>
             {t("Taxonomias")}
+          </SidebarLink>
+        </SidebarSection>
+
+        <SidebarSection title={t("Enrichment")}>
+          <SidebarLink to="/enrichment" icon={<Tags className="h-4 w-4" />}>
+            {t("Enrichment")}
           </SidebarLink>
         </SidebarSection>
 

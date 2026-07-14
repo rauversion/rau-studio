@@ -17,7 +17,10 @@ export function TrackTable({
   onDetails,
   onOpenFolder,
   onPlay,
-  onToggleTrack
+  onToggleTrack,
+  renderActions,
+  renderTitleAccessory,
+  showPosition = false
 }: {
   tracks: TrackListItem[];
   columns?: TrackListColumn[];
@@ -28,9 +31,13 @@ export function TrackTable({
   onOpenFolder?: (track: TrackListItem) => void;
   onPlay?: (track: TrackListItem) => void;
   onToggleTrack?: (track: TrackListItem) => void;
+  renderActions?: (track: TrackListItem, index: number) => React.ReactNode;
+  renderTitleAccessory?: (track: TrackListItem) => React.ReactNode;
+  showPosition?: boolean;
 }) {
   const { t } = useI18n();
-  const template = trackGridTemplate(columns, Boolean(onToggleTrack), Boolean(onOpenFolder));
+  const hasActions = Boolean(onOpenFolder || renderActions);
+  const template = trackGridTemplate(columns, Boolean(onToggleTrack), hasActions, showPosition);
 
   if (tracks.length === 0) {
     return <>{empty}</>;
@@ -44,22 +51,30 @@ export function TrackTable({
           style={{ gridTemplateColumns: template }}
         >
           {onToggleTrack ? <span /> : null}
+          {showPosition ? <span>#</span> : null}
           <span />
           <span />
           <span>{t("Tema")}</span>
           {columns.map((column) => (
             <span key={column}>{trackColumnLabel(t, column)}</span>
           ))}
-          {onOpenFolder ? <span className="text-right">{t("Acciones")}</span> : null}
+          {hasActions ? (
+            <span className="sticky right-0 z-20 flex h-full items-center justify-end border-l border-border bg-secondary px-2">
+              {t("Acciones")}
+            </span>
+          ) : null}
         </div>
-        {tracks.map((track) => (
+        {tracks.map((track, index) => (
           <TrackListRow
-            key={track.track_id}
+            key={`${track.library_id ?? "library"}-${track.track_id}-${index}`}
             track={track}
             columns={columns}
             gridTemplate={template}
+            position={showPosition ? index + 1 : undefined}
             selected={selectedTrackIds?.has(track.track_id) ?? false}
             playing={isPlaying?.(track) ?? false}
+            actions={renderActions?.(track, index)}
+            titleAccessory={renderTitleAccessory?.(track)}
             onDetails={onDetails ? () => onDetails(track) : undefined}
             onOpenFolder={onOpenFolder ? () => onOpenFolder(track) : undefined}
             onPlay={onPlay ? () => onPlay(track) : undefined}
@@ -75,8 +90,11 @@ export function TrackListRow({
   track,
   columns,
   gridTemplate,
+  position,
   selected,
   playing,
+  actions,
+  titleAccessory,
   onDetails,
   onOpenFolder,
   onPlay,
@@ -85,8 +103,11 @@ export function TrackListRow({
   track: TrackListItem;
   columns: TrackListColumn[];
   gridTemplate: string;
+  position?: number;
   selected: boolean;
   playing: boolean;
+  actions?: React.ReactNode;
+  titleAccessory?: React.ReactNode;
   onDetails?: () => void;
   onOpenFolder?: () => void;
   onPlay?: () => void;
@@ -95,12 +116,13 @@ export function TrackListRow({
   return (
     <div
       className={cn(
-        "grid min-h-14 items-center gap-2 border-b border-border px-2 text-xs",
+        "grid min-h-14 items-center gap-2 border-b border-border bg-background px-2 text-xs",
         !track.source_exists && "bg-red-50 dark:bg-red-950/30"
       )}
       style={{ gridTemplateColumns: gridTemplate }}
     >
       {onToggle ? <input type="checkbox" checked={selected} onChange={onToggle} /> : null}
+      {position ? <span className="text-right tabular-nums text-muted-foreground">{position}</span> : null}
       <Button
         variant={playing ? "default" : "secondary"}
         size="icon"
@@ -110,44 +132,50 @@ export function TrackListRow({
         {playing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
       </Button>
       <TrackCover sourcePath={track.source_path} title={track.name ?? track.track_id} className="h-10 w-10" />
-      <div className="min-w-0">
-        {onDetails ? (
-          <button
-            type="button"
-            className="block max-w-full truncate text-left font-semibold underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            title={track.name ?? track.track_id}
-            onClick={onDetails}
-          >
-            {track.name ?? track.track_id}
-          </button>
-        ) : (
-          <span className="block truncate font-semibold" title={track.name ?? track.track_id}>
-            {track.name ?? track.track_id}
+      <div className="flex min-w-0 items-center gap-2">
+        <div className="min-w-0 flex-1">
+          {onDetails ? (
+            <button
+              type="button"
+              className="block max-w-full truncate text-left font-semibold underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              title={track.name ?? track.track_id}
+              onClick={onDetails}
+            >
+              {track.name ?? track.track_id}
+            </button>
+          ) : (
+            <span className="block truncate font-semibold" title={track.name ?? track.track_id}>
+              {track.name ?? track.track_id}
+            </span>
+          )}
+          <span className="block truncate text-[11px] text-muted-foreground" title={trackMetadataSummary(track)}>
+            {trackMetadataSummary(track)}
           </span>
-        )}
-        <span className="block truncate text-[11px] text-muted-foreground" title={trackMetadataSummary(track)}>
-          {trackMetadataSummary(track)}
-        </span>
+        </div>
+        {titleAccessory}
       </div>
       {columns.map((column) => (
         <span key={column} className="truncate" title={trackColumnValue(track, column)}>
           {trackColumnValue(track, column)}
         </span>
       ))}
-      {onOpenFolder ? (
-        <div className="flex justify-end">
-          <Button variant="secondary" size="icon" disabled={!track.source_path} onClick={onOpenFolder}>
-            <FolderOpen className="h-3.5 w-3.5" />
-          </Button>
+      {onOpenFolder || actions ? (
+        <div className="sticky right-0 z-10 flex h-full items-center justify-end border-l border-border bg-inherit px-2">
+          {actions ?? (
+            <Button variant="secondary" size="icon" disabled={!track.source_path} onClick={onOpenFolder}>
+              <FolderOpen className="h-3.5 w-3.5" />
+            </Button>
+          )}
         </div>
       ) : null}
     </div>
   );
 }
 
-function trackGridTemplate(columns: TrackListColumn[], selectable: boolean, actions: boolean) {
+function trackGridTemplate(columns: TrackListColumn[], selectable: boolean, actions: boolean, showPosition: boolean) {
   return [
     selectable ? "24px" : null,
+    showPosition ? "32px" : null,
     "36px",
     "44px",
     "minmax(220px,1.35fr)",
