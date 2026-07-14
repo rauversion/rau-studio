@@ -93,6 +93,7 @@ type TaxonomyTrack = {
   bpm?: string | null;
   key?: string | null;
   rating?: string | null;
+  user_rating?: number | null;
   year?: string | null;
   label?: string | null;
   date_added?: string | null;

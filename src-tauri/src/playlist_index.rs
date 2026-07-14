@@ -78,6 +78,7 @@ pub struct PlaylistIndexTrack {
     bpm: Option<String>,
     key: Option<String>,
     rating: Option<String>,
+    user_rating: Option<u8>,
     year: Option<String>,
     label: Option<String>,
     date_added: Option<String>,
@@ -1040,6 +1041,17 @@ pub fn playlist_index_playlist_tracks(
 }
 
 #[tauri::command]
+pub fn playlist_index_set_track_rating(
+    app: AppHandle,
+    library_id: String,
+    track_id: String,
+    rating: u8,
+) -> Result<PlaylistIndexTrack, String> {
+    let conn = open_db(&app)?;
+    set_track_rating(&conn, &library_id, &track_id, rating)
+}
+
+#[tauri::command]
 pub fn playlist_index_search_tracks(
     app: AppHandle,
     library_id: Option<String>,
@@ -1510,6 +1522,7 @@ fn init_db(conn: &Connection) -> Result<(), String> {
           source_exists INTEGER NOT NULL DEFAULT 0,
           search_text TEXT NOT NULL,
           attributes_json TEXT NOT NULL DEFAULT '{}',
+          user_rating INTEGER CHECK(user_rating BETWEEN 0 AND 5),
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           PRIMARY KEY(library_id, track_id),
@@ -1739,6 +1752,12 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         "playlist_index_tracks",
         "attributes_json",
         "TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    ensure_table_column(
+        conn,
+        "playlist_index_tracks",
+        "user_rating",
+        "INTEGER CHECK(user_rating BETWEEN 0 AND 5)",
     )?;
     ensure_table_column(
         conn,
@@ -2003,6 +2022,32 @@ fn list_playlist_tracks(
         .map_err(|error| format!("No se pudieron mapear tracks de playlist: {error}"))
 }
 
+fn set_track_rating(
+    conn: &Connection,
+    library_id: &str,
+    track_id: &str,
+    rating: u8,
+) -> Result<PlaylistIndexTrack, String> {
+    if rating > 5 {
+        return Err("El rating debe estar entre 0 y 5 estrellas.".to_string());
+    }
+
+    let updated = conn
+        .execute(
+            "UPDATE playlist_index_tracks
+             SET user_rating = ?3, updated_at = ?4
+             WHERE library_id = ?1 AND track_id = ?2",
+            params![library_id, track_id, i64::from(rating), timestamp()],
+        )
+        .map_err(|error| format!("No se pudo guardar el rating del track: {error}"))?;
+    if updated == 0 {
+        return Err(format!("Track indexado no encontrado: {track_id}"));
+    }
+
+    get_index_track(conn, library_id, track_id)?
+        .ok_or_else(|| format!("No se pudo recargar el track indexado: {track_id}"))
+}
+
 fn lexical_search(
     conn: &Connection,
     library_id: Option<&str>,
@@ -2037,7 +2082,7 @@ fn lexical_search(
     let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<PlaylistSearchResult> {
         Ok(PlaylistSearchResult {
             track: row_to_track(row)?,
-            score: row.get::<_, f64>(16)?,
+            score: row.get::<_, f64>(17)?,
             mode: "lexical".to_string(),
         })
     };
@@ -5160,7 +5205,7 @@ fn load_embedded_tracks(
     let map_row =
         |row: &rusqlite::Row<'_>| -> rusqlite::Result<(PlaylistIndexTrack, f64, Vec<f64>)> {
             let track = row_to_track(row)?;
-            let embedding_json: String = row.get(16)?;
+            let embedding_json: String = row.get(17)?;
             let embedding = serde_json::from_str::<Vec<f64>>(&embedding_json).unwrap_or_default();
             Ok((track, 0.0, embedding))
         };
@@ -6581,18 +6626,19 @@ fn row_to_track_at(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<P
         bpm: attribute_value(&attributes, &["AverageBpm", "Bpm", "BPM"]),
         key: attribute_value(&attributes, &["Tonality", "Key"]),
         rating: attribute_value(&attributes, &["Rating"]),
+        user_rating: option_i64_to_u8(row.get(offset + 15)?),
         year: attribute_value(&attributes, &["Year"]),
         label: attribute_value(&attributes, &["Label"]),
         date_added: attribute_value(&attributes, &["DateAdded", "Date"]),
         attributes,
-        embedding_ready: row.get::<_, i64>(offset + 15)? == 1,
+        embedding_ready: row.get::<_, i64>(offset + 16)? == 1,
     })
 }
 
 fn track_select_clause() -> &'static str {
     "t.library_id, t.track_id, t.name, t.artist, t.album, t.kind, t.location, t.source_path,
      t.size_bytes, t.total_time, t.sample_rate, t.bitrate, t.source_exists, t.search_text,
-     t.attributes_json,
+     t.attributes_json, t.user_rating,
      EXISTS(
        SELECT 1 FROM playlist_track_embeddings e
        WHERE e.library_id = t.library_id
@@ -6894,6 +6940,10 @@ fn option_i64_to_u32(value: Option<i64>) -> Option<u32> {
     value.and_then(|value| u32::try_from(value).ok())
 }
 
+fn option_i64_to_u8(value: Option<i64>) -> Option<u8> {
+    value.and_then(|value| u8::try_from(value).ok())
+}
+
 #[cfg(test)]
 mod playlist_index_tests {
     use super::*;
@@ -6979,6 +7029,38 @@ mod playlist_index_tests {
         assert!(
             table_columns(&conn, "playlist_enrichment_observations").contains(&"confidence".into())
         );
+        assert!(table_columns(&conn, "playlist_index_tracks").contains(&"user_rating".into()));
+    }
+
+    #[test]
+    fn track_rating_is_validated_and_persisted() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        init_db(&conn).expect("initialize schema");
+        let now = timestamp();
+        conn.execute(
+            "INSERT INTO playlist_index_libraries (
+                id, source_path, source_name, indexed_at, updated_at
+             ) VALUES ('library-1', '/tmp/library.xml', 'library.xml', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert library");
+        conn.execute(
+            "INSERT INTO playlist_index_tracks (
+                library_id, track_id, name, source_exists, search_text,
+                attributes_json, created_at, updated_at
+             ) VALUES ('library-1', 'track-1', 'Track', 1, 'Track',
+                       '{\"Rating\":\"204\"}', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert track");
+
+        let rated = set_track_rating(&conn, "library-1", "track-1", 5).expect("save rating");
+        assert_eq!(rated.user_rating, Some(5));
+        assert_eq!(rated.rating.as_deref(), Some("204"));
+
+        let cleared = set_track_rating(&conn, "library-1", "track-1", 0).expect("clear rating");
+        assert_eq!(cleared.user_rating, Some(0));
+        assert!(set_track_rating(&conn, "library-1", "track-1", 6).is_err());
     }
 
     #[test]
@@ -7264,6 +7346,7 @@ mod playlist_index_tests {
             bpm: Some("124".to_string()),
             key: Some("8A".to_string()),
             rating: None,
+            user_rating: None,
             year: None,
             label: None,
             date_added: None,

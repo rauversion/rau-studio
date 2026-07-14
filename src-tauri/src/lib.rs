@@ -1414,6 +1414,7 @@ pub fn run() {
             playlist_index::playlist_index_delete_playlists,
             playlist_index::playlist_index_delete_tracks,
             playlist_index::playlist_index_playlist_tracks,
+            playlist_index::playlist_index_set_track_rating,
             playlist_index::playlist_index_search_tracks,
             playlist_index::playlist_index_track_groups,
             playlist_index::playlist_index_group_tracks,

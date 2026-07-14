@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type Context,
+  type ReactNode
+} from "react";
 
 export type Locale = "es" | "en";
 
@@ -59,6 +67,21 @@ const translations: Record<Locale, Record<string, string>> = {
     "File Conversion": "File Conversion",
     "Guardar key": "Save key",
     "Guardar": "Save",
+    "Guardando rating...": "Saving rating...",
+    "Rating guardado en SQLite.": "Rating saved to SQLite.",
+    "Rating del track": "Track rating",
+    "Tu rating": "Your rating",
+    "Sin rating": "Unrated",
+    "Flojo": "Weak",
+    "Esta bien": "Okay",
+    "Bueno": "Good",
+    "Muy bueno": "Very good",
+    "Favorito": "Favorite",
+    "Importado desde XML": "Imported from XML",
+    "Quitar rating": "Clear rating",
+    "Asignar 1 estrella": "Set 1 star",
+    "Asignar {count} estrellas": "Set {count} stars",
+    "Se guarda localmente sin modificar el XML original.": "Saved locally without changing the original XML.",
     "Guardar rutas": "Save paths",
     "Herramienta local para preparar audio, playlists y visuales sin depender de servicios externos.":
       "A local tool for preparing audio, playlists, and visuals without depending on external services.",
@@ -592,7 +615,27 @@ const translations: Record<Locale, Record<string, string>> = {
   }
 };
 
-const I18nContext = createContext<I18nContextValue | null>(null);
+type I18nContextRegistry = typeof globalThis & {
+  __RAU_STUDIO_I18N_CONTEXT__?: Context<I18nContextValue | null>;
+};
+
+const i18nContextRegistry = globalThis as I18nContextRegistry;
+const I18nContext = i18nContextRegistry.__RAU_STUDIO_I18N_CONTEXT__
+  ?? createContext<I18nContextValue | null>(null);
+i18nContextRegistry.__RAU_STUDIO_I18N_CONTEXT__ = I18nContext;
+
+const fallbackLocale = safeInitialLocale();
+const fallbackI18n: I18nContextValue = {
+  locale: fallbackLocale,
+  setLocale: async (locale) => {
+    try {
+      localStorage.setItem(localeStorageKey, normalizeLocale(locale));
+    } catch {
+      // The root provider will restore persistence when the webview is ready.
+    }
+  },
+  t: (key, values) => translate(fallbackLocale, key, values)
+};
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => detectInitialLocale());
@@ -641,11 +684,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 }
 
 export function useI18n() {
-  const context = useContext(I18nContext);
-  if (!context) {
-    throw new Error("useI18n must be used inside I18nProvider");
-  }
-  return context;
+  return useContext(I18nContext) ?? fallbackI18n;
 }
 
 export function normalizeLocale(value: string | null | undefined): Locale {
@@ -697,6 +736,14 @@ export function translateBackendMessage(locale: Locale, message: string) {
 function detectInitialLocale(): Locale {
   if (typeof window === "undefined") return defaultLocale;
   return normalizeLocale(localStorage.getItem(localeStorageKey));
+}
+
+function safeInitialLocale(): Locale {
+  try {
+    return detectInitialLocale();
+  } catch {
+    return defaultLocale;
+  }
 }
 
 function interpolate(template: string, values?: TranslationValues) {

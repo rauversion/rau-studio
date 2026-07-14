@@ -13,6 +13,7 @@ import {
   Search,
   Sparkles,
   Square,
+  Star,
   Trash2,
   Upload
 } from "lucide-react";
@@ -76,6 +77,7 @@ type PlaylistIndexTrack = {
   bpm?: string | null;
   key?: string | null;
   rating?: string | null;
+  user_rating?: number | null;
   year?: string | null;
   label?: string | null;
   date_added?: string | null;
@@ -929,6 +931,21 @@ export function PlaylistIndexPage() {
     setDetailSheetOpen(true);
   }
 
+  function updateTrackAfterRating(updatedTrack: PlaylistIndexTrack) {
+    const replaceTrack = (track: PlaylistIndexTrack) =>
+      track.library_id === updatedTrack.library_id && track.track_id === updatedTrack.track_id
+        ? updatedTrack
+        : track;
+
+    setDetailTrack(updatedTrack);
+    setPlaylistTracks((current) => current.map(replaceTrack));
+    setDraftTracks((current) => current.map(replaceTrack));
+    setSearchResults((current) => current.map((result) => ({
+      ...result,
+      track: replaceTrack(result.track)
+    })));
+  }
+
   function playlistIndexStatus(path: string): PlaylistIndexPlaylistStatus {
     return playlistIndexStatuses[path] ?? (indexedPlaylistPaths.has(path) ? "indexed" : "pending");
   }
@@ -1549,6 +1566,7 @@ export function PlaylistIndexPage() {
         }
         onReveal={(track) => void reveal(track.source_path)}
         onOpenFolder={(track) => void openFolder(track.source_path)}
+        onTrackUpdated={updateTrackAfterRating}
       />
 
       <IndexDeleteDialog
@@ -1845,7 +1863,8 @@ function PlaylistTrackDetailSheet({
   onClose,
   onPlay,
   onReveal,
-  onOpenFolder
+  onOpenFolder,
+  onTrackUpdated
 }: {
   open: boolean;
   track: PlaylistIndexTrack | null;
@@ -1853,6 +1872,7 @@ function PlaylistTrackDetailSheet({
   onPlay: (track: PlaylistIndexTrack) => void;
   onReveal: (track: PlaylistIndexTrack) => void;
   onOpenFolder: (track: PlaylistIndexTrack) => void;
+  onTrackUpdated: (track: PlaylistIndexTrack) => void;
 }) {
   const { t } = useI18n();
 
@@ -1880,7 +1900,7 @@ function PlaylistTrackDetailSheet({
     ["Key", track.key],
     [t("Ano"), track.year],
     ["Label", track.label],
-    ["Rating", track.rating],
+    ["Rating XML", track.rating],
     [t("Comentarios"), track.comments],
     [t("Fecha XML"), track.date_added],
     [t("Formato"), track.kind],
@@ -1916,6 +1936,10 @@ function PlaylistTrackDetailSheet({
             <DetailStat label="Sample rate" value={track.sample_rate ? `${track.sample_rate} Hz` : "n/d"} />
             <DetailStat label="Bitrate" value={track.bitrate ? `${track.bitrate} kbps` : "n/d"} />
           </section>
+
+          <SheetBlock title={t("Tu rating")}>
+            <TrackStarRating track={track} onTrackUpdated={onTrackUpdated} />
+          </SheetBlock>
 
           <SheetBlock title={t("Metadata")}>
             <div className="grid gap-2">
@@ -1959,6 +1983,154 @@ function PlaylistTrackDetailSheet({
       </aside>
     </div>
   );
+}
+
+function TrackStarRating({
+  track,
+  onTrackUpdated
+}: {
+  track: PlaylistIndexTrack;
+  onTrackUpdated: (track: PlaylistIndexTrack) => void;
+}) {
+  const { locale, t } = useI18n();
+  const [value, setValue] = useState(() => effectiveTrackRating(track));
+  const [hovered, setHovered] = useState(0);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [error, setError] = useState("");
+  const sourceRating = sourceRatingToStars(track.rating);
+  const hasLocalRating = track.user_rating !== undefined && track.user_rating !== null;
+  const previewValue = hovered || value;
+  const labels = [
+    t("Sin rating"),
+    t("Flojo"),
+    t("Esta bien"),
+    t("Bueno"),
+    t("Muy bueno"),
+    t("Favorito")
+  ];
+
+  useEffect(() => {
+    setValue(effectiveTrackRating(track));
+  }, [track.rating, track.track_id, track.user_rating]);
+
+  useEffect(() => {
+    setHovered(0);
+    setStatus("idle");
+    setError("");
+  }, [track.library_id, track.track_id]);
+
+  async function saveRating(nextRating: number) {
+    if (status === "saving" || (nextRating === value && hasLocalRating)) return;
+
+    const previous = value;
+    setValue(nextRating);
+    setHovered(0);
+    setStatus("saving");
+    setError("");
+
+    try {
+      const updatedTrack = await invoke<PlaylistIndexTrack>("playlist_index_set_track_rating", {
+        libraryId: track.library_id,
+        trackId: track.track_id,
+        rating: nextRating
+      });
+      onTrackUpdated(updatedTrack);
+      setValue(effectiveTrackRating(updatedTrack));
+      setStatus("saved");
+    } catch (saveError) {
+      setValue(previous);
+      setStatus("idle");
+      setError(translateBackendMessage(locale, String(saveError)));
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-amber-200 bg-gradient-to-br from-amber-50 via-card to-orange-50 p-4 dark:border-amber-900/70 dark:from-amber-950/40 dark:via-card dark:to-orange-950/20">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div
+            className="flex items-center gap-1"
+            role="radiogroup"
+            aria-label={t("Rating del track")}
+            onMouseLeave={() => setHovered(0)}
+          >
+            {[1, 2, 3, 4, 5].map((star) => {
+              const active = star <= previewValue;
+              return (
+                <button
+                  key={star}
+                  type="button"
+                  role="radio"
+                  aria-checked={value === star}
+                  aria-label={star === 1
+                    ? t("Asignar 1 estrella")
+                    : t("Asignar {count} estrellas", { count: star })}
+                  className={cn(
+                    "rounded-md p-1 transition duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-wait disabled:opacity-60",
+                    active
+                      ? "scale-105 text-amber-500 drop-shadow-sm"
+                      : "text-amber-300 hover:scale-110 hover:text-amber-400 dark:text-amber-800 dark:hover:text-amber-500"
+                  )}
+                  disabled={status === "saving"}
+                  onMouseEnter={() => setHovered(star)}
+                  onFocus={() => setHovered(star)}
+                  onBlur={() => setHovered(0)}
+                  onClick={() => void saveRating(star)}
+                >
+                  <Star className={cn("h-7 w-7", active && "fill-current")} />
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <strong className="text-foreground">{labels[previewValue]}</strong>
+            {previewValue > 0 ? <span className="text-muted-foreground">{previewValue}/5</span> : null}
+            {!hasLocalRating && sourceRating > 0 ? (
+              <span className="rounded-full border border-border bg-background/70 px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                {t("Importado desde XML")}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={status === "saving" || value === 0}
+          onClick={() => void saveRating(0)}
+        >
+          {t("Quitar rating")}
+        </Button>
+      </div>
+
+      <div className="mt-3 min-h-4 text-[11px]">
+        {status === "saving" ? (
+          <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-300">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+            {t("Guardando rating...")}
+          </span>
+        ) : status === "saved" ? (
+          <span className="text-emerald-700 dark:text-emerald-300">{t("Rating guardado en SQLite.")}</span>
+        ) : error ? (
+          <span className="text-red-700 dark:text-red-300">{error}</span>
+        ) : (
+          <span className="text-muted-foreground">{t("Se guarda localmente sin modificar el XML original.")}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function effectiveTrackRating(track: PlaylistIndexTrack): number {
+  return track.user_rating ?? sourceRatingToStars(track.rating);
+}
+
+function sourceRatingToStars(rating?: string | null): number {
+  const numeric = Number(rating);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  if (numeric <= 5) return Math.min(5, Math.max(1, Math.round(numeric)));
+  return Math.min(5, Math.max(1, Math.round(numeric / 51)));
 }
 
 function IndexDeleteDialog({

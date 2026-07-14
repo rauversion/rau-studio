@@ -933,10 +933,13 @@ function SettingsPage() {
                           autoComplete="off"
                           placeholder={credential.configured ? credential.preview ?? t("Configurada") : t("No configurada")}
                           disabled={busyProviderId === provider.id}
-                          onChange={(event) => setProviderCredentialValues((current) => ({
-                            ...current,
-                            [inputKey]: event.currentTarget.value
-                          }))}
+                          onChange={(event) => {
+                            const value = event.currentTarget.value;
+                            setProviderCredentialValues((current) => ({
+                              ...current,
+                              [inputKey]: value
+                            }));
+                          }}
                         />
                       </label>
                       <Button
