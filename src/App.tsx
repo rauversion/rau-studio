@@ -25,10 +25,12 @@ import {
   MoreHorizontal,
   Play,
   RefreshCcw,
+  Search,
   Settings,
   Sparkles,
   Square,
   Sun,
+  Tags,
   Trash2,
   Upload,
   UserRound,
@@ -37,6 +39,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { HashRouter, Navigate, NavLink, Outlet, Route, Routes, useOutletContext } from "react-router-dom";
 import { Button } from "./components/ui/button";
+import { CatalogPage } from "./CatalogPage";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { GlobalAudioPlayerProvider, SidebarAudioPlayer, useGlobalAudioPlayer } from "./components/audio/GlobalAudioPlayer";
 import {
@@ -47,6 +50,11 @@ import {
 } from "./components/ui/dropdown-menu";
 import { TerminalDrawer, type TerminalLogEntry } from "./components/terminal-drawer";
 import { cn } from "./lib/utils";
+import { EnrichmentPage } from "./EnrichmentPage";
+import type {
+  EnrichmentProviderDescriptor,
+  EnrichmentProviderTestResult
+} from "./enrichmentProviders";
 import { FileConversionPage } from "./FileConversionPage";
 import { MasteringPage } from "./MasteringPage";
 import { PlaylistBrowserPage } from "./PlaylistBrowserPage";
@@ -283,10 +291,12 @@ export default function App() {
             <Route path="/file-conversion/local" element={<FileConversionPage />} />
             <Route path="/file-conversion/rekordbox-convert" element={<RekordboxConvertPage />} />
             <Route path="/playlists" element={<PlaylistIndexPage />} />
+            <Route path="/playlists/catalog" element={<CatalogPage />} />
             <Route path="/playlists/copilot" element={<PlaylistCopilotPage />} />
             <Route path="/playlists/artists" element={<PlaylistBrowserPage kind="artist" />} />
             <Route path="/playlists/albums" element={<PlaylistBrowserPage kind="album" />} />
             <Route path="/playlists/taxonomies" element={<TaxonomyPage />} />
+            <Route path="/enrichment" element={<EnrichmentPage />} />
             <Route path="/turn" element={<TurnPage />} />
             <Route path="/mastering" element={<MasteringPage />} />
             <Route
@@ -334,6 +344,7 @@ function AppShell() {
       "local-conversion-log",
       "mastering-progress",
       "playlist-index-progress",
+      "track-enrichment-progress",
       "turn-progress"
     ];
 
@@ -410,7 +421,7 @@ function PlaceholderPage({
 }) {
   const { t } = useI18n();
   return (
-    <main className="min-w-0 p-4 pb-20">
+    <main className="min-w-0 p-4">
       <header className="mb-3 flex items-center gap-3 border-b border-border pb-3">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-border bg-secondary text-secondary-foreground">
           {icon}
@@ -444,12 +455,16 @@ function SettingsPage() {
   const [savingApiKey, setSavingApiKey] = useState(false);
   const [loadingAudioTools, setLoadingAudioTools] = useState(true);
   const [savingAudioTools, setSavingAudioTools] = useState(false);
+  const [enrichmentProviders, setEnrichmentProviders] = useState<EnrichmentProviderDescriptor[]>([]);
+  const [providerCredentialValues, setProviderCredentialValues] = useState<Record<string, string>>({});
+  const [busyProviderId, setBusyProviderId] = useState("");
   const [settingsMessage, setSettingsMessage] = useState("");
   const [settingsError, setSettingsError] = useState("");
 
   useEffect(() => {
     void loadApiKeyStatus();
     void loadAudioToolSettings();
+    void loadEnrichmentProviders();
   }, []);
 
   async function loadApiKeyStatus() {
@@ -515,6 +530,84 @@ function SettingsPage() {
       setSettingsError(translateBackendMessage(locale, String(error)));
     } finally {
       setLoadingAudioTools(false);
+    }
+  }
+
+  async function loadEnrichmentProviders() {
+    try {
+      const providers = await invoke<EnrichmentProviderDescriptor[]>("enrichment_providers");
+      setEnrichmentProviders(providers);
+    } catch (error) {
+      setSettingsError(translateBackendMessage(locale, String(error)));
+    }
+  }
+
+  function updateEnrichmentProvider(provider: EnrichmentProviderDescriptor) {
+    setEnrichmentProviders((current) =>
+      current.map((candidate) => candidate.id === provider.id ? provider : candidate)
+    );
+  }
+
+  async function saveProviderCredential(
+    provider: EnrichmentProviderDescriptor,
+    credentialId: string
+  ) {
+    const inputKey = `${provider.id}:${credentialId}`;
+    const value = providerCredentialValues[inputKey]?.trim() ?? "";
+    if (!value) return;
+    setBusyProviderId(provider.id);
+    setSettingsMessage("");
+    setSettingsError("");
+    try {
+      const updated = await invoke<EnrichmentProviderDescriptor>("enrichment_save_provider_credential", {
+        providerId: provider.id,
+        credentialId,
+        value
+      });
+      updateEnrichmentProvider(updated);
+      setProviderCredentialValues((current) => ({ ...current, [inputKey]: "" }));
+      setSettingsMessage(t("Credencial de {provider} guardada.", { provider: provider.label }));
+    } catch (error) {
+      setSettingsError(translateBackendMessage(locale, String(error)));
+    } finally {
+      setBusyProviderId("");
+    }
+  }
+
+  async function clearProviderCredential(
+    provider: EnrichmentProviderDescriptor,
+    credentialId: string
+  ) {
+    setBusyProviderId(provider.id);
+    setSettingsMessage("");
+    setSettingsError("");
+    try {
+      const updated = await invoke<EnrichmentProviderDescriptor>("enrichment_clear_provider_credential", {
+        providerId: provider.id,
+        credentialId
+      });
+      updateEnrichmentProvider(updated);
+      setSettingsMessage(t("Credencial de {provider} eliminada.", { provider: provider.label }));
+    } catch (error) {
+      setSettingsError(translateBackendMessage(locale, String(error)));
+    } finally {
+      setBusyProviderId("");
+    }
+  }
+
+  async function testEnrichmentProvider(provider: EnrichmentProviderDescriptor) {
+    setBusyProviderId(provider.id);
+    setSettingsMessage("");
+    setSettingsError("");
+    try {
+      const response = await invoke<EnrichmentProviderTestResult>("enrichment_test_provider", {
+        providerId: provider.id
+      });
+      setSettingsMessage(`${provider.label}: ${response.message}`);
+    } catch (error) {
+      setSettingsError(translateBackendMessage(locale, String(error)));
+    } finally {
+      setBusyProviderId("");
     }
   }
 
@@ -585,7 +678,7 @@ function SettingsPage() {
   }
 
   return (
-    <main className="min-w-0 p-4 pb-20">
+    <main className="min-w-0 p-4">
       <header className="mb-3 flex items-center gap-3 border-b border-border pb-3">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-border bg-secondary text-secondary-foreground">
           <Settings className="h-5 w-5" />
@@ -796,6 +889,96 @@ function SettingsPage() {
                 </Button>
               </div>
             </form>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Tags className="h-4 w-4" />
+              <CardTitle>{t("Fuentes de enrichment")}</CardTitle>
+            </div>
+            <span className="text-xs text-muted-foreground">
+              {t("Credenciales cifradas y capacidades declaradas por cada fuente.")}
+            </span>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {enrichmentProviders.map((provider) => (
+              <div key={provider.id} className="grid gap-3 rounded-md border border-border p-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <strong className="block">{provider.label}</strong>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">{provider.description}</span>
+                    <span className="mt-1 block font-mono text-[10px] text-muted-foreground">
+                      {provider.capabilities.join(" · ")}
+                    </span>
+                  </div>
+                  <span className={cn(
+                    "rounded-md border px-2 py-1 text-[10px] font-semibold uppercase",
+                    provider.ready
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"
+                      : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+                  )}>
+                    {provider.ready ? t("Lista") : t("Requiere credencial")}
+                  </span>
+                </div>
+
+                {provider.credentials.map((credential) => {
+                  const inputKey = `${provider.id}:${credential.id}`;
+                  return (
+                    <div key={credential.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end">
+                      <label className="grid gap-1 text-sm font-medium">
+                        {credential.label}
+                        <input
+                          className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring"
+                          type={credential.secret ? "password" : "text"}
+                          value={providerCredentialValues[inputKey] ?? ""}
+                          autoComplete="off"
+                          placeholder={credential.configured ? credential.preview ?? t("Configurada") : t("No configurada")}
+                          disabled={busyProviderId === provider.id}
+                          onChange={(event) => {
+                            const value = event.currentTarget.value;
+                            setProviderCredentialValues((current) => ({
+                              ...current,
+                              [inputKey]: value
+                            }));
+                          }}
+                        />
+                      </label>
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={busyProviderId === provider.id || !(providerCredentialValues[inputKey]?.trim())}
+                        onClick={() => void saveProviderCredential(provider, credential.id)}
+                      >
+                        {t("Guardar")}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={busyProviderId === provider.id || !credential.configured}
+                        onClick={() => void clearProviderCredential(provider, credential.id)}
+                      >
+                        {t("Eliminar")}
+                      </Button>
+                    </div>
+                  );
+                })}
+
+                <div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    disabled={busyProviderId === provider.id || !provider.ready}
+                    onClick={() => void testEnrichmentProvider(provider)}
+                  >
+                    {busyProviderId === provider.id ? t("Probando...") : t("Probar conexión")}
+                  </Button>
+                </div>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </section>
@@ -1515,7 +1698,7 @@ function RekordboxConvertPage() {
   }
 
   return (
-    <main className={cn("min-w-0 p-4 pb-20", terminalExpanded && "pb-72")}>
+    <main className={cn("min-w-0 p-4", terminalExpanded && "pb-72")}>
       <header className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
         <div className="min-w-0">
           <h1 className="m-0 text-2xl font-semibold tracking-normal">Rekordbox Convert</h1>
@@ -2103,6 +2286,9 @@ function AppSidebar({
           <SidebarLink to="/playlists" end icon={<ListMusic className="h-4 w-4" />}>
             {t("Playlist Library")}
           </SidebarLink>
+          <SidebarLink to="/playlists/catalog" icon={<Search className="h-4 w-4" />}>
+            {t("Catalogo")}
+          </SidebarLink>
           <SidebarLink to="/playlists/copilot" icon={<Sparkles className="h-4 w-4" />}>
             {t("Playlist Copilot")}
           </SidebarLink>
@@ -2114,6 +2300,12 @@ function AppSidebar({
           </SidebarLink>
           <SidebarLink to="/playlists/taxonomies" icon={<Database className="h-4 w-4" />}>
             {t("Taxonomias")}
+          </SidebarLink>
+        </SidebarSection>
+
+        <SidebarSection title={t("Enrichment")}>
+          <SidebarLink to="/enrichment" icon={<Tags className="h-4 w-4" />}>
+            {t("Enrichment")}
           </SidebarLink>
         </SidebarSection>
 

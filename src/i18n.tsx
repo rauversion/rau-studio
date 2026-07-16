@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type Context,
+  type ReactNode
+} from "react";
 
 export type Locale = "es" | "en";
 
@@ -25,6 +33,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "Actualizar status": "Refresh status",
     "API key": "API key",
     "Apariencia": "Appearance",
+    "Anterior": "Previous",
     "Audio tools": "Audio tools",
     "Ano": "Year",
     "Atributos XML": "XML attributes",
@@ -35,6 +44,8 @@ const translations: Record<Locale, Record<string, string>> = {
     "Comentarios": "Comments",
     "Conectando": "Connecting",
     "Configura ffmpeg/ffprobe o deja autodeteccion.": "Configure ffmpeg/ffprobe or leave autodetection enabled.",
+    "Configurar credenciales en Settings": "Configure credentials in Settings",
+    "Configurada": "Configured",
     "Contraer": "Collapse",
     "Contraer player": "Collapse player",
     "Contraer status": "Collapse status",
@@ -44,6 +55,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "Desktop": "Desktop",
     "Disponible": "Available",
     "Eliminar key": "Delete key",
+    "Eliminar": "Delete",
     "Enter an OpenAI API key.": "Enter an OpenAI API key.",
     "Error": "Error",
     "Eventos OK": "Events OK",
@@ -54,6 +66,22 @@ const translations: Record<Locale, Record<string, string>> = {
     "FFprobe": "FFprobe",
     "File Conversion": "File Conversion",
     "Guardar key": "Save key",
+    "Guardar": "Save",
+    "Guardando rating...": "Saving rating...",
+    "Rating guardado en SQLite.": "Rating saved to SQLite.",
+    "Rating del track": "Track rating",
+    "Tu rating": "Your rating",
+    "Sin rating": "Unrated",
+    "Flojo": "Weak",
+    "Esta bien": "Okay",
+    "Bueno": "Good",
+    "Muy bueno": "Very good",
+    "Favorito": "Favorite",
+    "Importado desde XML": "Imported from XML",
+    "Quitar rating": "Clear rating",
+    "Asignar 1 estrella": "Set 1 star",
+    "Asignar {count} estrellas": "Set {count} stars",
+    "Se guarda localmente sin modificar el XML original.": "Saved locally without changing the original XML.",
     "Guardar rutas": "Save paths",
     "Herramienta local para preparar audio, playlists y visuales sin depender de servicios externos.":
       "A local tool for preparing audio, playlists, and visuals without depending on external services.",
@@ -71,6 +99,8 @@ const translations: Record<Locale, Record<string, string>> = {
     "OpenAI API key": "OpenAI API key",
     "Oscuro": "Dark",
     "Preferencias generales de Rau Studio.": "General Rau Studio preferences.",
+    "Probar conexión": "Test connection",
+    "Probando...": "Testing...",
     "Quien creo Rau Studio": "Who created Rau Studio",
     "Refrescar": "Refresh",
     "Resultados": "Results",
@@ -82,6 +112,14 @@ const translations: Record<Locale, Record<string, string>> = {
     "Rutas de herramientas guardadas.": "Tool paths saved.",
     "Rutas de herramientas restauradas a autodeteccion.": "Tool paths restored to autodetection.",
     "Settings": "Settings",
+    "Lista": "Ready",
+    "Requiere credencial": "Credential required",
+    "Fuentes de enrichment": "Enrichment sources",
+    "Credenciales cifradas y capacidades declaradas por cada fuente.":
+      "Encrypted credentials and capabilities declared by each source.",
+    "Credencial de {provider} guardada.": "{provider} credential saved.",
+    "Credencial de {provider} eliminada.": "{provider} credential deleted.",
+    "Siguiente": "Next",
     "Sin eventos todavia.": "No events yet.",
     "Source file not found": "Source file not found",
     "Status": "Status",
@@ -89,6 +127,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "Turn": "Turn",
     "Usar defaults": "Use defaults",
     "Ver status": "View status",
+    "Volumen": "Volume",
     "WebSocket": "WebSocket",
     "Esta seccion ya esta registrada en el router y lista para recibir su flujo.":
       "This section is already registered in the router and ready for its workflow.",
@@ -576,7 +615,27 @@ const translations: Record<Locale, Record<string, string>> = {
   }
 };
 
-const I18nContext = createContext<I18nContextValue | null>(null);
+type I18nContextRegistry = typeof globalThis & {
+  __RAU_STUDIO_I18N_CONTEXT__?: Context<I18nContextValue | null>;
+};
+
+const i18nContextRegistry = globalThis as I18nContextRegistry;
+const I18nContext = i18nContextRegistry.__RAU_STUDIO_I18N_CONTEXT__
+  ?? createContext<I18nContextValue | null>(null);
+i18nContextRegistry.__RAU_STUDIO_I18N_CONTEXT__ = I18nContext;
+
+const fallbackLocale = safeInitialLocale();
+const fallbackI18n: I18nContextValue = {
+  locale: fallbackLocale,
+  setLocale: async (locale) => {
+    try {
+      localStorage.setItem(localeStorageKey, normalizeLocale(locale));
+    } catch {
+      // The root provider will restore persistence when the webview is ready.
+    }
+  },
+  t: (key, values) => translate(fallbackLocale, key, values)
+};
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => detectInitialLocale());
@@ -625,11 +684,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 }
 
 export function useI18n() {
-  const context = useContext(I18nContext);
-  if (!context) {
-    throw new Error("useI18n must be used inside I18nProvider");
-  }
-  return context;
+  return useContext(I18nContext) ?? fallbackI18n;
 }
 
 export function normalizeLocale(value: string | null | undefined): Locale {
@@ -681,6 +736,14 @@ export function translateBackendMessage(locale: Locale, message: string) {
 function detectInitialLocale(): Locale {
   if (typeof window === "undefined") return defaultLocale;
   return normalizeLocale(localStorage.getItem(localeStorageKey));
+}
+
+function safeInitialLocale(): Locale {
+  try {
+    return detectInitialLocale();
+  } catch {
+    return defaultLocale;
+  }
 }
 
 function interpolate(template: string, values?: TranslationValues) {

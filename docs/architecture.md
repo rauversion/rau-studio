@@ -28,7 +28,7 @@ Major domains:
 - Mastering jobs and events.
 - Turn jobs and events.
 - Indexed playlist libraries, memberships, draft playlists, and embeddings.
-- Encrypted settings, including the OpenAI API key and audio tool paths.
+- Encrypted settings, including OpenAI and enrichment-provider credentials and audio tool paths.
 
 The app never stores raw audio in SQLite. It stores file paths, metadata snapshots, derived analysis, and event logs.
 
@@ -71,6 +71,32 @@ The frontend owns:
 - presenting realtime events from Tauri;
 - user-facing validation messages.
 
+## Playback Queue
+
+Audio playback is coordinated in the frontend by the global audio player provider. The provider owns the current
+track, the current playback queue, the queue index, progress state, and the hidden browser audio element.
+
+Track list surfaces pass their visible ordered tracks as playback context when a user starts a track. The player
+normalizes that context into a playable queue by filtering out missing files, stores the clicked track as the current
+index, and automatically advances to the next playable item when the current audio ends. Direct previews that do not
+come from a track list continue to use single-path playback and do not create a queue.
+
+This keeps ordering behavior local to the UI context that the user is seeing while preserving one global player across
+navigation, detail sheets, the sidebar, and playlist tools.
+
+The provider publishes stable playback controls separately from sidebar-only progress and preference state. Track
+lists therefore update when playback identity changes, but not for every audio `timeupdate` or volume slider change.
+
+## Track Cover Pipeline
+
+Track covers are requested only when a row approaches the visible viewport. A shared intersection observer and a
+two-request scheduler deduplicate paths, bound concurrent extraction, and cancel work that has not started when its
+last visible consumer disappears.
+
+The Tauri cover command runs blocking filesystem and `ffmpeg` work on the async runtime's blocking pool. Cache misses
+produce a versioned JPEG thumbnail no larger than 256 by 256 pixels through a temporary file; cache hits and known
+missing covers return immediately. The UI lets WebKit defer and asynchronously decode the resulting local image.
+
 ## Realtime Events
 
 Long-running tasks emit Tauri events:
@@ -81,6 +107,7 @@ Long-running tasks emit Tauri events:
 - `local-conversion-log`
 - `mastering-progress`
 - `playlist-index-progress`
+- `playlist-copilot-progress`
 - `turn-progress`
 
 The app shell listens to these events to report bridge health, while each feature page consumes the relevant stream for progress, row status, and terminal logs.
@@ -110,9 +137,20 @@ The app shell listens to these events to report bridge health, while each featur
 2. Store tracks, playlists, memberships, metadata attributes, and source paths in SQLite.
 3. Rebuild SQLite FTS for lexical search.
 4. Optionally generate OpenAI embeddings for selected tracks or the whole library.
-5. Search with lexical FTS, vector similarity, metadata browsing, taxonomy graphs, or Playlist Copilot.
-6. Select tracks and add them to local draft playlists.
-7. Export draft playlists back to Rekordbox XML.
+5. Search with lexical FTS, vector similarity, metadata browsing, or taxonomy graphs.
+6. Playlist Copilot reduces each message or guided answer into a revision of the persisted structured intent.
+7. A search planner creates focused probes for the brief, style, feel, mix constraints, and adjacent discovery.
+8. The backend batches probe embeddings, loads local vectors once, and fuses the focused top lists with reciprocal-rank fusion; metadata probes provide the offline fallback.
+9. Its pure Rust planner ranks and rotates candidates by relevance, recent history, BPM, harmonic compatibility, energy curve, source policy, artist diversity, and conditional genre diversity.
+10. The backend emits `playlist-copilot-progress` events so the chat can show brief changes, searches, ranking, and sequencing while the run is active.
+11. Select tracks and add them to local draft playlists.
+12. Export draft playlists back to Rekordbox XML.
+
+## Metadata Enrichment Pipeline
+
+Track enrichment is a modular provider pipeline. The planner routes missing fields only to providers that declare the relevant capability. Provider adapters own authentication, request construction, retries, and rate limits. Successful calls create append-only field observations; a field-aware resolver selects canonical suggestions while retaining every provider value as provenance.
+
+Provider credentials are encrypted in local settings and loaded only by the Rust backend. The frontend receives configuration status and masked previews, never stored secret values. See [Metadata Enrichment](enrichment.md) for the provider contract, persistence model, and application policy.
 
 ## AI Boundaries
 
@@ -121,6 +159,8 @@ AI is optional and scoped:
 - Mastering can call OpenAI to interpret feedback and produce a processing policy.
 - Vector search sends text metadata to OpenAI embeddings, never audio.
 - Playlist Copilot sends the user's prompt and a compact library profile, not the full audio collection.
+- UI language instructions and rendered chat history are not used as embedding or ranking input.
+- OpenAI interprets intent only; local deterministic code owns filtering, scoring, sequencing, and persistence.
 
 If OpenAI is not configured or a request fails, the app uses local deterministic fallbacks where available.
 
@@ -152,7 +192,9 @@ If OpenAI is not configured or a request fails, the app uses local deterministic
 
 - `src-tauri/src/lib.rs`
 - `src-tauri/src/local_conversion.rs`
+- `src-tauri/src/enrichment/*`
 - `src-tauri/src/mastering.rs`
+- `src-tauri/src/playlist_copilot.rs`
 - `src-tauri/src/playlist_index.rs`
 - `src-tauri/src/settings.rs`
 - `src-tauri/src/system.rs`

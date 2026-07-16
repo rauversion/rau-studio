@@ -20,8 +20,10 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
+mod enrichment;
 mod local_conversion;
 mod mastering;
+mod playlist_copilot;
 mod playlist_index;
 mod settings;
 mod system;
@@ -1386,6 +1388,10 @@ pub fn run() {
             save_audio_tool_settings,
             get_language_settings,
             save_language_settings,
+            enrichment::enrichment_providers,
+            enrichment::enrichment_save_provider_credential,
+            enrichment::enrichment_clear_provider_credential,
+            enrichment::enrichment_test_provider,
             local_conversion::local_conversion_list_items,
             local_conversion::local_conversion_list_groups,
             local_conversion::local_conversion_group_items,
@@ -1408,15 +1414,28 @@ pub fn run() {
             playlist_index::playlist_index_delete_playlists,
             playlist_index::playlist_index_delete_tracks,
             playlist_index::playlist_index_playlist_tracks,
+            playlist_index::playlist_index_set_track_rating,
             playlist_index::playlist_index_search_tracks,
             playlist_index::playlist_index_track_groups,
             playlist_index::playlist_index_group_tracks,
             playlist_index::playlist_index_taxonomy_overview,
             playlist_index::playlist_index_taxonomy_graph,
             playlist_index::playlist_index_taxonomy_tracks,
+            playlist_index::playlist_catalog_search,
+            playlist_index::playlist_catalog_select_all,
+            playlist_index::playlist_catalog_saved_searches,
+            playlist_index::playlist_catalog_save_search,
+            playlist_index::playlist_catalog_delete_saved_search,
+            playlist_index::playlist_catalog_set_rating,
             playlist_index::playlist_copilot_generate,
             playlist_index::playlist_index_track_cover,
             playlist_index::playlist_index_generate_embeddings,
+            playlist_index::playlist_enrichment_overview,
+            playlist_index::playlist_enrichment_candidates,
+            playlist_index::playlist_enrichment_results,
+            playlist_index::playlist_enrichment_run,
+            playlist_index::playlist_enrichment_apply,
+            playlist_index::playlist_enrichment_clear,
             playlist_index::playlist_index_drafts,
             playlist_index::playlist_index_create_draft,
             playlist_index::playlist_index_add_tracks_to_draft,

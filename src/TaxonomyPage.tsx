@@ -93,6 +93,7 @@ type TaxonomyTrack = {
   bpm?: string | null;
   key?: string | null;
   rating?: string | null;
+  user_rating?: number | null;
   year?: string | null;
   label?: string | null;
   date_added?: string | null;
@@ -977,6 +978,10 @@ function TaxonomyTracksPanel({
           <TrackTable
             tracks={tracks}
             columns={["artist", "album", "genre", "bpm", "key", "kind"]}
+            playbackContext={{
+              id: selection ? `taxonomy:${selection.kind}:${selection.value}` : "taxonomy:tracks",
+              label: selection ? t(selection.label) : t("Tracks")
+            }}
             selectedTrackIds={selectedTrackIds}
             isPlaying={isPlaying}
             onDetails={onDetails}

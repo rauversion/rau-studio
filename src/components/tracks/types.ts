@@ -9,6 +9,7 @@ export type TrackListItem = {
   bpm?: string | null;
   key?: string | null;
   rating?: string | null;
+  user_rating?: number | null;
   year?: string | null;
   label?: string | null;
   date_added?: string | null;
@@ -18,6 +19,23 @@ export type TrackListItem = {
   source_exists: boolean;
   total_time?: number | null;
   attributes?: Record<string, string>;
+  embedding_ready?: boolean;
 };
 
-export type TrackListColumn = "artist" | "album" | "genre" | "bpm" | "key" | "year" | "kind";
+export type TrackListColumn =
+  | "artist"
+  | "album"
+  | "genre"
+  | "bpm"
+  | "key"
+  | "rating"
+  | "year"
+  | "label"
+  | "comments"
+  | "kind";
+
+export type TrackPlaybackContext = {
+  id: string;
+  label?: string | null;
+  tracks: TrackListItem[];
+};
