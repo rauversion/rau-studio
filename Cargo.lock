@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "rau-studio"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "aifficator-core",
  "base64 0.22.1",
