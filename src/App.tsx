@@ -17,9 +17,11 @@ import {
   FolderOpen,
   Gauge,
   HardDrive,
+  House,
   Info,
   KeyRound,
   ListMusic,
+  LoaderCircle,
   Monitor,
   Moon,
   MoreHorizontal,
@@ -56,6 +58,7 @@ import type {
   EnrichmentProviderTestResult
 } from "./enrichmentProviders";
 import { FileConversionPage } from "./FileConversionPage";
+import { HomePage } from "./HomePage";
 import { MasteringPage } from "./MasteringPage";
 import { PlaylistBrowserPage } from "./PlaylistBrowserPage";
 import { PlaylistCopilotPage } from "./PlaylistCopilotPage";
@@ -211,6 +214,7 @@ type ExportXmlResult = {
 };
 
 type DetailTab = "playlist" | "converted" | "plan" | "report";
+type RekordboxImportStage = "idle" | "importing" | "hydrating";
 
 type AppShellContext = {
   darkMode: boolean;
@@ -286,7 +290,7 @@ export default function App() {
       <HashRouter>
         <Routes>
           <Route element={<AppShell />}>
-            <Route path="/" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
+            <Route path="/" element={<HomePage />} />
             <Route path="/rekordbox-convert" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
             <Route path="/file-conversion" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
             <Route path="/file-conversion/local" element={<FileConversionPage />} />
@@ -304,7 +308,7 @@ export default function App() {
               path="/settings"
               element={<SettingsPage />}
             />
-            <Route path="*" element={<Navigate to="/file-conversion/rekordbox-convert" replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
       </HashRouter>
@@ -1014,6 +1018,8 @@ function RekordboxConvertPage() {
   const [selectedTrackFile, setSelectedTrackFile] = useState<PlaylistTrackFile | null>(null);
   const [metadataSheetOpen, setMetadataSheetOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [importStage, setImportStage] = useState<RekordboxImportStage>("idle");
+  const [reportIssueLimit, setReportIssueLimit] = useState(400);
   const [errorMessage, setErrorMessage] = useState("");
 
   const terminalElement = useRef<HTMLDivElement | null>(null);
@@ -1084,6 +1090,7 @@ function RekordboxConvertPage() {
   );
   const validation = importResult?.validation;
   const sortedIssues = validation?.issues ?? [];
+  const visibleIssues = sortedIssues.slice(0, reportIssueLimit);
   const plannedRows = plan?.items ?? [];
   const activePlaylist = playlistRows.find((playlist) => playlist.path === activePlaylistPath);
   const allPlaylistsSelected = playlistRows.length > 0 && selectedPlaylists.size === playlistRows.length;
@@ -1216,7 +1223,10 @@ function RekordboxConvertPage() {
     if (!path) return;
 
     setBusy(true);
+    setImportStage("importing");
     setErrorMessage("");
+    setImportResult(null);
+    setReportIssueLimit(400);
     setPlan(null);
     setConvertedFiles([]);
     setConversionProgress(new Map());
@@ -1239,14 +1249,17 @@ function RekordboxConvertPage() {
     try {
       const response = await invoke<ImportResponse>("import_rekordbox_xml", { path });
       setImportResult(response);
+      setImportStage("hydrating");
+      await waitForBrowserPaint();
       const firstPlaylist = response.playlists.find((playlist) => playlist.node_type === "1");
-      if (firstPlaylist) {
-        await selectPlaylist(firstPlaylist.path, path);
-      }
-      await refreshConvertedFiles(path);
+      await Promise.all([
+        firstPlaylist ? selectPlaylist(firstPlaylist.path, path) : Promise.resolve(),
+        refreshConvertedFiles(path)
+      ]);
     } catch (error) {
       setErrorMessage(String(error));
     } finally {
+      setImportStage("idle");
       setBusy(false);
     }
   }
@@ -1280,6 +1293,8 @@ function RekordboxConvertPage() {
     setActiveDetailTab("playlist");
     setSelectedTrackFile(null);
     setMetadataSheetOpen(false);
+    setImportStage("idle");
+    setReportIssueLimit(400);
   }
 
   function rememberXmlPath(path: string) {
@@ -1792,6 +1807,30 @@ function RekordboxConvertPage() {
         </div>
       ) : null}
 
+      {importStage !== "idle" ? (
+        <Card className="mb-3 overflow-hidden" aria-live="polite" aria-busy="true">
+          <div className="relative flex min-h-24 items-center gap-4 overflow-hidden px-4 py-4">
+            <div className="absolute inset-0 bg-gradient-to-r from-violet-500/10 via-cyan-500/5 to-transparent" />
+            <span className="relative grid h-11 w-11 shrink-0 place-items-center rounded-full border border-primary/10 bg-background shadow-sm">
+              <LoaderCircle className="h-5 w-5 animate-spin text-primary" />
+            </span>
+            <div className="relative min-w-0 flex-1">
+              <strong className="block text-sm">
+                {importStage === "importing"
+                  ? t("Leyendo y validando la colección de Rekordbox…")
+                  : t("Preparando playlists y archivos convertidos…")}
+              </strong>
+              <span className="mt-1 block truncate text-xs text-muted-foreground" title={xmlPath}>
+                {xmlPath}
+              </span>
+              <span className="mt-3 block h-1.5 overflow-hidden rounded-full bg-secondary">
+                <span className="block h-full w-1/3 animate-[rekordbox-loader_1.25s_ease-in-out_infinite] rounded-full bg-primary" />
+              </span>
+            </div>
+          </div>
+        </Card>
+      ) : null}
+
       {validation && dynamicStats ? (
         <section className="mb-3 grid grid-cols-2 gap-2 lg:grid-cols-4 xl:grid-cols-8">
           <Metric label={t("Tracks")} value={validation.tracks_total} />
@@ -1858,6 +1897,7 @@ function RekordboxConvertPage() {
                     key={playlist.path}
                     className={cn(
                       "grid min-h-9 grid-cols-[22px_minmax(0,1fr)_minmax(0,48px)_58px] items-center gap-2 border-b border-l-2 border-b-border border-l-transparent px-3",
+                      "rekordbox-virtual-row",
                       processingCount > 0 && "border-l-amber-500 bg-amber-50/70 dark:bg-amber-950/30",
                       playlist.path === activePlaylistPath && "bg-muted"
                     )}
@@ -1920,7 +1960,8 @@ function RekordboxConvertPage() {
               </DetailTabButton>
             </div>
 
-            <Card className={cn("flex h-[520px] min-h-0 flex-col overflow-hidden", activeDetailTab !== "playlist" && "hidden")}>
+            {activeDetailTab === "playlist" ? (
+            <Card className="flex h-[520px] min-h-0 flex-col overflow-hidden">
               <CardHeader>
                 <div className="min-w-0">
                   <CardTitle>{t("Playlist")}</CardTitle>
@@ -1981,7 +2022,7 @@ function RekordboxConvertPage() {
                 {playlistFiles.map((file) => (
                   <div
                     key={`${file.track_id}-${file.position}`}
-                    className={cn("playlist-track-grid border-b border-border text-xs", !file.source_exists && "bg-red-50 dark:bg-red-950/30")}
+                    className={cn("playlist-track-grid rekordbox-virtual-row border-b border-border text-xs", !file.source_exists && "bg-red-50 dark:bg-red-950/30")}
                   >
                     <span className="flex justify-center">
                       <Button
@@ -2020,8 +2061,10 @@ function RekordboxConvertPage() {
                 ))}
               </CardContent>
             </Card>
+            ) : null}
 
-            <Card className={cn("flex h-[520px] min-h-0 flex-col overflow-hidden", activeDetailTab !== "converted" && "hidden")}>
+            {activeDetailTab === "converted" ? (
+            <Card className="flex h-[520px] min-h-0 flex-col overflow-hidden">
               <CardHeader>
                 <CardTitle>Convertidos</CardTitle>
                 <div className="flex items-center gap-2">
@@ -2042,7 +2085,7 @@ function RekordboxConvertPage() {
                 </div>
                 {convertedFiles.length === 0 ? <EmptyRow>{t("No hay AIFF convertidos detectados para este XML.")}</EmptyRow> : null}
                 {convertedFiles.map((file) => (
-                  <div key={file.target_path} className="file-grid file-grid-converted border-b border-border text-xs">
+                  <div key={file.target_path} className="file-grid file-grid-converted rekordbox-virtual-row border-b border-border text-xs">
                     <span className="flex min-w-0 items-center gap-2 truncate" title={file.name ?? file.track_id}>
                       <span className="h-2.5 w-2.5 shrink-0 rounded-full border border-emerald-700 bg-emerald-500" />
                       <span className="truncate">{file.name ?? file.track_id}</span>
@@ -2065,8 +2108,10 @@ function RekordboxConvertPage() {
                 ))}
               </CardContent>
             </Card>
+            ) : null}
 
-            <Card className={cn("flex h-[520px] min-h-0 flex-col overflow-hidden", activeDetailTab !== "plan" && "hidden")}>
+            {activeDetailTab === "plan" ? (
+            <Card className="flex h-[520px] min-h-0 flex-col overflow-hidden">
               <CardHeader>
                 <CardTitle>{t("Plan seleccionado")}</CardTitle>
                 <span className="text-xs text-muted-foreground">{t("{count} tracks", { count: plannedRows.length })}</span>
@@ -2100,8 +2145,10 @@ function RekordboxConvertPage() {
                 ) : null}
               </CardContent>
             </Card>
+            ) : null}
 
-            <Card className={cn("flex h-[520px] min-h-0 flex-col overflow-hidden", activeDetailTab !== "report" && "hidden")}>
+            {activeDetailTab === "report" ? (
+            <Card className="flex h-[520px] min-h-0 flex-col overflow-hidden">
               <CardHeader>
                 <CardTitle>{t("Reporte")}</CardTitle>
                 <span className="text-xs text-muted-foreground">{t("{count} hallazgos", { count: sortedIssues.length })}</span>
@@ -2113,16 +2160,30 @@ function RekordboxConvertPage() {
                   <span>Track</span>
                   <span>{t("Mensaje")}</span>
                 </div>
-                {sortedIssues.map((issue, index) => (
-                  <div key={`${issue.code}-${issue.track_id ?? index}`} className={cn("issue-grid border-b border-border text-xs", issueRowClass(issue.severity))}>
+                {visibleIssues.map((issue, index) => (
+                  <div key={`${issue.code}-${issue.track_id ?? index}`} className={cn("issue-grid rekordbox-virtual-row border-b border-border text-xs", issueRowClass(issue.severity))}>
                     <span>{issue.severity}</span>
                     <span>{issue.code}</span>
                     <span className="truncate">{issue.track_id ?? ""}</span>
                     <span className="truncate" title={issue.message}>{issue.message}</span>
                   </div>
                 ))}
+                {visibleIssues.length < sortedIssues.length ? (
+                  <div className="flex items-center justify-between gap-3 border-t border-border bg-card px-3 py-3">
+                    <span className="text-xs text-muted-foreground">
+                      {t("Mostrando {visible} de {total} hallazgos", {
+                        visible: visibleIssues.length,
+                        total: sortedIssues.length
+                      })}
+                    </span>
+                    <Button variant="secondary" size="sm" onClick={() => setReportIssueLimit((current) => current + 400)}>
+                      {t("Mostrar más")}
+                    </Button>
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
+            ) : null}
           </section>
         </section>
       ) : null}
@@ -2263,7 +2324,7 @@ function AppSidebar({
 
   return (
     <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col border-r border-border bg-card px-3 py-4 max-lg:static max-lg:h-auto max-lg:w-full max-lg:border-b max-lg:border-r-0">
-      <div className="mb-5 flex shrink-0 items-center gap-3 px-2 max-lg:mb-3">
+      <NavLink to="/" className="mb-5 flex shrink-0 items-center gap-3 rounded-md px-2 py-1 transition-colors hover:bg-secondary max-lg:mb-3">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-border bg-secondary">
           <img src="/rau-logo.png" alt="" className="h-8 w-8 object-contain" />
         </span>
@@ -2273,9 +2334,15 @@ function AppSidebar({
             {t("v{version} · Desktop", { version: appVersion })}
           </span>
         </div>
-      </div>
+      </NavLink>
 
       <nav className="grid min-h-0 flex-1 gap-5 overflow-y-auto pr-1 max-lg:flex max-lg:max-h-40 max-lg:flex-none max-lg:gap-3 max-lg:overflow-x-auto max-lg:overflow-y-hidden max-lg:pr-0">
+        <SidebarSection title={t("Studio")}>
+          <SidebarLink to="/" end icon={<House className="h-4 w-4" />}>
+            {t("Inicio")}
+          </SidebarLink>
+        </SidebarSection>
+
         <SidebarSection title={t("File Conversion")}>
           <SidebarLink to="/file-conversion/local" icon={<Upload className="h-4 w-4" />}>
             {t("File Conversion")}
@@ -2581,6 +2648,14 @@ function Progress({ value, small = false }: { value: number; small?: boolean }) 
       <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
     </div>
   );
+}
+
+function waitForBrowserPaint() {
+  return new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  });
 }
 
 function CreatePlanButton({

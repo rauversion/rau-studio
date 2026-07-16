@@ -16,6 +16,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -31,10 +32,18 @@ mod turn;
 
 #[derive(Debug, Serialize)]
 struct ImportResponse {
-    library: RekordboxLibrary,
     playlists: Vec<PlaylistSummary>,
     validation: ValidationReport,
 }
+
+struct CachedRekordboxLibrary {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    size_bytes: u64,
+    library: Arc<RekordboxLibrary>,
+}
+
+static REKORDBOX_LIBRARY_CACHE: OnceLock<Mutex<Option<CachedRekordboxLibrary>>> = OnceLock::new();
 
 #[derive(Debug, Serialize)]
 struct ConvertedFile {
@@ -162,15 +171,44 @@ struct SystemStatus {
 }
 
 #[tauri::command]
-fn system_status(app: AppHandle) -> SystemStatus {
-    SystemStatus {
+async fn system_status(app: AppHandle) -> Result<SystemStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || SystemStatus {
         ffmpeg: system::binary_status(&app, "ffmpeg"),
         ffprobe: system::binary_status(&app, "ffprobe"),
         checked_at_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis())
             .unwrap_or_default(),
+    })
+    .await
+    .map_err(|error| format!("No se pudo revisar el estado del sistema: {error}"))
+}
+
+fn load_rekordbox_library(path: impl AsRef<Path>) -> Result<Arc<RekordboxLibrary>, String> {
+    let path = path.as_ref().to_path_buf();
+    let metadata = fs::metadata(&path)
+        .map_err(|error| format!("No se pudo leer XML {}: {error}", path.display()))?;
+    let modified = metadata.modified().ok();
+    let size_bytes = metadata.len();
+    let cache = REKORDBOX_LIBRARY_CACHE.get_or_init(|| Mutex::new(None));
+    let mut cached = cache
+        .lock()
+        .map_err(|_| "No se pudo acceder al cache de Rekordbox.".to_string())?;
+
+    if let Some(entry) = cached.as_ref() {
+        if entry.path == path && entry.modified == modified && entry.size_bytes == size_bytes {
+            return Ok(Arc::clone(&entry.library));
+        }
     }
+
+    let library = Arc::new(parse_rekordbox_xml_file(&path).map_err(|error| error.to_string())?);
+    *cached = Some(CachedRekordboxLibrary {
+        path,
+        modified,
+        size_bytes,
+        library: Arc::clone(&library),
+    });
+    Ok(library)
 }
 
 #[tauri::command]
@@ -219,21 +257,38 @@ fn save_language_settings(
 }
 
 #[tauri::command]
-fn import_rekordbox_xml(path: String) -> Result<ImportResponse, String> {
-    let library = parse_rekordbox_xml_file(path).map_err(|error| error.to_string())?;
+async fn import_rekordbox_xml(path: String) -> Result<ImportResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || import_rekordbox_xml_blocking(path))
+        .await
+        .map_err(|error| format!("La importacion de Rekordbox fallo inesperadamente: {error}"))?
+}
+
+fn import_rekordbox_xml_blocking(path: String) -> Result<ImportResponse, String> {
+    let library = load_rekordbox_library(path)?;
     let playlists = library.playlists_flat();
     let validation = validate_library(&library);
 
     Ok(ImportResponse {
-        library,
         playlists,
         validation,
     })
 }
 
 #[tauri::command]
-fn plan_conversion(path: String, playlist_paths: Vec<String>) -> Result<ConversionPlan, String> {
-    let library = parse_rekordbox_xml_file(path).map_err(|error| error.to_string())?;
+async fn plan_conversion(
+    path: String,
+    playlist_paths: Vec<String>,
+) -> Result<ConversionPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || plan_conversion_blocking(path, playlist_paths))
+        .await
+        .map_err(|error| format!("La planificacion fallo inesperadamente: {error}"))?
+}
+
+fn plan_conversion_blocking(
+    path: String,
+    playlist_paths: Vec<String>,
+) -> Result<ConversionPlan, String> {
+    let library = load_rekordbox_library(path)?;
 
     Ok(build_conversion_plan(
         &library,
@@ -245,13 +300,25 @@ fn plan_conversion(path: String, playlist_paths: Vec<String>) -> Result<Conversi
 }
 
 #[tauri::command]
-fn export_rekordbox_xml(
+async fn export_rekordbox_xml(
+    path: String,
+    playlist_paths: Vec<String>,
+    output_path: String,
+) -> Result<ExportXmlResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        export_rekordbox_xml_blocking(path, playlist_paths, output_path)
+    })
+    .await
+    .map_err(|error| format!("La exportacion fallo inesperadamente: {error}"))?
+}
+
+fn export_rekordbox_xml_blocking(
     path: String,
     playlist_paths: Vec<String>,
     output_path: String,
 ) -> Result<ExportXmlResult, String> {
     let xml = fs::read_to_string(&path).map_err(|error| format!("No se pudo leer XML: {error}"))?;
-    let library = parse_rekordbox_xml_file(&path).map_err(|error| error.to_string())?;
+    let library = load_rekordbox_library(&path)?;
     let selected_track_ids = export_track_ids(&library, &playlist_paths)?;
     let selected_replacements = export_replacements(&library, &selected_track_ids)?;
     let mut replacements = existing_converted_replacements(&library);
@@ -476,7 +543,7 @@ fn convert_tracks_blocking(
     track_ids: Vec<String>,
     max_concurrency: Option<usize>,
 ) -> Result<ConversionBatchResult, String> {
-    let library = parse_rekordbox_xml_file(path).map_err(|error| error.to_string())?;
+    let library = load_rekordbox_library(path)?;
     let track_index = library.track_by_id();
     let max_concurrency = max_concurrency.unwrap_or(1).clamp(1, 4);
     let mut seen = BTreeSet::new();
@@ -1078,8 +1145,14 @@ fn stderr_tail(stderr_output: &str) -> String {
 }
 
 #[tauri::command]
-fn list_converted_files(path: String) -> Result<Vec<ConvertedFile>, String> {
-    let library = parse_rekordbox_xml_file(path).map_err(|error| error.to_string())?;
+async fn list_converted_files(path: String) -> Result<Vec<ConvertedFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_converted_files_blocking(path))
+        .await
+        .map_err(|error| format!("No se pudieron revisar los archivos convertidos: {error}"))?
+}
+
+fn list_converted_files_blocking(path: String) -> Result<Vec<ConvertedFile>, String> {
+    let library = load_rekordbox_library(path)?;
     let mut converted_files = library
         .tracks
         .iter()
@@ -1139,8 +1212,20 @@ fn list_audio_files(folder_path: String, recursive: bool) -> Result<AudioFolderR
 }
 
 #[tauri::command]
-fn playlist_tracks(path: String, playlist_path: String) -> Result<Vec<PlaylistTrackFile>, String> {
-    let library = parse_rekordbox_xml_file(path).map_err(|error| error.to_string())?;
+async fn playlist_tracks(
+    path: String,
+    playlist_path: String,
+) -> Result<Vec<PlaylistTrackFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || playlist_tracks_blocking(path, playlist_path))
+        .await
+        .map_err(|error| format!("No se pudo cargar la playlist: {error}"))?
+}
+
+fn playlist_tracks_blocking(
+    path: String,
+    playlist_path: String,
+) -> Result<Vec<PlaylistTrackFile>, String> {
+    let library = load_rekordbox_library(path)?;
     let playlists = library.playlists_flat();
     let playlist = playlists
         .iter()
@@ -1413,6 +1498,7 @@ pub fn run() {
             playlist_index::playlist_index_delete_library,
             playlist_index::playlist_index_delete_playlists,
             playlist_index::playlist_index_delete_tracks,
+            playlist_index::playlist_index_clean_missing_files,
             playlist_index::playlist_index_playlist_tracks,
             playlist_index::playlist_index_set_track_rating,
             playlist_index::playlist_index_search_tracks,

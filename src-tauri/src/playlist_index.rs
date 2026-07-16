@@ -268,6 +268,13 @@ pub struct PlaylistIndexImportResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PlaylistMissingFilesCleanupResponse {
+    library: PlaylistIndexLibrary,
+    playlists: Vec<PlaylistIndexPlaylist>,
+    deleted_total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PlaylistIndexPreviewResponse {
     source_path: String,
     source_name: String,
@@ -1049,77 +1056,142 @@ pub fn playlist_index_delete_tracks(
         return Err("Selecciona al menos un track indexado para eliminar.".to_string());
     }
 
-    let now = timestamp();
-    {
-        let tx = conn
-            .transaction()
-            .map_err(|error| format!("No se pudo iniciar transaccion SQLite: {error}"))?;
-        for track_id in &ids {
-            tx.execute(
-                "DELETE FROM playlist_index_tracks WHERE library_id = ?1 AND track_id = ?2",
-                params![&library_id, track_id],
-            )
-            .map_err(|error| format!("No se pudo eliminar track indexado {track_id}: {error}"))?;
-        }
-
-        tx.execute(
-            "DELETE FROM playlist_draft_tracks
-             WHERE draft_id IN (SELECT id FROM playlist_drafts WHERE library_id = ?1)
-               AND NOT EXISTS (
-                 SELECT 1 FROM playlist_index_tracks t
-                 WHERE t.library_id = ?1 AND t.track_id = playlist_draft_tracks.track_id
-               )",
-            params![&library_id],
-        )
-        .map_err(|error| format!("No se pudieron limpiar drafts huerfanos: {error}"))?;
-
-        tx.execute(
-            "UPDATE playlist_index_playlists
-             SET track_count = (
-                   SELECT COUNT(DISTINCT track_id)
-                   FROM playlist_index_memberships
-                   WHERE library_id = playlist_index_playlists.library_id
-                     AND playlist_path = playlist_index_playlists.path
-                 ),
-                 updated_at = ?2
-             WHERE library_id = ?1",
-            params![&library_id, &now],
-        )
-        .map_err(|error| format!("No se pudieron actualizar contadores de playlists: {error}"))?;
-
-        tx.execute(
-            "UPDATE playlist_index_libraries
-             SET track_count = (
-                   SELECT COUNT(*) FROM playlist_index_tracks WHERE library_id = ?1
-                 ),
-                 playlist_count = (
-                   SELECT COUNT(*) FROM playlist_index_playlists WHERE library_id = ?1 AND node_type = '1'
-                 ),
-                 updated_at = ?2
-             WHERE id = ?1",
-            params![&library_id, &now],
-        )
-        .map_err(|error| format!("No se pudieron actualizar contadores de libreria: {error}"))?;
-
-        tx.commit()
-            .map_err(|error| format!("No se pudo confirmar eliminacion de tracks: {error}"))?;
-    }
+    let deleted_total = delete_index_tracks(&mut conn, &library_id, &ids)?;
 
     rebuild_fts(&conn)?;
     emit_progress(
         &app,
         "info",
-        &format!("Tracks indexados eliminados: {}", ids.len()),
+        &format!("Tracks indexados eliminados: {deleted_total}"),
         Some(100.0),
         Some(library_id.clone()),
-        Some(ids.len()),
-        Some(ids.len()),
+        Some(deleted_total),
+        Some(deleted_total),
     );
 
     let library = get_library(&conn, &library_id)?
         .ok_or_else(|| "No se pudo leer libreria indexada.".to_string())?;
     let playlists = list_playlists(&conn, &library_id)?;
     Ok(PlaylistIndexImportResponse { library, playlists })
+}
+
+#[tauri::command]
+pub fn playlist_index_clean_missing_files(
+    app: AppHandle,
+    library_id: String,
+) -> Result<PlaylistMissingFilesCleanupResponse, String> {
+    let mut conn = open_db(&app)?;
+    if get_library(&conn, &library_id)?.is_none() {
+        return Err(format!("Libreria indexada no encontrada: {library_id}"));
+    }
+
+    let ids = missing_track_ids(&conn, &library_id)?;
+    let deleted_total = if ids.is_empty() {
+        0
+    } else {
+        delete_index_tracks(&mut conn, &library_id, &ids)?
+    };
+
+    if deleted_total > 0 {
+        rebuild_fts(&conn)?;
+    }
+    emit_progress(
+        &app,
+        "info",
+        &format!("Archivos no encontrados eliminados del indice: {deleted_total}"),
+        Some(100.0),
+        Some(library_id.clone()),
+        Some(deleted_total),
+        Some(deleted_total),
+    );
+
+    let library = get_library(&conn, &library_id)?
+        .ok_or_else(|| "No se pudo leer libreria indexada.".to_string())?;
+    let playlists = list_playlists(&conn, &library_id)?;
+    Ok(PlaylistMissingFilesCleanupResponse {
+        library,
+        playlists,
+        deleted_total,
+    })
+}
+
+fn missing_track_ids(conn: &Connection, library_id: &str) -> Result<BTreeSet<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT track_id
+             FROM playlist_index_tracks
+             WHERE library_id = ?1 AND source_exists = 0",
+        )
+        .map_err(|error| format!("No se pudieron preparar archivos no encontrados: {error}"))?;
+    let rows = stmt
+        .query_map(params![library_id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("No se pudieron leer archivos no encontrados: {error}"))?;
+
+    rows.collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| format!("No se pudieron mapear archivos no encontrados: {error}"))
+}
+
+fn delete_index_tracks(
+    conn: &mut Connection,
+    library_id: &str,
+    ids: &BTreeSet<String>,
+) -> Result<usize, String> {
+    let now = timestamp();
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar transaccion SQLite: {error}"))?;
+    let mut deleted_total = 0;
+    for track_id in ids {
+        deleted_total += tx
+            .execute(
+                "DELETE FROM playlist_index_tracks WHERE library_id = ?1 AND track_id = ?2",
+                params![library_id, track_id],
+            )
+            .map_err(|error| format!("No se pudo eliminar track indexado {track_id}: {error}"))?;
+    }
+
+    tx.execute(
+        "DELETE FROM playlist_draft_tracks
+         WHERE draft_id IN (SELECT id FROM playlist_drafts WHERE library_id = ?1)
+           AND NOT EXISTS (
+             SELECT 1 FROM playlist_index_tracks t
+             WHERE t.library_id = ?1 AND t.track_id = playlist_draft_tracks.track_id
+           )",
+        params![library_id],
+    )
+    .map_err(|error| format!("No se pudieron limpiar drafts huerfanos: {error}"))?;
+
+    tx.execute(
+        "UPDATE playlist_index_playlists
+         SET track_count = (
+               SELECT COUNT(DISTINCT track_id)
+               FROM playlist_index_memberships
+               WHERE library_id = playlist_index_playlists.library_id
+                 AND playlist_path = playlist_index_playlists.path
+             ),
+             updated_at = ?2
+         WHERE library_id = ?1",
+        params![library_id, &now],
+    )
+    .map_err(|error| format!("No se pudieron actualizar contadores de playlists: {error}"))?;
+
+    tx.execute(
+        "UPDATE playlist_index_libraries
+         SET track_count = (
+               SELECT COUNT(*) FROM playlist_index_tracks WHERE library_id = ?1
+             ),
+             playlist_count = (
+               SELECT COUNT(*) FROM playlist_index_playlists WHERE library_id = ?1 AND node_type = '1'
+             ),
+             updated_at = ?2
+         WHERE id = ?1",
+        params![library_id, &now],
+    )
+    .map_err(|error| format!("No se pudieron actualizar contadores de libreria: {error}"))?;
+
+    tx.commit()
+        .map_err(|error| format!("No se pudo confirmar eliminacion de tracks: {error}"))?;
+    Ok(deleted_total)
 }
 
 #[tauri::command]
@@ -8048,6 +8120,99 @@ mod playlist_index_tests {
                 .user_rating,
             Some(3)
         );
+    }
+
+    #[test]
+    fn cleaning_missing_files_preserves_available_tracks_and_updates_references() {
+        let mut conn = Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("enable foreign keys");
+        init_db(&conn).expect("initialize schema");
+        let now = timestamp();
+        conn.execute(
+            "INSERT INTO playlist_index_libraries (
+                id, source_path, source_name, track_count, playlist_count, indexed_at, updated_at
+             ) VALUES ('library-1', '/tmp/library.xml', 'library.xml', 2, 1, ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert library");
+        conn.execute(
+            "INSERT INTO playlist_index_playlists (
+                library_id, path, name, node_type, track_count, position, created_at, updated_at
+             ) VALUES ('library-1', 'ROOT/Set', 'Set', '1', 2, 0, ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert playlist");
+        for (track_id, source_exists) in [("available", 1_i64), ("missing", 0_i64)] {
+            conn.execute(
+                "INSERT INTO playlist_index_tracks (
+                    library_id, track_id, name, source_exists, search_text,
+                    attributes_json, created_at, updated_at
+                 ) VALUES ('library-1', ?1, ?1, ?2, ?1, '{}', ?3, ?3)",
+                params![track_id, source_exists, &now],
+            )
+            .expect("insert track");
+            conn.execute(
+                "INSERT INTO playlist_index_memberships (
+                    library_id, playlist_path, track_id, position
+                 ) VALUES ('library-1', 'ROOT/Set', ?1, ?2)",
+                params![track_id, source_exists],
+            )
+            .expect("insert membership");
+        }
+        conn.execute(
+            "INSERT INTO playlist_drafts (
+                id, library_id, name, created_at, updated_at
+             ) VALUES ('draft-1', 'library-1', 'Draft', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert draft");
+        for (track_id, position) in [("available", 0_i64), ("missing", 1_i64)] {
+            conn.execute(
+                "INSERT INTO playlist_draft_tracks (draft_id, track_id, position, created_at)
+                 VALUES ('draft-1', ?1, ?2, ?3)",
+                params![track_id, position, &now],
+            )
+            .expect("insert draft track");
+        }
+
+        let missing_ids = missing_track_ids(&conn, "library-1").expect("find missing tracks");
+        assert_eq!(missing_ids, BTreeSet::from(["missing".to_string()]));
+        assert_eq!(
+            delete_index_tracks(&mut conn, "library-1", &missing_ids).expect("clean missing"),
+            1
+        );
+
+        let library = get_library(&conn, "library-1")
+            .expect("load library")
+            .expect("library exists");
+        let playlist = list_playlists(&conn, "library-1")
+            .expect("load playlists")
+            .pop()
+            .expect("playlist exists");
+        let remaining_track_ids = conn
+            .prepare(
+                "SELECT track_id FROM playlist_index_tracks
+                 WHERE library_id = 'library-1' ORDER BY track_id",
+            )
+            .expect("prepare remaining tracks")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query remaining tracks")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect remaining tracks");
+        let remaining_draft_tracks = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_draft_tracks WHERE draft_id = 'draft-1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count remaining draft tracks");
+
+        assert_eq!(remaining_track_ids, vec!["available"]);
+        assert_eq!(library.track_count, 1);
+        assert_eq!(library.missing_file_count, 0);
+        assert_eq!(playlist.track_count, 1);
+        assert_eq!(remaining_draft_tracks, 1);
     }
 
     #[test]

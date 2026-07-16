@@ -270,6 +270,7 @@ Indexing and search:
 - `playlist_index_delete_library`
 - `playlist_index_delete_playlists`
 - `playlist_index_delete_tracks`
+- `playlist_index_clean_missing_files`
 
 Browsing and taxonomies:
 

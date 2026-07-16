@@ -141,6 +141,11 @@
     padding: 1px 0;
   }
 
+  .rekordbox-virtual-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 36px;
+  }
+
   @keyframes turn-spin {
     from {
       transform: translate(-50%, -50%) rotate(0deg);
@@ -158,6 +163,16 @@
 
     to {
       transform: translateX(310%);
+    }
+  }
+
+  @keyframes rekordbox-loader {
+    from {
+      transform: translateX(-120%);
+    }
+
+    to {
+      transform: translateX(420%);
     }
   }
 }

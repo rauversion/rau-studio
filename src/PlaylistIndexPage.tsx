@@ -106,6 +106,10 @@ type PlaylistIndexImportResponse = {
   playlists: PlaylistIndexPlaylist[];
 };
 
+type PlaylistMissingFilesCleanupResponse = PlaylistIndexImportResponse & {
+  deleted_total: number;
+};
+
 type PlaylistIndexPreviewPlaylist = {
   path: string;
   name: string;
@@ -157,6 +161,7 @@ type TrackEmbeddingStatus = "pending" | "queued" | "embedding" | "embedded";
 type TrackTableColumnKey = "artist" | "album" | "genre" | "bpm" | "key" | "year" | "label" | "comments" | "kind" | "score";
 type DeleteIndexDialogState =
   | { kind: "library"; library: PlaylistIndexLibrary }
+  | { kind: "missing"; library: PlaylistIndexLibrary }
   | { kind: "playlists"; libraryId: string; playlistPaths: string[] }
   | { kind: "tracks"; libraryId: string; tracks: PlaylistIndexTrack[] };
 
@@ -794,6 +799,11 @@ export function PlaylistIndexPage() {
     setDeleteIndexDialog({ kind: "library", library });
   }
 
+  function requestCleanMissingFiles(library: PlaylistIndexLibrary) {
+    if (library.missing_file_count === 0) return;
+    setDeleteIndexDialog({ kind: "missing", library });
+  }
+
   function requestDeleteIndexedTracks(tracks: PlaylistIndexTrack[]) {
     if (!activeLibraryId || tracks.length === 0) return;
     const uniqueTracks = Array.from(new Map(tracks.map((track) => [track.track_id, track])).values());
@@ -822,6 +832,23 @@ export function PlaylistIndexPage() {
         }
         setMessage(t("Indice eliminado: {name}", { name: deleteIndexDialog.library.source_name }));
         await loadLibraries("");
+      } else if (deleteIndexDialog.kind === "missing") {
+        const response = await invoke<PlaylistMissingFilesCleanupResponse>("playlist_index_clean_missing_files", {
+          libraryId: deleteIndexDialog.library.id
+        });
+        setPlaylists(response.playlists);
+        setSearchResults([]);
+        setSelectedTrackIds(new Set());
+        setPlaylistTracks((current) => current.filter((track) => track.source_exists));
+        setDraftTracks((current) => current.filter((track) => track.source_exists));
+        if (detailTrack && !detailTrack.source_exists) {
+          setDetailTrack(null);
+          setDetailSheetOpen(false);
+        }
+        setMessage(t("Se limpiaron {count} archivos no encontrados de la colección.", {
+          count: response.deleted_total
+        }));
+        await loadLibraries(response.library.id);
       } else if (deleteIndexDialog.kind === "playlists") {
         const response = await invoke<PlaylistIndexImportResponse>("playlist_index_delete_playlists", {
           libraryId: deleteIndexDialog.libraryId,
@@ -1070,7 +1097,24 @@ export function PlaylistIndexPage() {
           <IndexMetric label={t("Playlists")} value={activeLibrary.playlist_count} />
           <IndexMetric label={t("Vectores")} value={`${activeLibrary.embedded_track_count} / ${activeLibrary.track_count}`} />
           <IndexMetric label={t("Vector %")} value={`${embeddedPercent}%`} />
-          <IndexMetric label={t("No encontrados")} value={activeLibrary.missing_file_count} danger={activeLibrary.missing_file_count > 0} />
+          <IndexMetric
+            label={t("No encontrados")}
+            value={activeLibrary.missing_file_count}
+            danger={activeLibrary.missing_file_count > 0}
+            action={activeLibrary.missing_file_count > 0 ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                disabled={busy}
+                title={t("Limpiar los no encontrados de la colección")}
+                aria-label={t("Limpiar los no encontrados de la colección")}
+                onClick={() => requestCleanMissingFiles(activeLibrary)}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
+          />
         </section>
       ) : null}
 
@@ -2148,11 +2192,15 @@ function IndexDeleteDialog({
   if (!request) return null;
 
   const isLibrary = request.kind === "library";
+  const isMissingFiles = request.kind === "missing";
+  const dialogLibrary = isLibrary || isMissingFiles ? request.library : null;
   const playlistCount = request.kind === "playlists" ? request.playlistPaths.length : 0;
   const trackCount = request.kind === "tracks" ? request.tracks.length : 0;
   const title = isLibrary
     ? t("Eliminar libreria indexada")
-    : request.kind === "tracks"
+    : isMissingFiles
+      ? t("Limpiar los no encontrados de la colección")
+      : request.kind === "tracks"
       ? trackCount > 1
         ? t("Eliminar {count} tracks", { count: trackCount })
         : t("Eliminar track")
@@ -2161,7 +2209,9 @@ function IndexDeleteDialog({
         : t("Eliminar indice");
   const description = isLibrary
     ? t("Esto elimina el indice SQLite de esta libreria, sus playlists, vectores y drafts. No elimina archivos de audio ni modifica el XML original.")
-    : request.kind === "tracks"
+    : isMissingFiles
+      ? t("Esto elimina del indice SQLite los tracks cuyo archivo no fue encontrado, junto con sus vectores y referencias locales. No elimina archivos de audio ni modifica el XML original.")
+      : request.kind === "tracks"
       ? t("Esto elimina los tracks seleccionados del indice SQLite, sus vectores y referencias en playlists/drafts locales. No elimina archivos de audio ni modifica el XML original.")
     : t("Esto elimina el indice SQLite de las playlists seleccionadas. No elimina archivos de audio ni modifica el XML original.");
   const items = request.kind === "playlists"
@@ -2184,11 +2234,16 @@ function IndexDeleteDialog({
           <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{description}</p>
         </header>
         <div className="grid gap-3 px-4 py-4">
-          {isLibrary ? (
+          {dialogLibrary ? (
             <div className="rounded-md border border-border bg-secondary/60 p-3 text-sm">
-              <strong className="block truncate">{request.library.source_name}</strong>
-              <span className="mt-1 block truncate text-xs text-muted-foreground" title={request.library.source_path}>
-                {request.library.source_path}
+              <strong className="block truncate">{dialogLibrary.source_name}</strong>
+              {isMissingFiles ? (
+                <span className="mt-1 block text-xs font-semibold text-red-700 dark:text-red-300">
+                  {t("{count} archivos no encontrados", { count: dialogLibrary.missing_file_count })}
+                </span>
+              ) : null}
+              <span className="mt-1 block truncate text-xs text-muted-foreground" title={dialogLibrary.source_path}>
+                {dialogLibrary.source_path}
               </span>
             </div>
           ) : null}
@@ -2213,7 +2268,9 @@ function IndexDeleteDialog({
           </Button>
           <Button variant="destructive" disabled={busy} onClick={onConfirm}>
             <Trash2 className="h-4 w-4" />
-            {busy ? t("Eliminando") : title}
+            {isMissingFiles
+              ? busy ? t("Limpiando") : t("Limpiar")
+              : busy ? t("Eliminando") : title}
           </Button>
         </footer>
       </section>
@@ -2291,10 +2348,23 @@ function PlaylistTabButton({
   );
 }
 
-function IndexMetric({ label, value, danger = false }: { label: string; value: React.ReactNode; danger?: boolean }) {
+function IndexMetric({
+  label,
+  value,
+  danger = false,
+  action
+}: {
+  label: string;
+  value: React.ReactNode;
+  danger?: boolean;
+  action?: React.ReactNode;
+}) {
   return (
     <Card className={cn("p-3", danger && "border-red-300 text-red-800 dark:border-red-900 dark:text-red-200")}>
-      <span className="block text-xs text-muted-foreground">{label}</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="block text-xs text-muted-foreground">{label}</span>
+        {action}
+      </div>
       <strong className="mt-1 block truncate text-xl">{value}</strong>
     </Card>
   );

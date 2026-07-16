@@ -29,6 +29,37 @@ const defaultLocale: Locale = "es";
 const translations: Record<Locale, Record<string, string>> = {
   es: {},
   en: {
+    "Creative audio workspace · local first": "Creative audio workspace · local first",
+    "Tu música, lista para moverse.": "Your music, ready to move.",
+    "Convierte, organiza, descubre y finaliza tu catálogo desde un solo estudio privado en tu Mac.":
+      "Convert, organize, discover, and finish your catalog from one private studio on your Mac.",
+    "Abrir Rekordbox Convert": "Open Rekordbox Convert",
+    "Explorar playlists": "Explore playlists",
+    "Flujo conectado": "Connected workflow",
+    "Workspace": "Workspace",
+    "Elige por dónde empezar": "Choose where to begin",
+    "Todo ocurre localmente en tu equipo": "Everything happens locally on your computer",
+    "Importa tu XML, revisa playlists y convierte audio a AIFF sin perder la estructura.":
+      "Import your XML, review playlists, and convert audio to AIFF without losing structure.",
+    "Convierte carpetas y archivos locales con una cola clara, rápida y controlable.":
+      "Convert local folders and files with a clear, fast, controllable queue.",
+    "Indexa, busca y organiza colecciones grandes desde una biblioteca local inteligente.":
+      "Index, search, and organize large collections from a smart local library.",
+    "Convierte una idea musical en una selección explicable y lista para trabajar.":
+      "Turn a musical idea into an explainable selection ready to use.",
+    "Prepara masters consistentes con perfiles, análisis y seguimiento del proceso.":
+      "Prepare consistent masters with profiles, analysis, and process tracking.",
+    "Transforma y prepara audio con un flujo visual pensado para sesiones largas.":
+      "Transform and prepare audio with a visual workflow designed for long sessions.",
+    "Enriquece tu catálogo": "Enrich your catalog",
+    "Completa metadata y mejora todo lo que viene después.": "Complete metadata and improve everything that follows.",
+    "Abrir Enrichment": "Open Enrichment",
+    "Studio": "Studio",
+    "Inicio": "Home",
+    "Leyendo y validando la colección de Rekordbox…": "Reading and validating the Rekordbox collection…",
+    "Preparando playlists y archivos convertidos…": "Preparing playlists and converted files…",
+    "Mostrando {visible} de {total} hallazgos": "Showing {visible} of {total} findings",
+    "Mostrar más": "Show more",
     "Abrir carpeta": "Open folder",
     "Actualizar status": "Refresh status",
     "API key": "API key",
@@ -429,6 +460,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "Buscar dentro del grupo": "Search inside group",
     "Buscar por titulo, artista, album, mood...": "Search by title, artist, album, mood...",
     "Cancelar": "Cancel",
+    "{count} archivos no encontrados": "{count} missing files",
     "Crea o selecciona una playlist.": "Create or select a playlist.",
     "Crear playlist": "Create playlist",
     "Crear y agregar {count} tracks": "Create and add {count} tracks",
@@ -446,6 +478,8 @@ const translations: Record<Locale, Record<string, string>> = {
     "Eliminar {count} tracks": "Delete {count} tracks",
     "Eliminar {count} indices": "Delete {count} indexes",
     "Eliminando": "Deleting",
+    "Limpiando": "Cleaning",
+    "Limpiar los no encontrados de la colección": "Clean missing files from the collection",
     "Embeddings listos: {count} generados con {model}.": "Embeddings ready: {count} generated with {model}.",
     "En cola": "Queued",
     "Esto elimina el indice SQLite de esta libreria, sus playlists, vectores y drafts. No elimina archivos de audio ni modifica el XML original.":
@@ -454,6 +488,8 @@ const translations: Record<Locale, Record<string, string>> = {
       "This deletes the SQLite index for the selected playlists. It does not delete audio files or modify the original XML.",
     "Esto elimina los tracks seleccionados del indice SQLite, sus vectores y referencias en playlists/drafts locales. No elimina archivos de audio ni modifica el XML original.":
       "This deletes the selected tracks from the SQLite index, their vectors, and local playlist/draft references. It does not delete audio files or modify the original XML.",
+    "Esto elimina del indice SQLite los tracks cuyo archivo no fue encontrado, junto con sus vectores y referencias locales. No elimina archivos de audio ni modifica el XML original.":
+      "This deletes tracks whose files were not found from the SQLite index, along with their vectors and local references. It does not delete audio files or modify the original XML.",
     "Exportando XML": "Exporting XML",
     "Exportar": "Export",
     "Existente": "Existing",
@@ -519,6 +555,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "Se agregaran {count} tracks seleccionados.": "{count} selected tracks will be added.",
     "Track indexado en SQLite": "Track indexed in SQLite",
     "Tracks eliminados del indice: {count}": "Tracks deleted from index: {count}",
+    "Se limpiaron {count} archivos no encontrados de la colección.": "Cleaned {count} missing files from the collection.",
     "Usar embeddings si estan disponibles.": "Use embeddings when available.",
     "Vector": "Vector",
     "Vector %": "Vector %",
