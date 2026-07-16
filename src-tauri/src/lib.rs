@@ -24,6 +24,7 @@ use tauri::{AppHandle, Emitter};
 mod enrichment;
 mod local_conversion;
 mod mastering;
+mod p2p;
 mod playlist_copilot;
 mod playlist_index;
 mod settings;
@@ -1473,6 +1474,21 @@ pub fn run() {
             save_audio_tool_settings,
             get_language_settings,
             save_language_settings,
+            p2p::p2p_identity_status,
+            p2p::p2p_create_identity,
+            p2p::p2p_unlock_identity,
+            p2p::p2p_lock_identity,
+            p2p::network::p2p_network_status,
+            p2p::network::p2p_network_start,
+            p2p::network::p2p_network_stop,
+            p2p::network::p2p_network_ping_ticket,
+            p2p::p2p_list_peers,
+            p2p::p2p_list_shares,
+            p2p::p2p_add_share,
+            p2p::p2p_reindex_share,
+            p2p::p2p_set_share_enabled,
+            p2p::p2p_remove_share,
+            p2p::p2p_search_shared_files,
             enrichment::enrichment_providers,
             enrichment::enrichment_save_provider_credential,
             enrichment::enrichment_clear_provider_credential,

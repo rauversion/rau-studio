@@ -29,6 +29,7 @@ Major domains:
 - Turn jobs and events.
 - Indexed playlist libraries, memberships, draft playlists, and embeddings.
 - Encrypted settings, including OpenAI and enrichment-provider credentials and audio tool paths.
+- Encrypted P2P device identity, trusted peers, presence observations, shared folders, and virtual file catalogs.
 
 The app never stores raw audio in SQLite. It stores file paths, metadata snapshots, derived analysis, and event logs.
 
@@ -61,6 +62,7 @@ The Rust backend owns:
 - ffmpeg/ffprobe command construction;
 - optional OpenAI requests;
 - encrypted settings persistence.
+- P2P identity locking, share permissions, and filesystem-safe catalog indexing.
 
 ## Media Tool Resolution
 
@@ -122,6 +124,8 @@ Long-running tasks emit Tauri events:
 - `playlist-index-progress`
 - `playlist-copilot-progress`
 - `turn-progress`
+
+Rau Connect emits `p2p-network-event` for endpoint lifecycle and authenticated diagnostic traffic. Presence observations, chat delivery, and transfer progress will extend this event boundary as their protocols are added.
 
 The app shell listens to these events to report bridge health, while each feature page consumes the relevant stream for progress, row status, and terminal logs.
 

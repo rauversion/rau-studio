@@ -29,6 +29,7 @@ import {
   RefreshCcw,
   Search,
   Settings,
+  Share2,
   Sparkles,
   Square,
   Sun,
@@ -60,6 +61,7 @@ import type {
 import { FileConversionPage } from "./FileConversionPage";
 import { HomePage } from "./HomePage";
 import { MasteringPage } from "./MasteringPage";
+import { P2PPage } from "./P2PPage";
 import { PlaylistBrowserPage } from "./PlaylistBrowserPage";
 import { PlaylistCopilotPage } from "./PlaylistCopilotPage";
 import { PlaylistIndexPage } from "./PlaylistIndexPage";
@@ -304,6 +306,7 @@ export default function App() {
             <Route path="/enrichment" element={<EnrichmentPage />} />
             <Route path="/turn" element={<TurnPage />} />
             <Route path="/mastering" element={<MasteringPage />} />
+            <Route path="/connect" element={<P2PPage />} />
             <Route
               path="/settings"
               element={<SettingsPage />}
@@ -2340,6 +2343,9 @@ function AppSidebar({
         <SidebarSection title={t("Studio")}>
           <SidebarLink to="/" end icon={<House className="h-4 w-4" />}>
             {t("Inicio")}
+          </SidebarLink>
+          <SidebarLink to="/connect" icon={<Share2 className="h-4 w-4" />}>
+            {t("Rau Connect")}
           </SidebarLink>
         </SidebarSection>
 
