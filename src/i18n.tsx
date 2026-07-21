@@ -79,6 +79,8 @@ const translations: Record<Locale, Record<string, string>> = {
       "Rau generates a vertical scene with a real-time audio visualizer.",
     "Rau genera una carta de televisión animada a 30 fps, separada del audio.":
       "Rau generates an animated TV test pattern at 30 fps, independently from audio.",
+    "Rau genera una señal visual monocroma con identidad de la radio y la pista actual, actualizada sin cortar el Live.":
+      "Rau generates a monochrome visual signal with the station identity and current track, updated without interrupting the Live.",
     "Crea el Live en Instagram.com, copia su URL y clave, envía la señal desde Rau y confirma la vista previa en Live Producer. Para terminar, finaliza primero en Instagram.":
       "Create the Live on Instagram.com, copy its URL and key, send the signal from Rau, and confirm the preview in Live Producer. To stop, end it on Instagram first.",
     "Configura la URL RTMP": "Configure the RTMP URL",
@@ -181,6 +183,8 @@ const translations: Record<Locale, Record<string, string>> = {
       "FFmpeg does not include TLS, but the Icecast profile requires a secure connection.",
     "FFmpeg está listo para transmitir video H.264 y audio AAC por RTMP.":
       "FFmpeg is ready to stream H.264 video and AAC audio over RTMP.",
+    "FFmpeg está listo para RTMP, pero no incluye drawtext; el video saldrá sin información de la radio ni de la pista.":
+      "FFmpeg is ready for RTMP but does not include drawtext; the video will not show station or track information.",
     "FFmpeg no incluye el encoder libx264 requerido para RTMP.":
       "FFmpeg does not include the libx264 encoder required for RTMP.",
     "FFmpeg no incluye el encoder AAC requerido para RTMP.":
@@ -189,6 +193,8 @@ const translations: Record<Locale, Record<string, string>> = {
       "FFmpeg does not include the FLV muxer required for RTMP.",
     "FFmpeg no incluye el filtro requerido para la carta de prueba RTMP.":
       "FFmpeg does not include the filter required for the RTMP test pattern.",
+    "Este FFmpeg no incluye drawtext; se enviará la gráfica sin información de la radio ni de la pista.":
+      "This FFmpeg build does not include drawtext; the visual will be sent without station or track information.",
     "FFmpeg no incluye el protocolo RTMPS requerido por este destino.":
       "FFmpeg does not include the RTMPS protocol required by this destination.",
     "FFmpeg no incluye el protocolo RTMP requerido por este destino.":

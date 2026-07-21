@@ -148,7 +148,7 @@ Native microphone (CPAL/CoreAudio) -> bounded PCM buffer -----------------------
                                                                                                    v
                                                       /-> libmp3lame -> Icecast -> listeners
 PCM pipe -> persistent destination publisher --------+
-                                                      \-> AAC + paced testsrc2/libx264 -> RTMP service -> viewers
+                                                      \-> AAC + paced branded video/libx264 -> RTMP service -> viewers
 ```
 
 1. The user saves one Broadcast profile with an `output_kind`. Icecast stores
@@ -160,9 +160,12 @@ PCM pipe -> persistent destination publisher --------+
 3. A per-track decoder normalizes audio to stereo 44.1 kHz signed 16-bit PCM.
 4. One long-lived publisher consumes the PCM. Icecast encodes it with
    `libmp3lame` and writes the configured mount. RTMP encodes the PCM as AAC and
-   combines it with an independently paced animated test source in a 720 × 1280, 30 fps
-   H.264/FLV signal. It emits silence while the queue is empty so the destination
-   remains connected.
+   combines it with an independently paced monochrome source in a 720 × 1280,
+   30 fps H.264/FLV signal. A `drawtext` overlay reloads atomically written
+   station and current-track text without restarting the publisher. Builds
+   without `drawtext` retain the animated visual as a compatibility fallback.
+   RTMP emits silence while the queue is empty so the destination remains
+   connected.
 5. The optional microphone is opened by the Rust process through CPAL/CoreAudio,
    so macOS associates capture permission with Rau Studio instead of the FFmpeg
    sidecar. Native samples are resampled into a bounded stereo PCM buffer and

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -28,6 +28,10 @@ const RTMP_PLATFORM_CUSTOM: &str = "custom";
 const RTMP_VIDEO_WIDTH: usize = 720;
 const RTMP_VIDEO_HEIGHT: usize = 1280;
 const RTMP_VIDEO_FPS: usize = 30;
+const RTMP_DISPLAY_FONT: &str = "/System/Library/Fonts/SFNS.ttf";
+const RTMP_MONO_FONT: &str = "/System/Library/Fonts/SFNSMono.ttf";
+const RTMP_OVERLAY_LINE_CHARS: usize = 26;
+const RTMP_OVERLAY_MAX_LINES: usize = 4;
 const PCM_SAMPLE_RATE: usize = 44_100;
 const PCM_CHANNELS: usize = 2;
 const PCM_BYTES_PER_SAMPLE: usize = 2;
@@ -145,6 +149,7 @@ pub struct BroadcastPreflight {
     rtmps_protocol_available: bool,
     flv_muxer_available: bool,
     visualizer_filter_available: bool,
+    overlay_filter_available: bool,
     microphone_input_available: bool,
     ready: bool,
     message: String,
@@ -1345,6 +1350,7 @@ fn ffmpeg_preflight(app: &AppHandle, profile: &BroadcastProfile) -> BroadcastPre
     let rtmps_protocol_available = protocol_list_contains(&protocol_text, "rtmps");
     let flv_muxer_available = list_contains_token(&muxer_text, "flv");
     let visualizer_filter_available = list_contains_token(&filter_text, "testsrc2");
+    let overlay_filter_available = list_contains_token(&filter_text, "drawtext");
     let microphone_input_available = cpal::default_host().default_input_device().is_some();
     let rtmps_required = profile.rtmp_server_url.starts_with("rtmps://");
     let ready = if profile.output_kind == OUTPUT_KIND_RTMP {
@@ -1366,6 +1372,9 @@ fn ffmpeg_preflight(app: &AppHandle, profile: &BroadcastProfile) -> BroadcastPre
     };
     let message = if !ffmpeg_available {
         "FFmpeg no esta disponible.".to_string()
+    } else if ready && profile.output_kind == OUTPUT_KIND_RTMP && !overlay_filter_available {
+        "FFmpeg está listo para RTMP, pero no incluye drawtext; el video saldrá sin información de la radio ni de la pista."
+            .to_string()
     } else if ready && profile.output_kind == OUTPUT_KIND_RTMP {
         "FFmpeg está listo para transmitir video H.264 y audio AAC por RTMP.".to_string()
     } else if ready {
@@ -1401,6 +1410,7 @@ fn ffmpeg_preflight(app: &AppHandle, profile: &BroadcastProfile) -> BroadcastPre
         rtmps_protocol_available,
         flv_muxer_available,
         visualizer_filter_available,
+        overlay_filter_available,
         microphone_input_available,
         ready,
         message,
@@ -1415,6 +1425,14 @@ fn list_contains_token(output: &str, capability: &str) -> bool {
     output
         .lines()
         .any(|line| line.split_whitespace().any(|token| token == capability))
+}
+
+fn ffmpeg_filter_available(app: &AppHandle, filter: &str) -> bool {
+    system::ffmpeg_command(app)
+        .args(["-hide_banner", "-filters"])
+        .output()
+        .ok()
+        .is_some_and(|output| list_contains_token(&String::from_utf8_lossy(&output.stdout), filter))
 }
 
 fn microphone_devices(_app: &AppHandle) -> Result<Vec<BroadcastMicrophoneDevice>, String> {
@@ -1457,9 +1475,71 @@ fn microphone_devices(_app: &AppHandle) -> Result<Vec<BroadcastMicrophoneDevice>
     Ok(result)
 }
 
-fn publisher_args(profile: &BroadcastProfile, credential: &str) -> Vec<String> {
+struct RtmpOverlay {
+    root: PathBuf,
+    station_path: PathBuf,
+    track_path: PathBuf,
+    pending_track_path: PathBuf,
+    last_track: String,
+}
+
+impl RtmpOverlay {
+    fn create(profile: &BroadcastProfile) -> Result<Self, String> {
+        let root = std::env::temp_dir().join(format!("rau-broadcast-{}", Uuid::new_v4()));
+        fs::create_dir(&root)
+            .map_err(|error| format!("No se pudo preparar la gráfica del video: {error}"))?;
+        let station_path = root.join("station.txt");
+        let track_path = root.join("track.txt");
+        let pending_track_path = root.join("track.pending.txt");
+        fs::write(&station_path, station_overlay_text(profile)).map_err(|error| {
+            format!("No se pudo escribir la identidad de la radio en el video: {error}")
+        })?;
+        let last_track = "SIGNAL READY".to_string();
+        fs::write(&track_path, &last_track).map_err(|error| {
+            format!("No se pudo escribir la pista inicial en el video: {error}")
+        })?;
+        Ok(Self {
+            root,
+            station_path,
+            track_path,
+            pending_track_path,
+            last_track,
+        })
+    }
+
+    fn set_track(&mut self, value: &str) -> Result<(), String> {
+        let next = wrap_overlay_text(value, RTMP_OVERLAY_LINE_CHARS, RTMP_OVERLAY_MAX_LINES);
+        if next == self.last_track {
+            return Ok(());
+        }
+        fs::write(&self.pending_track_path, &next)
+            .and_then(|_| fs::rename(&self.pending_track_path, &self.track_path))
+            .map_err(|error| format!("No se pudo actualizar la pista en el video: {error}"))?;
+        self.last_track = next;
+        Ok(())
+    }
+
+    fn video_filter(&self, profile: &BroadcastProfile) -> String {
+        rtmp_video_filter(profile, &self.station_path, &self.track_path)
+    }
+}
+
+impl Drop for RtmpOverlay {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.pending_track_path);
+        let _ = fs::remove_file(&self.track_path);
+        let _ = fs::remove_file(&self.station_path);
+        let _ = fs::remove_dir(&self.root);
+    }
+}
+
+fn publisher_args(
+    profile: &BroadcastProfile,
+    credential: &str,
+    overlay: Option<&RtmpOverlay>,
+) -> Vec<String> {
     if profile.output_kind == OUTPUT_KIND_RTMP {
-        return rtmp_publisher_args(profile, credential);
+        return rtmp_publisher_args(profile, credential, overlay);
     }
     icecast_publisher_args(profile, credential)
 }
@@ -1514,7 +1594,11 @@ fn icecast_publisher_args(profile: &BroadcastProfile, password: &str) -> Vec<Str
     args
 }
 
-fn rtmp_publisher_args(profile: &BroadcastProfile, stream_key: &str) -> Vec<String> {
+fn rtmp_publisher_args(
+    profile: &BroadcastProfile,
+    stream_key: &str,
+    overlay: Option<&RtmpOverlay>,
+) -> Vec<String> {
     let destination = rtmp_destination_url(&profile.rtmp_server_url, stream_key);
     let video_bitrate = format!("{}k", profile.rtmp_video_bitrate_kbps);
     let video_buffer = format!("{}k", u32::from(profile.rtmp_video_bitrate_kbps) * 2);
@@ -1550,6 +1634,10 @@ fn rtmp_publisher_args(profile: &BroadcastProfile, stream_key: &str) -> Vec<Stri
         "1:v:0".to_string(),
         "-map".to_string(),
         "0:a:0".to_string(),
+        "-vf".to_string(),
+        overlay
+            .map(|overlay| overlay.video_filter(profile))
+            .unwrap_or_else(rtmp_fallback_video_filter),
         "-c:v".to_string(),
         "libx264".to_string(),
         "-preset".to_string(),
@@ -1596,6 +1684,166 @@ fn rtmp_publisher_args(profile: &BroadcastProfile, stream_key: &str) -> Vec<Stri
         "flv".to_string(),
         destination,
     ]
+}
+
+fn rtmp_video_filter(profile: &BroadcastProfile, station_path: &Path, track_path: &Path) -> String {
+    let station_path = quote_filter_path(station_path);
+    let track_path = quote_filter_path(track_path);
+    let technical = format!(
+        "H264 {}K / AAC {}K / {} FPS",
+        profile.rtmp_video_bitrate_kbps, profile.rtmp_audio_bitrate_kbps, RTMP_VIDEO_FPS
+    );
+    format!(
+        concat!(
+            "scale=180:320:flags=neighbor,",
+            "scale={width}:{height}:flags=neighbor,",
+            "eq=contrast=1.85:brightness=-0.18:saturation=0,",
+            "drawgrid=w=90:h=90:t=1:c=white@0.13,",
+            "drawbox=x=0:y=0:w=iw:h=330:c=black@0.90:t=fill,",
+            "drawbox=x=0:y=730:w=iw:h=550:c=black@0.92:t=fill,",
+            "drawbox=x=0:y=0:w=iw:h=22:c=white@0.95:t=fill,",
+            "drawbox=x=48:y=50:w=624:h=230:c=white@0.70:t=2,",
+            "drawbox=x=48:y=370:w=8:h=300:c=white@0.92:t=fill,",
+            "drawbox=x=80:y=370:w=592:h=300:c=white@0.46:t=2,",
+            "drawbox=x=48:y=782:w=624:h=2:c=white@0.72:t=fill,",
+            "drawtext=fontfile='{display_font}':textfile='{station_path}':",
+            "expansion=none:fontcolor=white:fontsize=48:line_spacing=2:x=52:y=66:fix_bounds=1,",
+            "drawtext=fontfile='{mono_font}':text='LIVE / RAU BROADCAST SYSTEM':",
+            "expansion=none:fontcolor=white@0.82:fontsize=18:x=52:y=234,",
+            "drawtext=fontfile='{mono_font}':text='/ 01':",
+            "expansion=none:fontcolor=white@0.22:fontsize=94:x=500:y=370,",
+            "drawtext=fontfile='{mono_font}':text='NOW PLAYING / CURRENT AUDIO':",
+            "expansion=none:fontcolor=white@0.72:fontsize=18:x=52:y=812,",
+            "drawtext=fontfile='{display_font}':textfile='{track_path}':reload=1:",
+            "expansion=none:fontcolor=white:fontsize=44:line_spacing=10:x=52:y=858:fix_bounds=1,",
+            "drawtext=fontfile='{mono_font}':text='{technical}':",
+            "expansion=none:fontcolor=white@0.72:fontsize=16:x=52:y=1180,",
+            "drawtext=fontfile='{mono_font}':text='720X1280 / VERTICAL SIGNAL':",
+            "expansion=none:fontcolor=white@0.44:fontsize=16:x=52:y=1214"
+        ),
+        width = RTMP_VIDEO_WIDTH,
+        height = RTMP_VIDEO_HEIGHT,
+        display_font = RTMP_DISPLAY_FONT,
+        mono_font = RTMP_MONO_FONT,
+        station_path = station_path,
+        track_path = track_path,
+        technical = technical,
+    )
+}
+
+fn rtmp_fallback_video_filter() -> String {
+    format!(
+        concat!(
+            "scale=180:320:flags=neighbor,",
+            "scale={width}:{height}:flags=neighbor,",
+            "eq=contrast=1.85:brightness=-0.18:saturation=0,",
+            "drawgrid=w=90:h=90:t=1:c=white@0.13,",
+            "drawbox=x=0:y=0:w=iw:h=330:c=black@0.90:t=fill,",
+            "drawbox=x=0:y=730:w=iw:h=550:c=black@0.92:t=fill,",
+            "drawbox=x=0:y=0:w=iw:h=22:c=white@0.95:t=fill,",
+            "drawbox=x=48:y=50:w=624:h=230:c=white@0.70:t=2,",
+            "drawbox=x=48:y=370:w=8:h=300:c=white@0.92:t=fill,",
+            "drawbox=x=80:y=370:w=592:h=300:c=white@0.46:t=2,",
+            "drawbox=x=48:y=782:w=624:h=2:c=white@0.72:t=fill"
+        ),
+        width = RTMP_VIDEO_WIDTH,
+        height = RTMP_VIDEO_HEIGHT,
+    )
+}
+
+fn quote_filter_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+}
+
+fn station_overlay_text(profile: &BroadcastProfile) -> String {
+    wrap_overlay_text(&profile.station_name, 22, 2)
+}
+
+fn track_overlay_text(entry: &BroadcastQueueEntry) -> String {
+    let artist = entry
+        .artist
+        .as_deref()
+        .filter(|artist| !artist.trim().is_empty());
+    match artist {
+        Some(artist) => format!("{artist}\n{}", entry.title),
+        None => entry.title.clone(),
+    }
+}
+
+fn update_video_overlay(
+    app: &AppHandle,
+    runtime: &Arc<RuntimeState>,
+    publisher: &mut Publisher,
+    value: &str,
+) {
+    if let Err(error) = publisher.set_now_playing(value) {
+        runtime.log(app, "warning", "video_overlay", error);
+    }
+}
+
+fn wrap_overlay_text(value: &str, max_chars: usize, max_lines: usize) -> String {
+    let cleaned = value
+        .chars()
+        .map(|character| {
+            if character == '\n' || !character.is_control() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let mut lines = Vec::new();
+    for paragraph in cleaned.lines() {
+        let words = paragraph.split_whitespace().collect::<Vec<_>>();
+        if words.is_empty() {
+            continue;
+        }
+        let mut line = String::new();
+        for word in words {
+            let candidate_len =
+                line.chars().count() + usize::from(!line.is_empty()) + word.chars().count();
+            if candidate_len <= max_chars {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                continue;
+            }
+            if !line.is_empty() {
+                lines.push(line);
+                line = String::new();
+            }
+            let mut remainder = word.chars().peekable();
+            while remainder.peek().is_some() {
+                let chunk = remainder.by_ref().take(max_chars).collect::<String>();
+                if chunk.chars().count() == max_chars && remainder.peek().is_some() {
+                    lines.push(chunk);
+                } else {
+                    line = chunk;
+                }
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        return "RAU STUDIO".to_string();
+    }
+    let was_truncated = lines.len() > max_lines;
+    lines.truncate(max_lines);
+    if was_truncated {
+        let last = lines.last_mut().expect("overlay has at least one line");
+        let mut characters = last
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        characters.push('…');
+        *last = characters;
+    }
+    lines.join("\n").to_uppercase()
 }
 
 fn rtmp_destination_url(server_url: &str, stream_key: &str) -> String {
@@ -2494,6 +2742,7 @@ struct Publisher {
     destination_label: String,
     opened: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
+    overlay: Option<RtmpOverlay>,
 }
 
 impl Publisher {
@@ -2521,6 +2770,13 @@ impl Publisher {
         })
     }
 
+    fn set_now_playing(&mut self, value: &str) -> Result<(), String> {
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.set_track(value)?;
+        }
+        Ok(())
+    }
+
     fn terminate(mut self) {
         drop(self.stdin);
         if self.child.try_wait().ok().flatten().is_none() {
@@ -2539,8 +2795,22 @@ fn spawn_publisher(
     let is_rtmp = profile.output_kind == OUTPUT_KIND_RTMP;
     let opened = Arc::new(AtomicBool::new(!is_rtmp));
     let ready = Arc::new(AtomicBool::new(!is_rtmp));
+    let overlay_available = is_rtmp && ffmpeg_filter_available(app, "drawtext");
+    let overlay = if overlay_available {
+        Some(RtmpOverlay::create(profile)?)
+    } else {
+        None
+    };
+    if is_rtmp && !overlay_available {
+        runtime.log(
+            app,
+            "warning",
+            "video_overlay_unavailable",
+            "Este FFmpeg no incluye drawtext; se enviará la gráfica sin información de la radio ni de la pista.",
+        );
+    }
     let mut child = system::ffmpeg_command(app)
-        .args(publisher_args(profile, credential))
+        .args(publisher_args(profile, credential, overlay.as_ref()))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2595,6 +2865,7 @@ fn spawn_publisher(
         destination_label: destination_label(profile).to_string(),
         opened,
         ready,
+        overlay,
     })
 }
 
@@ -2779,6 +3050,7 @@ fn play_entry(
         Some(session.started_at.to_string()),
         ("info", "track_started"),
     );
+    update_video_overlay(app, runtime, publisher, &track_overlay_text(&playing));
     update_output_metadata_async(
         session.profile.clone(),
         session.credential.to_string(),
@@ -2858,6 +3130,7 @@ fn play_entry(
                     )
                 })
                 .unwrap_or_else(|| "Línea directa".to_string());
+            update_video_overlay(app, runtime, publisher, &source_title);
             update_output_metadata_value_async(
                 session.profile.clone(),
                 session.credential.to_string(),
@@ -2867,6 +3140,7 @@ fn play_entry(
             );
             match stream_direct_input(app, publisher, runtime, commands, worker_audio) {
                 DirectInputOutcome::ResumePlaylist => {
+                    update_video_overlay(app, runtime, publisher, &track_overlay_text(&playing));
                     runtime.update(
                         app,
                         "live",
@@ -3140,6 +3414,12 @@ fn run_worker(
                     )
                 })
                 .unwrap_or_else(|| "Línea directa".to_string());
+            update_video_overlay(
+                &app,
+                &runtime,
+                publisher.as_mut().expect("publisher initialized"),
+                &source_title,
+            );
             update_output_metadata_value_async(
                 profile.clone(),
                 credential.clone(),
@@ -3184,6 +3464,12 @@ fn run_worker(
                     }
                 }
                 DirectInputOutcome::ResumePlaylist => {
+                    update_video_overlay(
+                        &app,
+                        &runtime,
+                        publisher.as_mut().expect("publisher initialized"),
+                        "PLAYLIST / WAITING FOR NEXT TRACK",
+                    );
                     update_output_metadata_value_async(
                         profile.clone(),
                         credential.clone(),
@@ -3249,6 +3535,12 @@ fn run_worker(
                 }
             }
             Ok(None) => {
+                update_video_overlay(
+                    &app,
+                    &runtime,
+                    publisher.as_mut().expect("publisher initialized"),
+                    "WAITING FOR NEXT TRACK",
+                );
                 let mut silence = silence_chunk();
                 worker_audio.process_chunk(&app, &runtime, &mut silence);
                 let result = publisher
@@ -4130,7 +4422,7 @@ mod tests {
 
     #[test]
     fn publisher_uses_persistent_pcm_input_and_mp3_icecast_output() {
-        let args = publisher_args(&profile(), "secret");
+        let args = publisher_args(&profile(), "secret", None);
         assert!(args.windows(2).any(|pair| pair == ["-c:a", "libmp3lame"]));
         assert!(args
             .windows(2)
@@ -4178,7 +4470,8 @@ mod tests {
     fn rtmp_publisher_uses_vertical_h264_aac_flv_output() {
         let mut profile = profile();
         profile.output_kind = OUTPUT_KIND_RTMP.to_string();
-        let args = publisher_args(&profile, "session-key");
+        let overlay = RtmpOverlay::create(&profile).unwrap();
+        let args = publisher_args(&profile, "session-key", Some(&overlay));
 
         assert!(args.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
         assert!(args.windows(2).any(|pair| pair == ["-c:a", "aac"]));
@@ -4201,13 +4494,46 @@ mod tests {
         assert!(!args.iter().any(|value| value == "-x264-params"));
         assert!(args.iter().any(|value| value.contains("720x1280")));
         assert!(args.iter().any(|value| value.contains("testsrc2")));
-        assert!(!args.iter().any(|value| value.contains("overlay")));
+        let video_filter = args
+            .windows(2)
+            .find(|pair| pair[0] == "-vf")
+            .map(|pair| &pair[1])
+            .expect("RTMP publisher has a video filter");
+        assert!(video_filter.contains("drawtext"));
+        assert!(video_filter.contains("reload=1"));
+        assert!(video_filter.contains("NOW PLAYING"));
+        assert!(video_filter.contains("RAU BROADCAST SYSTEM"));
         assert!(args.windows(2).any(|pair| pair == ["-map", "1:v:0"]));
         assert!(args.windows(2).any(|pair| pair == ["-map", "0:a:0"]));
         assert_eq!(
             args.last().unwrap(),
             "rtmps://live-upload.instagram.com:443/rtmp/session-key"
         );
+    }
+
+    #[test]
+    fn overlay_wraps_and_sanitizes_track_metadata() {
+        assert_eq!(
+            wrap_overlay_text("Monolake\nDirac Onyx", 26, 4),
+            "MONOLAKE\nDIRAC ONYX"
+        );
+        assert_eq!(
+            wrap_overlay_text("A title\twith\0controls", 26, 4),
+            "A TITLE WITH CONTROLS"
+        );
+        assert_eq!(wrap_overlay_text("", 26, 4), "RAU STUDIO");
+    }
+
+    #[test]
+    fn overlay_track_file_updates_without_changing_its_path() {
+        let profile = profile();
+        let mut overlay = RtmpOverlay::create(&profile).unwrap();
+        let path = overlay.track_path.clone();
+
+        overlay.set_track("Monolake\nDirac Onyx").unwrap();
+
+        assert_eq!(overlay.track_path, path);
+        assert_eq!(fs::read_to_string(path).unwrap(), "MONOLAKE\nDIRAC ONYX");
     }
 
     #[test]

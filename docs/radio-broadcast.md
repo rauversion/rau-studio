@@ -51,7 +51,9 @@ The signed macOS build includes FFmpeg with `libmp3lame`, `libx264`, AAC, the
 FLV muxer, the `testsrc2` filter, and the
 Icecast/RTMP/RTMPS network protocols.
 A manually selected FFmpeg build must provide the capabilities required by the
-selected destination.
+selected destination. RTMP station and track typography additionally requires
+the `drawtext` filter. The Homebrew FFmpeg build includes it; builds without it
+fall back to the same animated graphic without text.
 
 ## Configure and Start Icecast
 
@@ -108,8 +110,9 @@ until cleared. The active row cannot be removed, but it can be skipped.
 5. Add tracks to the queue, configure any local inputs, confirm the FFmpeg
    preflight is ready, and choose **Salir al aire**.
 6. Rau Studio sends a 720 × 1280, 30 fps H.264 video with AAC audio and an
-   independently paced animated TV test pattern. Wait for the image to appear in
-   Live Producer.
+   independently paced monochrome broadcast graphic. It shows the configured
+   station name, encoding information, and the current artist/title. Wait for
+   the image to appear in Live Producer.
 7. Review the preview, title, and audience in Instagram, then click **Go live**
    there. Starting the signal in Rau Studio does not publish the Live by itself.
 8. To finish, end the Live in Instagram first and then stop Broadcast in Rau
@@ -129,8 +132,12 @@ service's bitrate, resolution, and keyframe requirements before going live.
 - Each local file is decoded to stereo 44.1 kHz PCM, regardless of its original
   format, then written to one persistent publisher process.
 - Icecast encodes that PCM as constant-bitrate MP3. RTMP encodes the audio as
-  AAC and pairs it with an independently paced H.264 test pattern so video
-  generation cannot block the audio pipe.
+  AAC and pairs it with an independently paced H.264 graphic so video generation
+  cannot block the audio pipe.
+- In RTMP mode, artist and title are written atomically to a temporary UTF-8
+  text file. FFmpeg reloads it while the publisher remains open, so track
+  transitions, direct line input, Mac audio, and the idle state update on screen
+  without interrupting the Live.
 - The destination receives one continuous connection across track transitions.
   When the queue runs out, Rau Studio transmits silence rather than closing the
   connection. New playlists can be appended while it is live.
@@ -207,7 +214,9 @@ service's bitrate, resolution, and keyframe requirements before going live.
 Run `npm run sidecars:prepare` for a source build, or select an FFmpeg binary in
 Settings. Icecast requires `libmp3lame` and the Icecast protocol. RTMP requires
 `libx264`, AAC, FLV, `testsrc2`, and the RTMP or RTMPS
-protocol selected by the destination.
+protocol selected by the destination. Select a build with `drawtext`—such as
+Homebrew FFmpeg—to include station and track information in the video. Without
+it, Rau keeps RTMP available but sends the graphic without typography.
 
 **Instagram does not show a preview**
 

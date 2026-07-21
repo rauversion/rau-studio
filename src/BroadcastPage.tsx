@@ -80,6 +80,7 @@ type BroadcastPreflight = {
   rtmps_protocol_available: boolean;
   flv_muxer_available: boolean;
   visualizer_filter_available: boolean;
+  overlay_filter_available: boolean;
   microphone_input_available: boolean;
   ready: boolean;
   message: string;
@@ -890,7 +891,7 @@ export function BroadcastPage() {
                     </div>
                     <div className="rounded-md border border-violet-500/25 bg-violet-500/5 px-3 py-2 text-xs text-muted-foreground">
                       <strong className="block text-foreground">720 × 1280 · 30 fps · H.264/AAC</strong>
-                      <span>{t("Rau genera una carta de televisión animada a 30 fps, separada del audio.")}</span>
+                      <span>{t("Rau genera una señal visual monocroma con identidad de la radio y la pista actual, actualizada sin cortar el Live.")}</span>
                     </div>
                     {rtmpPlatform === "instagram" ? (
                       <div className="rounded-md border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-xs text-amber-900 dark:text-amber-100">

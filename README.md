@@ -58,7 +58,9 @@ tools and `pkg-config`; Intel builds require `nasm`. The first native build
 downloads pinned FFmpeg, x264, and LAME source archives, verifies their SHA-256
 hashes, and compiles the sidecars locally. The bundled FFmpeg enables
 MP3/H.264/AAC encoding plus the Icecast and RTMP/RTMPS protocols used by
-Broadcast.
+Broadcast. Selecting a build with FFmpeg's `drawtext` filter also enables the
+dynamic station and current-track typography in RTMP video; Rau keeps a
+text-free visual fallback for lean builds.
 
 Prepare or validate the macOS sidecars explicitly:
 
