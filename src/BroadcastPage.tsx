@@ -2,10 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   AudioLines,
   Camera,
   Check,
   ChevronsUpDown,
+  GripVertical,
   Library,
   LoaderCircle,
   Mic,
@@ -81,6 +84,7 @@ type BroadcastVideoCompositor = {
   cameraMirror: boolean;
   cameraRotationDegrees: 0 | 90 | 180 | 270 | number;
   cameraFraming: "contain" | "cover" | string;
+  cameraLayout: "card" | "wide" | "background" | string;
   cameraOpacityPercent: number;
   transitionMillis: number;
 };
@@ -258,6 +262,7 @@ const defaultVideoCompositor: BroadcastVideoCompositor = {
   cameraMirror: true,
   cameraRotationDegrees: 180,
   cameraFraming: "contain",
+  cameraLayout: "wide",
   cameraOpacityPercent: 100,
   transitionMillis: 800
 };
@@ -318,6 +323,7 @@ export function BroadcastPage() {
   const [busy, setBusy] = useState<BusyAction>("loading");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [draggedQueueEntryId, setDraggedQueueEntryId] = useState<string | null>(null);
 
   const [outputKind, setOutputKind] = useState<BroadcastOutputKind>("icecast");
   const [host, setHost] = useState("");
@@ -364,7 +370,8 @@ export function BroadcastPage() {
       || Number(rtmpAudioBitrate) !== profile.rtmp_audio_bitrate_kbps
       || JSON.stringify(videoCompositor) !== JSON.stringify(profile.video_compositor)
     ));
-  const queuedTotal = queue.filter((entry) => entry.status === "queued").length;
+  const queuedEntries = queue.filter((entry) => entry.status === "queued");
+  const queuedTotal = queuedEntries.length;
   const completedTotal = queue.filter((entry) => entry.status === "played").length;
   const failedTotal = queue.filter((entry) => entry.status === "failed").length;
   const applicationAudioDetail = translateBackendMessage(
@@ -644,6 +651,13 @@ export function BroadcastPage() {
     });
   }
 
+  async function playQueueEntry(entry: BroadcastQueueEntry) {
+    await runAction(`play:${entry.id}`, async () => {
+      setStatus(await invoke<BroadcastStatus>("broadcast_play_queue_entry", { entryId: entry.id }));
+      setNotice(t("Cambiando a {track}...", { track: entryTitle(entry) }));
+    });
+  }
+
   async function toggleMicrophone() {
     const live = !(status?.microphone?.live ?? false);
     await runAction("microphone", async () => {
@@ -816,6 +830,47 @@ export function BroadcastPage() {
       await invoke("broadcast_remove_queue_entry", { entryId });
       setQueue(await invoke<BroadcastQueueEntry[]>("broadcast_queue"));
     });
+  }
+
+  async function persistQueuedOrder(entryIds: string[]) {
+    await runAction("reordering", async () => {
+      setQueue(await invoke<BroadcastQueueEntry[]>("broadcast_reorder_queue", { entryIds }));
+    });
+  }
+
+  async function moveQueuedEntry(entryId: string, direction: -1 | 1) {
+    const entryIds = queue.filter((entry) => entry.status === "queued").map((entry) => entry.id);
+    const currentIndex = entryIds.indexOf(entryId);
+    const nextIndex = currentIndex + direction;
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= entryIds.length) return;
+    [entryIds[currentIndex], entryIds[nextIndex]] = [entryIds[nextIndex], entryIds[currentIndex]];
+    await persistQueuedOrder(entryIds);
+  }
+
+  async function moveQueuedEntryToTarget(entryId: string, targetId: string) {
+    if (entryId === targetId) return;
+    const entryIds = queue.filter((entry) => entry.status === "queued").map((entry) => entry.id);
+    const currentIndex = entryIds.indexOf(entryId);
+    const targetIndex = entryIds.indexOf(targetId);
+    if (currentIndex < 0 || targetIndex < 0) return;
+    entryIds.splice(currentIndex, 1);
+    const adjustedTargetIndex = entryIds.indexOf(targetId);
+    entryIds.splice(currentIndex < targetIndex ? adjustedTargetIndex + 1 : adjustedTargetIndex, 0, entryId);
+    await persistQueuedOrder(entryIds);
+  }
+
+  async function sortQueuedEntries(sort: "title" | "artist" | "duration") {
+    const collator = new Intl.Collator(locale, { numeric: true, sensitivity: "base" });
+    const sorted = queue.filter((entry) => entry.status === "queued").sort((left, right) => {
+      if (sort === "duration") {
+        return (left.duration_seconds ?? Number.MAX_SAFE_INTEGER) - (right.duration_seconds ?? Number.MAX_SAFE_INTEGER)
+          || collator.compare(entryTitle(left), entryTitle(right));
+      }
+      const leftValue = sort === "artist" ? left.artist ?? left.title : left.title;
+      const rightValue = sort === "artist" ? right.artist ?? right.title : right.title;
+      return collator.compare(leftValue, rightValue) || collator.compare(entryTitle(left), entryTitle(right));
+    });
+    await persistQueuedOrder(sorted.map((entry) => entry.id));
   }
 
   async function runAction(action: BusyAction, callback: () => Promise<void>) {
@@ -1514,12 +1569,26 @@ export function BroadcastPage() {
             </Card>
 
             <Card className="flex h-[calc(100vh-3rem)] min-h-[420px] max-h-[860px] flex-col overflow-hidden">
-              <CardHeader>
+              <CardHeader className="flex-wrap py-2">
                 <CardTitle>{t("Cola de broadcast")}</CardTitle>
-                <Button size="sm" variant="ghost" disabled={queue.every((entry) => entry.status === "playing") || busy === "clearing"} onClick={() => void clearQueue()}>
-                  <Trash2 className="h-4 w-4" />
-                  {t("Limpiar")}
-                </Button>
+                <div className="ml-auto flex items-center gap-2">
+                  <select
+                    aria-label={t("Ordenar pistas")}
+                    className="h-8 max-w-36 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none disabled:opacity-50"
+                    value=""
+                    disabled={queuedTotal === 0 || busy === "reordering"}
+                    onChange={(event) => void sortQueuedEntries(event.currentTarget.value as "title" | "artist" | "duration")}
+                  >
+                    <option value="" disabled>{t("Ordenar próximas...")}</option>
+                    <option value="title">{t("Título A–Z")}</option>
+                    <option value="artist">{t("Artista A–Z")}</option>
+                    <option value="duration">{t("Duración menor primero")}</option>
+                  </select>
+                  <Button size="sm" variant="ghost" disabled={queue.every((entry) => entry.status === "playing") || busy === "clearing"} onClick={() => void clearQueue()}>
+                    <Trash2 className="h-4 w-4" />
+                    {t("Limpiar")}
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 <div className="grid shrink-0 gap-2 border-b border-border p-3 md:grid-cols-[minmax(260px,1fr)_auto]">
@@ -1598,8 +1667,51 @@ export function BroadcastPage() {
                   <div className="grid min-h-0 flex-1 place-items-center p-6 text-sm text-muted-foreground">{t("La cola está vacía.")}</div>
                 ) : (
                   <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain">
-                    {queue.map((entry) => (
-                      <div key={entry.id} className={cn("grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-3 py-2.5", entry.status === "playing" && "bg-emerald-500/5")}>
+                    {queue.map((entry) => {
+                      const queuedIndex = queuedEntries.findIndex((queuedEntry) => queuedEntry.id === entry.id);
+                      const canSelectTrack = running
+                        && status?.status !== "stopping"
+                        && status?.source_mode === "playlist"
+                        && entry.status !== "playing";
+                      return (
+                      <div
+                        key={entry.id}
+                        className={cn(
+                          "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-2.5 transition-colors",
+                          entry.status === "playing" && "bg-emerald-500/5",
+                          draggedQueueEntryId && entry.status === "queued" && entry.id !== draggedQueueEntryId && "hover:bg-accent/60"
+                        )}
+                        onDragOver={(event) => {
+                          if (entry.status !== "queued" || !draggedQueueEntryId) return;
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = "move";
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          const sourceId = draggedQueueEntryId ?? event.dataTransfer.getData("text/plain");
+                          setDraggedQueueEntryId(null);
+                          if (sourceId && entry.status === "queued") void moveQueuedEntryToTarget(sourceId, entry.id);
+                        }}
+                      >
+                        <button
+                          type="button"
+                          draggable={entry.status === "queued" && busy === null}
+                          className={cn(
+                            "grid h-8 w-6 shrink-0 place-items-center rounded text-muted-foreground",
+                            entry.status === "queued" ? "cursor-grab hover:bg-accent hover:text-foreground active:cursor-grabbing" : "cursor-not-allowed opacity-25"
+                          )}
+                          aria-label={t("Arrastrar para reordenar")}
+                          title={t("Arrastrar para reordenar")}
+                          onDragStart={(event) => {
+                            if (entry.status !== "queued") return;
+                            setDraggedQueueEntryId(entry.id);
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("text/plain", entry.id);
+                          }}
+                          onDragEnd={() => setDraggedQueueEntryId(null)}
+                        >
+                          <GripVertical className="h-4 w-4" />
+                        </button>
                         <div className="min-w-0">
                           <div className="flex min-w-0 items-center gap-2">
                             <span className="truncate text-sm font-medium">{entryTitle(entry)}</span>
@@ -1608,17 +1720,49 @@ export function BroadcastPage() {
                           <span className="mt-0.5 block truncate text-xs text-muted-foreground">{t(entry.playlist_name)} · {formatDuration(entry.duration_seconds)}</span>
                           {entry.error ? <span className="mt-1 block text-xs text-destructive">{entry.error}</span> : null}
                         </div>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          aria-label={t("Quitar de la cola")}
-                          disabled={entry.status === "playing" || busy === `remove:${entry.id}`}
-                          onClick={() => void removeEntry(entry.id)}
-                        >
-                          {busy === `remove:${entry.id}` ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                        </Button>
+                        <div className="flex items-center gap-0.5">
+                          <Button
+                            size="icon"
+                            variant={entry.status === "playing" ? "secondary" : "ghost"}
+                            aria-label={entry.status === "playing" ? t("Pista al aire") : t("Reproducir ahora")}
+                            title={entry.status === "playing" ? t("Pista al aire") : t("Reproducir ahora")}
+                            disabled={!canSelectTrack || busy === `play:${entry.id}`}
+                            onClick={() => void playQueueEntry(entry)}
+                          >
+                            {busy === `play:${entry.id}` ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label={t("Mover hacia arriba")}
+                            title={t("Mover hacia arriba")}
+                            disabled={queuedIndex <= 0 || busy === "reordering"}
+                            onClick={() => void moveQueuedEntry(entry.id, -1)}
+                          >
+                            <ArrowUp className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label={t("Mover hacia abajo")}
+                            title={t("Mover hacia abajo")}
+                            disabled={queuedIndex < 0 || queuedIndex >= queuedEntries.length - 1 || busy === "reordering"}
+                            onClick={() => void moveQueuedEntry(entry.id, 1)}
+                          >
+                            <ArrowDown className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label={t("Quitar de la cola")}
+                            disabled={entry.status === "playing" || busy === `remove:${entry.id}`}
+                            onClick={() => void removeEntry(entry.id)}
+                          >
+                            {busy === `remove:${entry.id}` ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                          </Button>
+                        </div>
                       </div>
-                    ))}
+                    )})}
                   </div>
                 )}
               </CardContent>
@@ -1883,9 +2027,17 @@ function VideoStudioModal({
               </div>
             </Field>
 
+            <Field label={t("Composición") }>
+              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraLayout} disabled={!config.enabled} onChange={(event) => update({ cameraLayout: event.currentTarget.value })}>
+                <option value="card">{t("Tarjeta")}</option>
+                <option value="wide">{t("Ancho completo")}</option>
+                <option value="background">{t("Fondo")}</option>
+              </select>
+            </Field>
+
             <div className="grid grid-cols-2 gap-3">
               <Field label={t("Posición") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraPosition} disabled={!config.enabled} onChange={(event) => update({ cameraPosition: event.currentTarget.value })}>
+                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraPosition} disabled={!config.enabled || config.cameraLayout !== "card"} onChange={(event) => update({ cameraPosition: event.currentTarget.value })}>
                   <option value="top_left">{t("Arriba izquierda")}</option>
                   <option value="top_right">{t("Arriba derecha")}</option>
                   <option value="center">{t("Centro")}</option>
@@ -1894,7 +2046,7 @@ function VideoStudioModal({
                 </select>
               </Field>
               <Field label={t("Tamaño") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraSize} disabled={!config.enabled} onChange={(event) => update({ cameraSize: event.currentTarget.value })}>
+                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraSize} disabled={!config.enabled || config.cameraLayout !== "card"} onChange={(event) => update({ cameraSize: event.currentTarget.value })}>
                   <option value="small">{t("Pequeña")}</option>
                   <option value="medium">{t("Mediana")}</option>
                   <option value="large">{t("Grande")}</option>
@@ -1978,13 +2130,18 @@ function StudioMonitor({
   transitionMillis?: number;
 }) {
   const positionClass: Record<string, string> = {
-    top_left: "left-[7%] top-[29%]",
-    top_right: "right-[7%] top-[29%]",
+    top_left: "left-[7%] top-[19%]",
+    top_right: "right-[7%] top-[19%]",
     center: "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2",
-    bottom_left: "bottom-[7%] left-[7%]",
-    bottom_right: "bottom-[7%] right-[7%]"
+    bottom_left: "bottom-[4%] left-[7%]",
+    bottom_right: "bottom-[4%] right-[7%]"
   };
   const sizeClass: Record<string, string> = { small: "w-[30%]", medium: "w-[43%]", large: "w-[58%]" };
+  const cameraLayoutClass = config.cameraLayout === "background"
+    ? "inset-x-0 top-[17.2%] z-20 h-[53.1%] w-full border-y border-white/40"
+    : config.cameraLayout === "wide"
+      ? "inset-x-0 top-[18.75%] z-20 h-[35.15%] w-full border-y border-white/65"
+      : cn("z-20 aspect-square border border-white/65", positionClass[config.cameraPosition] ?? positionClass.top_right, sizeClass[config.cameraSize] ?? sizeClass.medium);
   const cameraFilter: Record<string, string> = {
     clean: "none",
     mono: "grayscale(1)",
@@ -2004,20 +2161,20 @@ function StudioMonitor({
           backgroundSize: "12.5% 7.03%"
         }}
       >
-        <div className="absolute inset-x-0 top-0 h-[1.6%] bg-white" />
-        <div className="absolute left-[7%] right-[7%] top-[4%] h-[18%] border border-white/40 bg-black/70 p-[3%]">
-          <strong className="block truncate text-[clamp(10px,2.2vw,22px)] font-medium uppercase">{stationName}</strong>
-          <span className="absolute bottom-[12%] left-[3%] font-mono text-[clamp(5px,.8vw,9px)] tracking-[0.16em] text-white/55">LIVE / RAU BROADCAST SYSTEM</span>
+        <div className="absolute inset-x-0 top-0 z-30 h-[1.6%] bg-white" />
+        <div className="absolute left-[5%] right-[5%] top-[3%] z-30 h-[11%] border border-white/40 bg-black/70 px-[2.5%] py-[1.5%]">
+          <strong className="block truncate text-[clamp(8px,1.8vw,17px)] font-medium uppercase">{stationName}</strong>
+          <span className="absolute bottom-[10%] left-[2.5%] font-mono text-[clamp(4px,.65vw,7px)] tracking-[0.16em] text-white/55">LIVE / RAU BROADCAST SYSTEM</span>
         </div>
-        <div className="absolute left-[7%] top-[29%] h-[25%] w-[1.2%] bg-white/85" />
-        <div className="absolute left-[11%] right-[7%] top-[29%] h-[25%] border border-white/30 bg-gradient-to-br from-white/65 via-white/5 to-black" />
-        <div className="absolute inset-x-[7%] top-[61%] border-t border-white/55 pt-[4%]">
+        <div className="absolute left-[5%] top-[20%] z-10 h-[35%] w-[1.2%] bg-white/85" />
+        <div className="absolute left-[9.5%] right-[5%] top-[20%] z-10 h-[35%] border border-white/30 bg-gradient-to-br from-white/55 via-white/5 to-transparent" />
+        <div className="absolute inset-x-[5%] top-[70%] z-30 border-t border-white/55 bg-black/90 pt-[4%]">
           <span className="font-mono text-[clamp(5px,.8vw,9px)] tracking-[0.13em] text-white/50">NOW PLAYING / CURRENT AUDIO</span>
           <strong className="mt-[3%] block line-clamp-3 text-[clamp(9px,1.8vw,18px)] font-medium uppercase leading-tight">{trackTitle}</strong>
         </div>
         {cameraVisible ? (
           <div
-            className={cn("absolute z-20 aspect-square overflow-hidden border border-white/65 bg-[#111]", positionClass[config.cameraPosition] ?? positionClass.top_right, sizeClass[config.cameraSize] ?? sizeClass.medium)}
+            className={cn("absolute overflow-hidden bg-[#111]", cameraLayoutClass)}
             style={{ opacity: cameraOpacity * config.cameraOpacityPercent / 100, transition: `opacity ${transitionMillis}ms linear` }}
           >
             {videoRef ? (
@@ -2038,7 +2195,7 @@ function StudioMonitor({
             )}
           </div>
         ) : null}
-        <span className="absolute bottom-[3%] left-[7%] font-mono text-[clamp(5px,.7vw,8px)] tracking-[0.12em] text-white/35">H264 / AAC / 720X1280 / 30FPS</span>
+        <span className="absolute bottom-[3%] left-[5%] z-30 font-mono text-[clamp(5px,.7vw,8px)] tracking-[0.12em] text-white/35">H264 / AAC / 720X1280 / 30FPS</span>
       </div>
     </div>
   );

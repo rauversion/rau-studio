@@ -92,8 +92,11 @@ fall back to the same animated graphic without text.
     output. Choose **Volver a Playlist** to resume.
 13. Test the displayed listener URL in another device or network.
 
-The queue is durable in SQLite. Played, skipped, and failed rows remain visible
-until cleared. The active row cannot be removed, but it can be skipped.
+The queue is durable in SQLite. Each non-playing row has **Play now**, which
+cuts the current decoder and starts the selected track without reconnecting the
+destination. Queued rows can be dragged, moved with the arrow controls, or
+sorted by title, artist, and duration. Played, skipped, and failed rows remain
+visible until cleared. The active row cannot be removed or reordered.
 
 ## Configure and Start Instagram Live
 
@@ -107,9 +110,9 @@ until cleared. The active row cannot be removed, but it can be skipped.
 4. Paste the stream key into **Clave de transmisión · solo esta sesión**. It is
    kept only in the current frontend session and cleared when the broadcast is
    stopped.
-5. Optional: open **Video Studio**, enable a camera, choose its device,
-   position, size, fit/crop framing, orientation, effect, mirror, opacity, and AUTO duration, then save the
-   composition. The camera stays out of Program when the broadcast starts.
+5. Optional: open **Video Studio**, enable a camera, and choose **Card**, **Full width**, or **Background**.
+   Fit/crop framing, orientation, effect, mirror, opacity, and AUTO duration remain available in every mode.
+   Card also enables position and size. The camera stays out of Program when the broadcast starts.
 6. Add tracks to the queue, configure any local inputs, confirm the FFmpeg
    preflight is ready, and choose **Salir al aire**.
 7. Rau Studio sends a 720 × 1280, 30 fps H.264 video with AAC audio and an
@@ -152,10 +155,11 @@ service's bitrate, resolution, and keyframe requirements before going live.
   take. Moving the fader changes the layer alpha frame by frame without
   replacing the publisher. Rau detects missing or repeated frames and restarts
   only camera capture when it freezes.
-- Camera position, size, fit/crop framing, orientation, mirror, effect, maximum opacity, and AUTO duration are
-  persisted with the Broadcast profile and can be changed while live. Layout,
-  device, framing, orientation, mirror, and effect changes rebuild only the transparent camera layer;
-  opacity and Preview/Program mix update directly.
+- Camera composition, position, size, fit/crop framing, orientation, mirror, effect, maximum opacity, and AUTO
+  duration are persisted with the Broadcast profile and can be changed while live. Full width spans the 9:16
+  canvas; Background places the camera beneath the compact Rau identity and track information. Composition,
+  device, framing, orientation, mirror, and effect changes rebuild only the transparent camera layer; opacity and
+  Preview/Program mix update directly.
 - The destination receives one continuous connection across track transitions.
   When the queue runs out, Rau Studio transmits silence rather than closing the
   connection. New playlists can be appended while it is live.

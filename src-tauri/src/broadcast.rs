@@ -134,6 +134,7 @@ pub struct BroadcastVideoCompositor {
     camera_mirror: bool,
     camera_rotation_degrees: u16,
     camera_framing: String,
+    camera_layout: String,
     camera_opacity_percent: u16,
     transition_millis: u16,
 }
@@ -149,6 +150,7 @@ impl Default for BroadcastVideoCompositor {
             camera_mirror: true,
             camera_rotation_degrees: 180,
             camera_framing: "contain".to_string(),
+            camera_layout: "wide".to_string(),
             camera_opacity_percent: 100,
             transition_millis: 800,
         }
@@ -663,6 +665,7 @@ impl RuntimeState {
 enum WorkerCommand {
     Stop,
     Skip,
+    PlayQueueEntry(String),
     SetMicrophoneLive(bool),
     SetLineInputLive(bool),
     SetApplicationAudioLive(bool),
@@ -840,6 +843,22 @@ impl BroadcastManager {
         worker
             .commands
             .send(WorkerCommand::Skip)
+            .map_err(|_| "El motor de broadcast ya se detuvo.".to_string())?;
+        Ok(self.runtime.snapshot())
+    }
+
+    fn play_queue_entry(&self, entry_id: String) -> Result<BroadcastStatus, String> {
+        self.cleanup_finished_worker();
+        let worker = self
+            .worker
+            .lock()
+            .map_err(|_| "No se pudo bloquear el motor de broadcast.".to_string())?;
+        let Some(worker) = worker.as_ref() else {
+            return Err("La radio no esta transmitiendo.".to_string());
+        };
+        worker
+            .commands
+            .send(WorkerCommand::PlayQueueEntry(entry_id))
             .map_err(|_| "El motor de broadcast ya se detuvo.".to_string())?;
         Ok(self.runtime.snapshot())
     }
@@ -1116,6 +1135,32 @@ pub fn broadcast_append_track(
 }
 
 #[tauri::command]
+pub fn broadcast_play_queue_entry(
+    app: AppHandle,
+    manager: State<'_, BroadcastManager>,
+    entry_id: String,
+) -> Result<BroadcastStatus, String> {
+    let entry_id = validate_queue_entry_id(&entry_id)?;
+    let conn = open_db(&app)?;
+    let status = queue_entry_status(&conn, &entry_id)?
+        .ok_or_else(|| "La pista seleccionada ya no está en la cola.".to_string())?;
+    if status == "playing" {
+        return Ok(manager.runtime.snapshot());
+    }
+    manager.play_queue_entry(entry_id)
+}
+
+#[tauri::command]
+pub fn broadcast_reorder_queue(
+    app: AppHandle,
+    entry_ids: Vec<String>,
+) -> Result<Vec<BroadcastQueueEntry>, String> {
+    let mut conn = open_db(&app)?;
+    reorder_queued_entries(&mut conn, &entry_ids)?;
+    list_queue(&conn)
+}
+
+#[tauri::command]
 pub fn broadcast_remove_queue_entry(app: AppHandle, entry_id: String) -> Result<String, String> {
     let conn = open_db(&app)?;
     let deleted = conn
@@ -1354,6 +1399,12 @@ fn validate_video_compositor(config: &BroadcastVideoCompositor) -> Result<(), St
     }
     if !matches!(config.camera_framing.as_str(), "contain" | "cover") {
         return Err("Encuadre de cámara inválido.".to_string());
+    }
+    if !matches!(
+        config.camera_layout.as_str(),
+        "card" | "wide" | "background"
+    ) {
+        return Err("Composición de cámara inválida.".to_string());
     }
     if config.camera_opacity_percent > 100 {
         return Err("La opacidad de cámara debe estar entre 0% y 100%.".to_string());
@@ -2155,7 +2206,8 @@ fn run_camera_feeder(
                         || config.camera_effect != next_config.camera_effect
                         || config.camera_mirror != next_config.camera_mirror
                         || config.camera_rotation_degrees != next_config.camera_rotation_degrees
-                        || config.camera_framing != next_config.camera_framing;
+                        || config.camera_framing != next_config.camera_framing
+                        || config.camera_layout != next_config.camera_layout;
                     config = next_config;
                     maximum_alpha = maximum_camera_alpha(&config);
                     target_alpha = i32::from(
@@ -2472,7 +2524,7 @@ fn spawn_camera_capture(
 }
 
 fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
-    let (size, x, y) = camera_canvas_layout(config);
+    let layout = camera_canvas_layout(config);
     let mut filters = vec![
         // AVFoundation can report a bogus 1,000,000 fps time base for the
         // built-in camera. Without normalizing it, FFmpeg's rawvideo output
@@ -2489,13 +2541,22 @@ fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
     });
     if config.camera_framing == "contain" {
         filters.extend([
-            "scale=480:480:force_original_aspect_ratio=decrease".to_string(),
-            "pad=480:480:(ow-iw)/2:(oh-ih)/2:color=black".to_string(),
+            format!(
+                "scale={}:{}:force_original_aspect_ratio=decrease:flags=lanczos",
+                layout.width, layout.height
+            ),
+            format!(
+                "pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black",
+                layout.width, layout.height
+            ),
         ]);
     } else {
         filters.extend([
-            "scale=480:480:force_original_aspect_ratio=increase".to_string(),
-            "crop=480:480".to_string(),
+            format!(
+                "scale={}:{}:force_original_aspect_ratio=increase:flags=lanczos",
+                layout.width, layout.height
+            ),
+            format!("crop={}:{}", layout.width, layout.height),
         ]);
     }
     if config.camera_mirror {
@@ -2508,10 +2569,12 @@ fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
         _ => "null".to_string(),
     });
     filters.extend([
-        format!("scale={size}:{size}:flags=lanczos"),
         "setsar=1".to_string(),
         "format=rgba".to_string(),
-        format!("pad={CAMERA_FRAME_WIDTH}:{CAMERA_FRAME_HEIGHT}:{x}:{y}:color=black@0"),
+        format!(
+            "pad={CAMERA_FRAME_WIDTH}:{CAMERA_FRAME_HEIGHT}:{}:{}:color=black@0",
+            layout.x, layout.y
+        ),
         "format=bgra".to_string(),
     ]);
     vec![
@@ -2540,28 +2603,62 @@ fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
     ]
 }
 
-fn camera_canvas_layout(config: &BroadcastVideoCompositor) -> (usize, usize, usize) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CameraCanvasLayout {
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+}
+
+fn camera_canvas_layout(config: &BroadcastVideoCompositor) -> CameraCanvasLayout {
+    match config.camera_layout.as_str() {
+        "background" => {
+            return CameraCanvasLayout {
+                width: CAMERA_FRAME_WIDTH,
+                // Keep the compact station header and Now Playing footer clear.
+                // The camera fills the entire live field between them.
+                height: 340,
+                x: 0,
+                y: 110,
+            };
+        }
+        "wide" => {
+            return CameraCanvasLayout {
+                width: CAMERA_FRAME_WIDTH,
+                height: 225,
+                x: 0,
+                y: 120,
+            };
+        }
+        _ => {}
+    }
+
     let size = match config.camera_size.as_str() {
         "small" => 105,
         "large" => 205,
         _ => 150,
     };
     let margin = 24;
-    let top = 180;
-    match config.camera_position.as_str() {
-        "top_left" => (size, margin, top),
+    let top = 120;
+    let (x, y) = match config.camera_position.as_str() {
+        "top_left" => (margin, top),
         "center" => (
-            size,
             (CAMERA_FRAME_WIDTH - size) / 2,
             (CAMERA_FRAME_HEIGHT - size) / 2,
         ),
-        "bottom_left" => (size, margin, CAMERA_FRAME_HEIGHT - size - margin),
+        "bottom_left" => (margin, CAMERA_FRAME_HEIGHT - size - margin),
         "bottom_right" => (
-            size,
             CAMERA_FRAME_WIDTH - size - margin,
             CAMERA_FRAME_HEIGHT - size - margin,
         ),
-        _ => (size, CAMERA_FRAME_WIDTH - size - margin, top),
+        _ => (CAMERA_FRAME_WIDTH - size - margin, top),
+    };
+    CameraCanvasLayout {
+        width: size,
+        height: size,
+        x,
+        y,
     }
 }
 
@@ -2780,27 +2877,27 @@ fn rtmp_video_filter(profile: &BroadcastProfile, station_path: &Path, track_path
             "scale={width}:{height}:flags=neighbor,",
             "eq=contrast=1.85:brightness=-0.18:saturation=0,",
             "drawgrid=w=90:h=90:t=1:c=white@0.13,",
-            "drawbox=x=0:y=0:w=iw:h=330:c=black@0.90:t=fill,",
-            "drawbox=x=0:y=730:w=iw:h=550:c=black@0.92:t=fill,",
+            "drawbox=x=0:y=0:w=iw:h=220:c=black@0.90:t=fill,",
+            "drawbox=x=0:y=900:w=iw:h=380:c=black@0.92:t=fill,",
             "drawbox=x=0:y=0:w=iw:h=22:c=white@0.95:t=fill,",
-            "drawbox=x=48:y=50:w=624:h=230:c=white@0.70:t=2,",
-            "drawbox=x=48:y=370:w=8:h=300:c=white@0.92:t=fill,",
-            "drawbox=x=80:y=370:w=592:h=300:c=white@0.46:t=2,",
-            "drawbox=x=48:y=782:w=624:h=2:c=white@0.72:t=fill,",
+            "drawbox=x=36:y=40:w=648:h=142:c=white@0.70:t=2,",
+            "drawbox=x=36:y=260:w=8:h=450:c=white@0.92:t=fill,",
+            "drawbox=x=68:y=260:w=616:h=450:c=white@0.46:t=2,",
+            "drawbox=x=36:y=900:w=648:h=2:c=white@0.72:t=fill,",
             "drawtext=fontfile='{display_font}':textfile='{station_path}':",
-            "expansion=none:fontcolor=white:fontsize=48:line_spacing=2:x=52:y=66:fix_bounds=1,",
+            "expansion=none:fontcolor=white:fontsize=36:line_spacing=2:x=40:y=50:fix_bounds=1,",
             "drawtext=fontfile='{mono_font}':text='LIVE / RAU BROADCAST SYSTEM':",
-            "expansion=none:fontcolor=white@0.82:fontsize=18:x=52:y=234,",
+            "expansion=none:fontcolor=white@0.82:fontsize=15:x=40:y=150,",
             "drawtext=fontfile='{mono_font}':text='/ 01':",
-            "expansion=none:fontcolor=white@0.22:fontsize=94:x=500:y=370,",
+            "expansion=none:fontcolor=white@0.22:fontsize=80:x=530:y=270,",
             "drawtext=fontfile='{mono_font}':text='NOW PLAYING / CURRENT AUDIO':",
-            "expansion=none:fontcolor=white@0.72:fontsize=18:x=52:y=812,",
+            "expansion=none:fontcolor=white@0.72:fontsize=15:x=40:y=928,",
             "drawtext=fontfile='{display_font}':textfile='{track_path}':reload=1:",
-            "expansion=none:fontcolor=white:fontsize=44:line_spacing=10:x=52:y=858:fix_bounds=1,",
+            "expansion=none:fontcolor=white:fontsize=38:line_spacing=8:x=40:y=968:fix_bounds=1,",
             "drawtext=fontfile='{mono_font}':text='{technical}':",
-            "expansion=none:fontcolor=white@0.72:fontsize=16:x=52:y=1180,",
+            "expansion=none:fontcolor=white@0.72:fontsize=14:x=40:y=1200,",
             "drawtext=fontfile='{mono_font}':text='720X1280 / VERTICAL SIGNAL':",
-            "expansion=none:fontcolor=white@0.44:fontsize=16:x=52:y=1214"
+            "expansion=none:fontcolor=white@0.44:fontsize=14:x=40:y=1230"
         ),
         width = RTMP_VIDEO_WIDTH,
         height = RTMP_VIDEO_HEIGHT,
@@ -2819,13 +2916,13 @@ fn rtmp_fallback_video_filter() -> String {
             "scale={width}:{height}:flags=neighbor,",
             "eq=contrast=1.85:brightness=-0.18:saturation=0,",
             "drawgrid=w=90:h=90:t=1:c=white@0.13,",
-            "drawbox=x=0:y=0:w=iw:h=330:c=black@0.90:t=fill,",
-            "drawbox=x=0:y=730:w=iw:h=550:c=black@0.92:t=fill,",
+            "drawbox=x=0:y=0:w=iw:h=220:c=black@0.90:t=fill,",
+            "drawbox=x=0:y=900:w=iw:h=380:c=black@0.92:t=fill,",
             "drawbox=x=0:y=0:w=iw:h=22:c=white@0.95:t=fill,",
-            "drawbox=x=48:y=50:w=624:h=230:c=white@0.70:t=2,",
-            "drawbox=x=48:y=370:w=8:h=300:c=white@0.92:t=fill,",
-            "drawbox=x=80:y=370:w=592:h=300:c=white@0.46:t=2,",
-            "drawbox=x=48:y=782:w=624:h=2:c=white@0.72:t=fill"
+            "drawbox=x=36:y=40:w=648:h=142:c=white@0.70:t=2,",
+            "drawbox=x=36:y=260:w=8:h=450:c=white@0.92:t=fill,",
+            "drawbox=x=68:y=260:w=616:h=450:c=white@0.46:t=2,",
+            "drawbox=x=36:y=900:w=648:h=2:c=white@0.72:t=fill"
         ),
         width = RTMP_VIDEO_WIDTH,
         height = RTMP_VIDEO_HEIGHT,
@@ -4122,6 +4219,7 @@ fn connected_message(profile: &BroadcastProfile) -> String {
 enum PlayOutcome {
     Completed,
     Skipped,
+    Selected(String),
     Stop,
     PublisherFailed(String),
 }
@@ -4130,6 +4228,7 @@ enum DirectInputOutcome {
     ResumePlaylist,
     SourceChanged,
     Skipped,
+    Selected(String),
     Stop,
     PublisherFailed(String),
 }
@@ -4240,6 +4339,18 @@ fn play_entry(
                 );
                 return PlayOutcome::Skipped;
             }
+            WorkerAction::PlayQueueEntry(entry_id) => {
+                let _ = decoder.kill();
+                let _ = decoder.wait();
+                let _ = update_entry_status(app, &entry.id, "skipped", None);
+                runtime.log(
+                    app,
+                    "info",
+                    "track_selected",
+                    format!("Cambiando desde: {}", display_title(entry)),
+                );
+                return PlayOutcome::Selected(entry_id);
+            }
             WorkerAction::None => {}
         }
 
@@ -4286,6 +4397,12 @@ fn play_entry(
                     let _ = decoder.wait();
                     let _ = update_entry_status(app, &entry.id, "skipped", None);
                     return PlayOutcome::Skipped;
+                }
+                DirectInputOutcome::Selected(entry_id) => {
+                    let _ = decoder.kill();
+                    let _ = decoder.wait();
+                    let _ = update_entry_status(app, &entry.id, "skipped", None);
+                    return PlayOutcome::Selected(entry_id);
                 }
                 DirectInputOutcome::Stop => {
                     let _ = decoder.kill();
@@ -4364,6 +4481,7 @@ fn run_worker(
     let mut reconnect_attempt = 0u32;
     let mut publisher: Option<Publisher> = None;
     let mut terminal_error: Option<String> = None;
+    let mut selected_entry_id: Option<String> = None;
     let mut worker_audio = WorkerAudio::from_profile(&profile);
     if profile.output_kind != OUTPUT_KIND_RTMP || !profile.video_compositor.enabled {
         runtime.update_camera(
@@ -4489,17 +4607,16 @@ fn run_worker(
     }
 
     loop {
-        if matches!(
-            poll_worker_commands(
-                &commands,
-                &app,
-                &runtime,
-                &mut worker_audio,
-                publisher.as_mut(),
-            ),
-            WorkerAction::Stop
+        match poll_worker_commands(
+            &commands,
+            &app,
+            &runtime,
+            &mut worker_audio,
+            publisher.as_mut(),
         ) {
-            break;
+            WorkerAction::Stop => break,
+            WorkerAction::PlayQueueEntry(entry_id) => selected_entry_id = Some(entry_id),
+            WorkerAction::None | WorkerAction::Skip => {}
         }
         if publisher.is_none() {
             let mut effective_profile = profile.clone();
@@ -4538,6 +4655,7 @@ fn run_worker(
                         reconnect_attempt,
                         &error,
                         &mut worker_audio,
+                        &mut selected_entry_id,
                     ) {
                         break;
                     }
@@ -4601,6 +4719,7 @@ fn run_worker(
                         reconnect_attempt,
                         &error,
                         &mut worker_audio,
+                        &mut selected_entry_id,
                     ) {
                         break;
                     }
@@ -4622,11 +4741,16 @@ fn run_worker(
                 }
                 DirectInputOutcome::SourceChanged => {}
                 DirectInputOutcome::Skipped => {}
+                DirectInputOutcome::Selected(entry_id) => selected_entry_id = Some(entry_id),
             }
             continue;
         }
 
-        let next = open_db(&app).and_then(|conn| next_queue_entry(&conn));
+        let selected = selected_entry_id.take();
+        let next = open_db(&app).and_then(|conn| match selected.as_deref() {
+            Some(entry_id) => queue_entry_by_id(&conn, entry_id),
+            None => next_queue_entry(&conn),
+        });
         match next {
             Ok(Some(entry)) => {
                 let session = BroadcastSession {
@@ -4669,10 +4793,12 @@ fn run_worker(
                             reconnect_attempt,
                             &error,
                             &mut worker_audio,
+                            &mut selected_entry_id,
                         ) {
                             break;
                         }
                     }
+                    PlayOutcome::Selected(entry_id) => selected_entry_id = Some(entry_id),
                     PlayOutcome::Completed | PlayOutcome::Skipped => {}
                 }
             }
@@ -4713,6 +4839,7 @@ fn run_worker(
                         reconnect_attempt,
                         &error,
                         &mut worker_audio,
+                        &mut selected_entry_id,
                     ) {
                         break;
                     }
@@ -4806,6 +4933,7 @@ fn wait_before_reconnect(
     attempt: u32,
     reason: &str,
     worker_audio: &mut WorkerAudio,
+    selected_entry_id: &mut Option<String>,
 ) -> bool {
     let seconds = 2u64.saturating_pow(attempt.min(3)).clamp(1, 15);
     runtime.update(
@@ -4817,22 +4945,22 @@ fn wait_before_reconnect(
         ("warning", "reconnecting"),
     );
     for _ in 0..seconds * 4 {
-        if matches!(
-            poll_worker_commands(commands, app, runtime, worker_audio, None),
-            WorkerAction::Stop
-        ) {
-            return false;
+        match poll_worker_commands(commands, app, runtime, worker_audio, None) {
+            WorkerAction::Stop => return false,
+            WorkerAction::PlayQueueEntry(entry_id) => *selected_entry_id = Some(entry_id),
+            WorkerAction::None | WorkerAction::Skip => {}
         }
         thread::sleep(Duration::from_millis(250));
     }
     true
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 enum WorkerAction {
     None,
     Stop,
     Skip,
+    PlayQueueEntry(String),
 }
 
 fn poll_worker_commands(
@@ -4849,6 +4977,9 @@ fn poll_worker_commands(
                 return WorkerAction::Stop;
             }
             Ok(WorkerCommand::Skip) => action = WorkerAction::Skip,
+            Ok(WorkerCommand::PlayQueueEntry(entry_id)) => {
+                action = WorkerAction::PlayQueueEntry(entry_id)
+            }
             Ok(WorkerCommand::SetMicrophoneLive(live)) => {
                 if let Err(error) = worker_audio.set_live(app, runtime, live) {
                     runtime.log(app, "error", "microphone", error);
@@ -4899,6 +5030,9 @@ fn stream_direct_input(
         match poll_worker_commands(commands, app, runtime, worker_audio, Some(&mut *publisher)) {
             WorkerAction::Stop => return DirectInputOutcome::Stop,
             WorkerAction::Skip => return DirectInputOutcome::Skipped,
+            WorkerAction::PlayQueueEntry(entry_id) => {
+                return DirectInputOutcome::Selected(entry_id)
+            }
             WorkerAction::None => {}
         }
         if !worker_audio.direct_source_live() {
@@ -5302,6 +5436,117 @@ fn list_queue(conn: &Connection) -> Result<Vec<BroadcastQueueEntry>, String> {
         .map_err(|error| format!("No se pudo mapear cola de broadcast: {error}"))
 }
 
+fn validate_queue_entry_id(entry_id: &str) -> Result<String, String> {
+    let entry_id = entry_id.trim();
+    if entry_id.is_empty()
+        || entry_id.len() > 128
+        || entry_id.chars().any(|character| character.is_control())
+    {
+        return Err("No se pudo identificar la pista de la cola.".to_string());
+    }
+    Ok(entry_id.to_string())
+}
+
+fn queue_entry_status(conn: &Connection, entry_id: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT status FROM broadcast_queue_entries WHERE id = ?1",
+        params![entry_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| format!("No se pudo leer la pista seleccionada: {error}"))
+}
+
+fn queue_entry_by_id(
+    conn: &Connection,
+    entry_id: &str,
+) -> Result<Option<BroadcastQueueEntry>, String> {
+    conn.query_row(
+        "SELECT id, library_id, track_id, playlist_path, playlist_name, source_path,
+                title, artist, duration_seconds, position, status, error, inserted_at, updated_at
+         FROM broadcast_queue_entries WHERE id = ?1",
+        params![entry_id],
+        row_to_queue_entry,
+    )
+    .optional()
+    .map_err(|error| format!("No se pudo leer la pista seleccionada: {error}"))
+}
+
+fn reorder_queued_entries(conn: &mut Connection, entry_ids: &[String]) -> Result<(), String> {
+    const MAX_REORDER_ENTRIES: usize = 10_000;
+    if entry_ids.len() > MAX_REORDER_ENTRIES {
+        return Err("La cola es demasiado grande para reordenarla de una vez.".to_string());
+    }
+    let normalized = entry_ids
+        .iter()
+        .map(|entry_id| validate_queue_entry_id(entry_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let unique = normalized
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    if unique.len() != normalized.len() {
+        return Err("El nuevo orden contiene pistas duplicadas.".to_string());
+    }
+
+    let mut statement = conn
+        .prepare(
+            "SELECT id, position FROM broadcast_queue_entries
+             WHERE status = 'queued' ORDER BY position",
+        )
+        .map_err(|error| format!("No se pudo preparar el orden de la cola: {error}"))?;
+    let current = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|error| format!("No se pudo leer el orden de la cola: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("No se pudo mapear el orden de la cola: {error}"))?;
+    drop(statement);
+
+    // A live worker can promote a row from queued to playing between the UI
+    // snapshot and this transaction. Ignore protected/stale ids and retain any
+    // rows newly seen as queued, while preserving the requested relative order.
+    let current_ids = current
+        .iter()
+        .map(|(entry_id, _)| entry_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut ordered = normalized
+        .iter()
+        .filter(|entry_id| current_ids.contains(entry_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ordered_ids = ordered
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    ordered.extend(
+        current
+            .iter()
+            .filter(|(entry_id, _)| !ordered_ids.contains(entry_id))
+            .map(|(entry_id, _)| entry_id.clone()),
+    );
+
+    let positions = current
+        .iter()
+        .map(|(_, position)| *position)
+        .collect::<Vec<_>>();
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar el reordenamiento: {error}"))?;
+    let now = timestamp();
+    for (entry_id, position) in ordered.iter().zip(positions) {
+        tx.execute(
+            "UPDATE broadcast_queue_entries SET position = ?2, updated_at = ?3
+             WHERE id = ?1 AND status = 'queued'",
+            params![entry_id, position, now],
+        )
+        .map_err(|error| format!("No se pudo reordenar la cola: {error}"))?;
+    }
+    tx.commit()
+        .map_err(|error| format!("No se pudo confirmar el nuevo orden: {error}"))
+}
+
 fn next_queue_entry(conn: &Connection) -> Result<Option<BroadcastQueueEntry>, String> {
     conn.query_row(
         "SELECT id, library_id, track_id, playlist_path, playlist_name, source_path,
@@ -5661,6 +5906,11 @@ mod tests {
         input.output_kind = OUTPUT_KIND_RTMP.to_string();
         input.video_compositor.camera_framing = "zoom".to_string();
         assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.camera_layout = "floating".to_string();
+        assert!(validate_profile(input).is_err());
     }
 
     #[test]
@@ -5671,6 +5921,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.camera_rotation_degrees, 180);
         assert_eq!(config.camera_framing, "contain");
+        assert_eq!(config.camera_layout, "wide");
     }
 
     #[test]
@@ -5685,7 +5936,7 @@ mod tests {
     }
 
     #[test]
-    fn camera_capture_is_square_mirrored_and_effected() {
+    fn camera_capture_uses_selected_layout_framing_and_effect() {
         let mut config = BroadcastVideoCompositor::default();
         config.enabled = true;
         config.camera_device = "MacBook Pro Camera".to_string();
@@ -5697,19 +5948,27 @@ mod tests {
             .unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-f", "avfoundation"]));
         assert!(filter.contains("settb=AVTB,setpts=PTS-STARTPTS,fps=30"));
-        assert!(filter.contains("force_original_aspect_ratio=decrease"));
-        assert!(filter.contains("pad=480:480:(ow-iw)/2:(oh-ih)/2:color=black"));
+        assert!(filter.contains("scale=360:225:force_original_aspect_ratio=decrease"));
+        assert!(filter.contains("pad=360:225:(ow-iw)/2:(oh-ih)/2:color=black"));
         assert!(filter.contains("hflip"));
         assert!(filter.contains("vflip"));
         assert!(filter.contains("hue=s=0"));
-        assert!(filter.contains("scale=150:150"));
-        assert!(filter.contains("pad=360:640:186:180:color=black@0"));
+        assert!(filter.contains("pad=360:640:0:120:color=black@0"));
         assert!(args.windows(2).any(|pair| pair == ["-r", "30"]));
         assert_eq!(args.last().unwrap(), "pipe:1");
 
+        config.camera_layout = "card".to_string();
         config.camera_size = "large".to_string();
         config.camera_position = "bottom_left".to_string();
-        assert_eq!(camera_canvas_layout(&config), (205, 24, 411));
+        assert_eq!(
+            camera_canvas_layout(&config),
+            CameraCanvasLayout {
+                width: 205,
+                height: 205,
+                x: 24,
+                y: 411,
+            }
+        );
 
         config.camera_rotation_degrees = 90;
         config.camera_framing = "cover".to_string();
@@ -5721,7 +5980,7 @@ mod tests {
             .unwrap();
         assert!(filter.contains("transpose=clock"));
         assert!(filter.contains("force_original_aspect_ratio=increase"));
-        assert!(filter.contains("crop=480:480"));
+        assert!(filter.contains("crop=205:205"));
     }
 
     #[test]
@@ -5829,6 +6088,30 @@ mod tests {
             args.iter().filter(|value| value.as_str() == "-re").count(),
             2
         );
+    }
+
+    #[test]
+    fn background_camera_fills_the_field_between_header_and_track_info() {
+        let mut config = BroadcastVideoCompositor::default();
+        config.camera_layout = "background".to_string();
+
+        assert_eq!(
+            camera_canvas_layout(&config),
+            CameraCanvasLayout {
+                width: 360,
+                height: 340,
+                x: 0,
+                y: 110,
+            }
+        );
+        let args = camera_capture_args(&config);
+        let filter = args
+            .windows(2)
+            .find(|pair| pair[0] == "-vf")
+            .map(|pair| &pair[1])
+            .unwrap();
+        assert!(filter.contains("scale=360:340:force_original_aspect_ratio=decrease"));
+        assert!(filter.contains("pad=360:640:0:110:color=black@0"));
     }
 
     #[test]
@@ -6047,5 +6330,60 @@ mod tests {
         assert_eq!(second.position, 2);
         assert_eq!(list_queue(&conn).unwrap().len(), 2);
         assert!(append_track(&mut conn, "lib", "3").is_err());
+    }
+
+    #[test]
+    fn reorder_changes_only_queued_slots_and_preserves_protected_entries() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        conn.execute_batch(
+            "
+            INSERT INTO broadcast_queue_entries VALUES
+              ('played', 'lib', '1', '/set', 'Set', '/one.wav', 'One', NULL, 10, 1, 'played', NULL, 'now', 'now'),
+              ('queued-a', 'lib', '2', '/set', 'Set', '/two.wav', 'Two', NULL, 20, 2, 'queued', NULL, 'now', 'now'),
+              ('playing', 'lib', '3', '/set', 'Set', '/three.wav', 'Three', NULL, 30, 3, 'playing', NULL, 'now', 'now'),
+              ('queued-b', 'lib', '4', '/set', 'Set', '/four.wav', 'Four', NULL, 40, 4, 'queued', NULL, 'now', 'now');
+            ",
+        )
+        .unwrap();
+
+        reorder_queued_entries(&mut conn, &["queued-b".to_string(), "queued-a".to_string()])
+            .unwrap();
+        let queue = list_queue(&conn).unwrap();
+
+        assert_eq!(
+            queue
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["played", "queued-b", "playing", "queued-a"]
+        );
+        assert_eq!(queue[0].status, "played");
+        assert_eq!(queue[2].status, "playing");
+
+        // A stale live snapshot may still include the row that has just become
+        // playing. It is ignored while the queued rows are still reordered.
+        reorder_queued_entries(
+            &mut conn,
+            &[
+                "queued-a".to_string(),
+                "playing".to_string(),
+                "queued-b".to_string(),
+            ],
+        )
+        .unwrap();
+        let queue = list_queue(&conn).unwrap();
+        assert_eq!(
+            queue
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["played", "queued-a", "playing", "queued-b"]
+        );
+        assert!(reorder_queued_entries(
+            &mut conn,
+            &["queued-a".to_string(), "queued-a".to_string()]
+        )
+        .is_err());
     }
 }

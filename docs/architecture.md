@@ -169,7 +169,8 @@ PCM pipe -> persistent destination publisher --------+
 5. The optional macOS camera compositor keeps a half-resolution transparent,
    paced BGRA program canvas connected to that same publisher through a named
    pipe. Preview/Program fader commands change its alpha frame by frame.
-   AVFoundation remains warm while RTMP is active. Position, size, device,
+   AVFoundation remains warm while RTMP is active. Card, full-width, and background compositions are available;
+   background mode fills the live field between the compact Rau header and track information. Position, size, device, composition,
    framing, orientation, mirror, and effect changes restart only camera capture and redraw that canvas;
    the publisher connection remains intact. Frame activity is monitored so a
    missing or repeated camera feed can be restarted independently.
@@ -190,8 +191,11 @@ PCM pipe -> persistent destination publisher --------+
    Audio Recording permission gates capture and application discovery.
 9. Track transitions update metadata through the Icecast admin endpoint only;
    RTMP destinations keep the continuous audio/video signal without that call.
-10. Stop, skip, microphone-live, source-mode, and camera-fader commands travel over an in-process channel. Interrupted
-   `playing` rows return to `queued` when a new session starts.
+10. Stop, skip, selected-track playback, microphone-live, source-mode, and camera-fader commands travel over an
+    in-process channel. Selecting a queue row stops only the current decoder and hands its id to the same worker;
+    the persistent publisher remains connected. Queue reordering updates only the position slots of `queued` rows,
+    leaving the current and historical rows protected. Interrupted `playing` rows return to `queued` when a new
+    session starts.
 11. A lost publisher is terminated and recreated with bounded reconnect delays;
     the current track returns to the queue instead of being marked as played.
     Logs redact the active Icecast password or RTMP stream key.

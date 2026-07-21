@@ -1462,6 +1462,8 @@ pub fn run() {
             broadcast::broadcast_append_playlist,
             broadcast::broadcast_append_draft,
             broadcast::broadcast_append_track,
+            broadcast::broadcast_play_queue_entry,
+            broadcast::broadcast_reorder_queue,
             broadcast::broadcast_remove_queue_entry,
             broadcast::broadcast_clear_queue,
             broadcast::broadcast_status,
