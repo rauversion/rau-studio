@@ -170,7 +170,7 @@ PCM pipe -> persistent destination publisher --------+
    paced BGRA program canvas connected to that same publisher through a named
    pipe. Preview/Program fader commands change its alpha frame by frame.
    AVFoundation remains warm while RTMP is active. Position, size, device,
-   mirror, and effect changes restart only camera capture and redraw that canvas;
+   framing, orientation, mirror, and effect changes restart only camera capture and redraw that canvas;
    the publisher connection remains intact. Frame activity is monitored so a
    missing or repeated camera feed can be restarted independently.
 6. The optional microphone is opened by the Rust process through CPAL/CoreAudio,

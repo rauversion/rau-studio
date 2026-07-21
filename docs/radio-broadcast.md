@@ -108,7 +108,7 @@ until cleared. The active row cannot be removed, but it can be skipped.
    kept only in the current frontend session and cleared when the broadcast is
    stopped.
 5. Optional: open **Video Studio**, enable a camera, choose its device,
-   position, size, effect, mirror, opacity, and AUTO duration, then save the
+   position, size, fit/crop framing, orientation, effect, mirror, opacity, and AUTO duration, then save the
    composition. The camera stays out of Program when the broadcast starts.
 6. Add tracks to the queue, configure any local inputs, confirm the FFmpeg
    preflight is ready, and choose **Salir al aire**.
@@ -116,8 +116,8 @@ until cleared. The active row cannot be removed, but it can be skipped.
    independently paced monochrome broadcast graphic. It shows the configured
    station name, encoding information, and the current artist/title. Wait for
    the image to appear in Live Producer.
-8. Open **Video Studio** while the signal is running. **PREVIEW** shows the
-   prepared camera; **PROGRAM** represents the composition being sent. Use the
+8. Open **Video Studio** while the signal is running. **PREVIEW** and **PROGRAM**
+   show the live camera while the modal is open; **PROGRAM** represents the composition being sent. Use the
    fader for an immediate manual mix, or **AUTO** for the saved timed dissolve.
    Returning the fader to zero makes the camera layer transparent while the
    branded RTMP video and warmed camera capture continue uninterrupted.
@@ -152,9 +152,9 @@ service's bitrate, resolution, and keyframe requirements before going live.
   take. Moving the fader changes the layer alpha frame by frame without
   replacing the publisher. Rau detects missing or repeated frames and restarts
   only camera capture when it freezes.
-- Camera position, size, mirror, effect, maximum opacity, and AUTO duration are
+- Camera position, size, fit/crop framing, orientation, mirror, effect, maximum opacity, and AUTO duration are
   persisted with the Broadcast profile and can be changed while live. Layout,
-  device, mirror, and effect changes rebuild only the transparent camera layer;
+  device, framing, orientation, mirror, and effect changes rebuild only the transparent camera layer;
   opacity and Preview/Program mix update directly.
 - The destination receives one continuous connection across track transitions.
   When the queue runs out, Rau Studio transmits silence rather than closing the

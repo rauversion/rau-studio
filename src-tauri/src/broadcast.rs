@@ -124,7 +124,7 @@ pub struct BroadcastProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct BroadcastVideoCompositor {
     enabled: bool,
     camera_device: String,
@@ -132,6 +132,8 @@ pub struct BroadcastVideoCompositor {
     camera_size: String,
     camera_effect: String,
     camera_mirror: bool,
+    camera_rotation_degrees: u16,
+    camera_framing: String,
     camera_opacity_percent: u16,
     transition_millis: u16,
 }
@@ -145,6 +147,8 @@ impl Default for BroadcastVideoCompositor {
             camera_size: "medium".to_string(),
             camera_effect: "mono".to_string(),
             camera_mirror: true,
+            camera_rotation_degrees: 180,
+            camera_framing: "contain".to_string(),
             camera_opacity_percent: 100,
             transition_millis: 800,
         }
@@ -1345,6 +1349,12 @@ fn validate_video_compositor(config: &BroadcastVideoCompositor) -> Result<(), St
     ) {
         return Err("Efecto de cámara inválido.".to_string());
     }
+    if !matches!(config.camera_rotation_degrees, 0 | 90 | 180 | 270) {
+        return Err("Orientación de cámara inválida.".to_string());
+    }
+    if !matches!(config.camera_framing.as_str(), "contain" | "cover") {
+        return Err("Encuadre de cámara inválido.".to_string());
+    }
     if config.camera_opacity_percent > 100 {
         return Err("La opacidad de cámara debe estar entre 0% y 100%.".to_string());
     }
@@ -2143,7 +2153,9 @@ fn run_camera_feeder(
                         || config.camera_position != next_config.camera_position
                         || config.camera_size != next_config.camera_size
                         || config.camera_effect != next_config.camera_effect
-                        || config.camera_mirror != next_config.camera_mirror;
+                        || config.camera_mirror != next_config.camera_mirror
+                        || config.camera_rotation_degrees != next_config.camera_rotation_degrees
+                        || config.camera_framing != next_config.camera_framing;
                     config = next_config;
                     maximum_alpha = maximum_camera_alpha(&config);
                     target_alpha = i32::from(
@@ -2468,9 +2480,24 @@ fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
         "settb=AVTB".to_string(),
         "setpts=PTS-STARTPTS".to_string(),
         format!("fps={RTMP_VIDEO_FPS}"),
-        "scale=480:480:force_original_aspect_ratio=increase".to_string(),
-        "crop=480:480".to_string(),
     ];
+    filters.extend(match config.camera_rotation_degrees {
+        90 => vec!["transpose=clock".to_string()],
+        180 => vec!["hflip".to_string(), "vflip".to_string()],
+        270 => vec!["transpose=cclock".to_string()],
+        _ => Vec::new(),
+    });
+    if config.camera_framing == "contain" {
+        filters.extend([
+            "scale=480:480:force_original_aspect_ratio=decrease".to_string(),
+            "pad=480:480:(ow-iw)/2:(oh-ih)/2:color=black".to_string(),
+        ]);
+    } else {
+        filters.extend([
+            "scale=480:480:force_original_aspect_ratio=increase".to_string(),
+            "crop=480:480".to_string(),
+        ]);
+    }
     if config.camera_mirror {
         filters.push("hflip".to_string());
     }
@@ -5624,6 +5651,26 @@ mod tests {
         input.video_compositor.camera_opacity_percent = 100;
         input.video_compositor.camera_position = "outside".to_string();
         assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.camera_rotation_degrees = 45;
+        assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.camera_framing = "zoom".to_string();
+        assert!(validate_profile(input).is_err());
+    }
+
+    #[test]
+    fn older_camera_compositor_configs_receive_the_orientation_default() {
+        let config = serde_json::from_str::<BroadcastVideoCompositor>(
+            r#"{"enabled":true,"cameraDevice":"MacBook Pro Camera","cameraPosition":"top_right","cameraSize":"medium","cameraEffect":"mono","cameraMirror":true,"cameraOpacityPercent":100,"transitionMillis":800}"#,
+        )
+        .unwrap();
+        assert_eq!(config.camera_rotation_degrees, 180);
+        assert_eq!(config.camera_framing, "contain");
     }
 
     #[test]
@@ -5650,8 +5697,10 @@ mod tests {
             .unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-f", "avfoundation"]));
         assert!(filter.contains("settb=AVTB,setpts=PTS-STARTPTS,fps=30"));
-        assert!(filter.contains("crop=480:480"));
+        assert!(filter.contains("force_original_aspect_ratio=decrease"));
+        assert!(filter.contains("pad=480:480:(ow-iw)/2:(oh-ih)/2:color=black"));
         assert!(filter.contains("hflip"));
+        assert!(filter.contains("vflip"));
         assert!(filter.contains("hue=s=0"));
         assert!(filter.contains("scale=150:150"));
         assert!(filter.contains("pad=360:640:186:180:color=black@0"));
@@ -5661,6 +5710,18 @@ mod tests {
         config.camera_size = "large".to_string();
         config.camera_position = "bottom_left".to_string();
         assert_eq!(camera_canvas_layout(&config), (205, 24, 411));
+
+        config.camera_rotation_degrees = 90;
+        config.camera_framing = "cover".to_string();
+        let args = camera_capture_args(&config);
+        let filter = args
+            .windows(2)
+            .find(|pair| pair[0] == "-vf")
+            .map(|pair| &pair[1])
+            .unwrap();
+        assert!(filter.contains("transpose=clock"));
+        assert!(filter.contains("force_original_aspect_ratio=increase"));
+        assert!(filter.contains("crop=480:480"));
     }
 
     #[test]

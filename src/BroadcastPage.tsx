@@ -79,6 +79,8 @@ type BroadcastVideoCompositor = {
   cameraSize: "small" | "medium" | "large" | string;
   cameraEffect: "clean" | "mono" | "contrast" | "dream" | string;
   cameraMirror: boolean;
+  cameraRotationDegrees: 0 | 90 | 180 | 270 | number;
+  cameraFraming: "contain" | "cover" | string;
   cameraOpacityPercent: number;
   transitionMillis: number;
 };
@@ -254,6 +256,8 @@ const defaultVideoCompositor: BroadcastVideoCompositor = {
   cameraSize: "medium",
   cameraEffect: "mono",
   cameraMirror: true,
+  cameraRotationDegrees: 180,
+  cameraFraming: "contain",
   cameraOpacityPercent: 100,
   transitionMillis: 800
 };
@@ -1687,6 +1691,7 @@ function VideoStudioModal({
 }) {
   const { t } = useI18n();
   const previewVideo = useRef<HTMLVideoElement | null>(null);
+  const programVideo = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [draftMix, setDraftMix] = useState(mixPercent);
@@ -1696,12 +1701,13 @@ function VideoStudioModal({
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     if (previewVideo.current) previewVideo.current.srcObject = null;
+    if (programVideo.current) programVideo.current.srcObject = null;
   }, []);
 
   useEffect(() => setDraftMix(mixPercent), [mixPercent]);
 
   useEffect(() => {
-    if (!open || !config.enabled || running) {
+    if (!open || !config.enabled) {
       stopPreview();
       return;
     }
@@ -1729,9 +1735,10 @@ function VideoStudioModal({
           return;
         }
         streamRef.current = stream;
-        if (previewVideo.current) {
-          previewVideo.current.srcObject = stream;
-          await previewVideo.current.play().catch(() => undefined);
+        for (const video of [previewVideo.current, programVideo.current]) {
+          if (!video) continue;
+          video.srcObject = stream;
+          await video.play().catch(() => undefined);
         }
       } catch (cause) {
         if (!disposed) setPreviewError(cause instanceof Error ? cause.message : String(cause));
@@ -1741,7 +1748,15 @@ function VideoStudioModal({
       disposed = true;
       stopPreview();
     };
-  }, [config.cameraDevice, config.enabled, mixPercent, open, running, stopPreview]);
+  }, [config.cameraDevice, config.enabled, open, stopPreview]);
+
+  useEffect(() => {
+    const stream = streamRef.current;
+    const video = programVideo.current;
+    if (!stream || !video) return;
+    video.srcObject = stream;
+    void video.play().catch(() => undefined);
+  }, [draftMix]);
 
   if (!open) return null;
 
@@ -1792,6 +1807,7 @@ function VideoStudioModal({
               cameraVisible={config.enabled && draftMix > 0}
               cameraOpacity={draftMix / 100}
               cameraPlaceholder={t("Cámara en Program")}
+              videoRef={programVideo}
               transitionMillis={config.transitionMillis}
             />
 
@@ -1886,19 +1902,36 @@ function VideoStudioModal({
               </Field>
             </div>
 
-            <Field label={t("Efecto") }>
-              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraEffect} disabled={!config.enabled} onChange={(event) => update({ cameraEffect: event.currentTarget.value })}>
-                <option value="clean">{t("Limpio")}</option>
-                <option value="mono">{t("Monocromo")}</option>
-                <option value="contrast">{t("Contraste editorial")}</option>
-                <option value="dream">{t("Dream blur")}</option>
-              </select>
-            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label={t("Efecto") }>
+                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraEffect} disabled={!config.enabled} onChange={(event) => update({ cameraEffect: event.currentTarget.value })}>
+                  <option value="clean">{t("Limpio")}</option>
+                  <option value="mono">{t("Monocromo")}</option>
+                  <option value="contrast">{t("Contraste editorial")}</option>
+                  <option value="dream">{t("Dream blur")}</option>
+                </select>
+              </Field>
+              <Field label={t("Orientación") }>
+                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraRotationDegrees} disabled={!config.enabled} onChange={(event) => update({ cameraRotationDegrees: Number(event.currentTarget.value) })}>
+                  <option value={0}>{t("Normal · 0°")}</option>
+                  <option value={90}>{t("Girar 90°")}</option>
+                  <option value={180}>{t("Girar 180°")}</option>
+                  <option value={270}>{t("Girar 270°")}</option>
+                </select>
+              </Field>
+            </div>
 
             <label className="flex items-center gap-2 text-xs text-white/65">
               <input type="checkbox" checked={config.cameraMirror} disabled={!config.enabled} onChange={(event) => update({ cameraMirror: event.currentTarget.checked })} />
               {t("Espejar cámara")}
             </label>
+
+            <Field label={t("Encuadre") }>
+              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraFraming} disabled={!config.enabled} onChange={(event) => update({ cameraFraming: event.currentTarget.value })}>
+                <option value="contain">{t("Ajustar · mostrar imagen completa")}</option>
+                <option value="cover">{t("Rellenar · recortar bordes")}</option>
+              </select>
+            </Field>
 
             <Field label={t("Opacidad máxima: {value}%", { value: config.cameraOpacityPercent })}>
               <input type="range" min={20} max={100} step={5} value={config.cameraOpacityPercent} disabled={!config.enabled} onChange={(event) => update({ cameraOpacityPercent: Number(event.currentTarget.value) })} />
@@ -1992,8 +2025,11 @@ function StudioMonitor({
                 ref={videoRef}
                 muted
                 playsInline
-                className="h-full w-full object-cover"
-                style={{ filter: cameraFilter[config.cameraEffect] ?? "none", transform: config.cameraMirror ? "scaleX(-1)" : undefined }}
+                className={cn("h-full w-full bg-black", config.cameraFraming === "contain" ? "object-contain" : "object-cover")}
+                style={{
+                  filter: cameraFilter[config.cameraEffect] ?? "none",
+                  transform: `rotate(${config.cameraRotationDegrees ?? 0}deg) scaleX(${config.cameraMirror ? -1 : 1})`
+                }}
               />
             ) : (
               <div className="grid h-full place-items-center bg-gradient-to-br from-zinc-300 via-zinc-700 to-black p-2 text-center">
