@@ -138,6 +138,11 @@ pub struct BroadcastVideoCompositor {
     camera_rotation_degrees: u16,
     camera_framing: String,
     camera_layout: String,
+    camera_x: u16,
+    camera_y: u16,
+    camera_width: u16,
+    camera_height: u16,
+    camera_z_index: u16,
     camera_opacity_percent: u16,
     screen_enabled: bool,
     screen_label: String,
@@ -148,6 +153,11 @@ pub struct BroadcastVideoCompositor {
     screen_rotation_degrees: u16,
     screen_framing: String,
     screen_layout: String,
+    screen_x: u16,
+    screen_y: u16,
+    screen_width: u16,
+    screen_height: u16,
+    screen_z_index: u16,
     screen_opacity_percent: u16,
     transition_millis: u16,
 }
@@ -166,6 +176,11 @@ impl Default for BroadcastVideoCompositor {
             camera_rotation_degrees: 180,
             camera_framing: "contain".to_string(),
             camera_layout: "wide".to_string(),
+            camera_x: 0,
+            camera_y: 120,
+            camera_width: 360,
+            camera_height: 225,
+            camera_z_index: 2,
             camera_opacity_percent: 100,
             screen_enabled: false,
             screen_label: String::new(),
@@ -176,6 +191,11 @@ impl Default for BroadcastVideoCompositor {
             screen_rotation_degrees: 0,
             screen_framing: "contain".to_string(),
             screen_layout: "background".to_string(),
+            screen_x: 0,
+            screen_y: 110,
+            screen_width: 360,
+            screen_height: 340,
+            screen_z_index: 1,
             screen_opacity_percent: 100,
             transition_millis: 800,
         }
@@ -713,7 +733,7 @@ struct WorkerVisualState {
 
 struct BrowserVisualFrame {
     sequence: u64,
-    image: Vec<u8>,
+    pixels: Vec<u8>,
 }
 
 impl WorkerHandle {
@@ -997,10 +1017,14 @@ impl BroadcastManager {
         Ok(self.runtime.snapshot())
     }
 
-    fn push_visual_frame(&self, sequence: u64, image: Vec<u8>) -> Result<(), String> {
-        if image.is_empty() || image.len() > 4_000_000 {
-            return Err("Cuadro visual vacío o demasiado grande.".to_string());
+    fn push_visual_frame(&self, sequence: u64, mut pixels: Vec<u8>) -> Result<(), String> {
+        if pixels.len() != CAMERA_FRAME_BYTES {
+            return Err(format!(
+                "Cuadro visual inválido: se esperaban {CAMERA_FRAME_BYTES} bytes RGBA y llegaron {}.",
+                pixels.len()
+            ));
         }
+        rgba_to_bgra(&mut pixels);
         self.cleanup_finished_worker();
         let worker = self
             .worker
@@ -1014,10 +1038,16 @@ impl BroadcastManager {
                 .as_ref()
                 .is_none_or(|current| sequence > current.sequence)
             {
-                *latest = Some(BrowserVisualFrame { sequence, image });
+                *latest = Some(BrowserVisualFrame { sequence, pixels });
             }
         }
         Ok(())
+    }
+}
+
+fn rgba_to_bgra(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
     }
 }
 
@@ -1344,10 +1374,10 @@ pub fn broadcast_push_visual_frame(
     sequence: u64,
     frame_base64: String,
 ) -> Result<(), String> {
-    let image = base64::engine::general_purpose::STANDARD
+    let pixels = base64::engine::general_purpose::STANDARD
         .decode(frame_base64)
         .map_err(|error| format!("Cuadro visual inválido: {error}"))?;
-    manager.push_visual_frame(sequence, image)
+    manager.push_visual_frame(sequence, pixels)
 }
 
 fn validate_profile(mut input: BroadcastProfileInput) -> Result<BroadcastProfileInput, String> {
@@ -1484,10 +1514,18 @@ fn validate_video_compositor(config: &BroadcastVideoCompositor) -> Result<(), St
     }
     if !matches!(
         config.camera_layout.as_str(),
-        "card" | "wide" | "background"
+        "card" | "wide" | "background" | "free"
     ) {
         return Err("Composición de cámara inválida.".to_string());
     }
+    validate_visual_layer_geometry(
+        "cámara",
+        config.camera_x,
+        config.camera_y,
+        config.camera_width,
+        config.camera_height,
+        config.camera_z_index,
+    )?;
     if config.camera_opacity_percent > 100 {
         return Err("La opacidad de cámara debe estar entre 0% y 100%.".to_string());
     }
@@ -1514,15 +1552,42 @@ fn validate_video_compositor(config: &BroadcastVideoCompositor) -> Result<(), St
     }
     if !matches!(
         config.screen_layout.as_str(),
-        "card" | "wide" | "background"
+        "card" | "wide" | "background" | "free"
     ) {
         return Err("Composición de pantalla inválida.".to_string());
     }
+    validate_visual_layer_geometry(
+        "pantalla",
+        config.screen_x,
+        config.screen_y,
+        config.screen_width,
+        config.screen_height,
+        config.screen_z_index,
+    )?;
     if config.screen_opacity_percent > 100 {
         return Err("La opacidad de pantalla debe estar entre 0% y 100%.".to_string());
     }
     if config.transition_millis > 3_000 {
         return Err("La transición de cámara no puede superar 3 segundos.".to_string());
+    }
+    Ok(())
+}
+
+fn validate_visual_layer_geometry(
+    label: &str,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    z_index: u16,
+) -> Result<(), String> {
+    if width < 40
+        || height < 40
+        || usize::from(x) + usize::from(width) > CAMERA_FRAME_WIDTH
+        || usize::from(y) + usize::from(height) > CAMERA_FRAME_HEIGHT
+        || z_index > 100
+    {
+        return Err(format!("Geometría libre de {label} inválida."));
     }
     Ok(())
 }
@@ -2212,21 +2277,11 @@ impl CameraFeeder {
 
 struct CameraCapture {
     child: Child,
-    input: Option<ChildStdin>,
     latest_frame: Arc<Mutex<Option<CameraFrame>>>,
 }
 
 impl CameraCapture {
-    fn push_image(&mut self, image: &[u8]) -> Result<(), String> {
-        self.input
-            .as_mut()
-            .ok_or_else(|| "La captura visual no acepta cuadros del estudio.".to_string())?
-            .write_all(image)
-            .map_err(|error| format!("No se pudo enviar el cuadro visual a FFmpeg: {error}"))
-    }
-
     fn terminate(mut self) {
-        drop(self.input.take());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -2252,29 +2307,42 @@ fn run_camera_feeder(
     let mut current_alpha = 0i32;
     let mut target_alpha = 0i32;
     let mut transition_frames = 0u32;
-    let mut capture = spawn_camera_capture(&app, &config, &runtime).ok();
+    let mut capture = if config.capture_mode == "browser" {
+        None
+    } else {
+        spawn_camera_capture(&app, &config, &runtime).ok()
+    };
+    let mut browser_ready = false;
     let mut pushed_visual_sequence = 0u64;
     let mut capture_started_at = capture.as_ref().map(|_| Instant::now());
     let mut last_capture_frame_at: Option<Instant> = None;
-    let mut next_capture_retry_at = capture
-        .is_none()
+    let mut next_capture_retry_at = (config.capture_mode != "browser" && capture.is_none())
         .then(|| Instant::now() + Duration::from_millis(CAMERA_CAPTURE_RETRY_MILLIS));
+    let source_ready = config.capture_mode == "browser" && browser_ready || capture.is_some();
     runtime.update_camera(
         &app,
         camera_status(
             &config,
-            capture.is_some(),
+            source_ready,
             false,
             0,
-            if capture.is_some() {
+            if config.capture_mode == "browser" {
+                "Estudio visual preparado; esperando el primer cuadro de Preview."
+            } else if capture.is_some() {
                 "Fuente visual capturando en Preview; fuera de Program."
             } else {
                 "No se pudo preparar la fuente visual; se reintentará automáticamente."
             },
         ),
-        if capture.is_some() { "info" } else { "warning" },
-        if capture.is_some() {
+        if config.capture_mode == "browser" || capture.is_some() {
+            "info"
+        } else {
+            "warning"
+        },
+        if source_ready {
             "camera_ready"
+        } else if config.capture_mode == "browser" {
+            "camera_waiting_frame"
         } else {
             "camera_waiting"
         },
@@ -2293,7 +2361,7 @@ fn run_camera_feeder(
                     requested_mix_percent = mix_percent;
                     let next_target =
                         i32::from(u16::from(mix_percent).saturating_mul(maximum_alpha) / 100);
-                    if next_target > 0 && capture.is_none() {
+                    if next_target > 0 && config.capture_mode != "browser" && capture.is_none() {
                         match spawn_camera_capture(&app, &config, &runtime) {
                             Ok(next_capture) => {
                                 capture = Some(next_capture);
@@ -2332,7 +2400,11 @@ fn run_camera_feeder(
                         &app,
                         camera_status(
                             &config,
-                            capture.is_some(),
+                            if config.capture_mode == "browser" {
+                                browser_ready
+                            } else {
+                                capture.is_some()
+                            },
                             mix_percent > 0,
                             mix_percent,
                             if mix_percent > 0 {
@@ -2357,7 +2429,11 @@ fn run_camera_feeder(
                                 || config.camera_rotation_degrees
                                     != next_config.camera_rotation_degrees
                                 || config.camera_framing != next_config.camera_framing
-                                || config.camera_layout != next_config.camera_layout));
+                                || config.camera_layout != next_config.camera_layout
+                                || config.camera_x != next_config.camera_x
+                                || config.camera_y != next_config.camera_y
+                                || config.camera_width != next_config.camera_width
+                                || config.camera_height != next_config.camera_height));
                     config = next_config;
                     maximum_alpha = maximum_camera_alpha(&config);
                     target_alpha = i32::from(
@@ -2369,28 +2445,38 @@ fn run_camera_feeder(
                         if let Some(capture) = capture.take() {
                             capture.terminate();
                         }
-                        match spawn_camera_capture(&app, &config, &runtime) {
-                            Ok(next_capture) => {
-                                capture = Some(next_capture);
-                                capture_started_at = Some(Instant::now());
-                                last_capture_frame_at = None;
-                                next_capture_retry_at = None;
-                            }
-                            Err(_) => {
-                                capture_started_at = None;
-                                last_capture_frame_at = None;
-                                next_capture_retry_at = Some(
-                                    Instant::now()
-                                        + Duration::from_millis(CAMERA_CAPTURE_RETRY_MILLIS),
-                                );
+                        capture_started_at = None;
+                        last_capture_frame_at = None;
+                        if config.capture_mode == "browser" {
+                            browser_ready = false;
+                            pushed_visual_sequence = 0;
+                            next_capture_retry_at = None;
+                        } else {
+                            match spawn_camera_capture(&app, &config, &runtime) {
+                                Ok(next_capture) => {
+                                    capture = Some(next_capture);
+                                    capture_started_at = Some(Instant::now());
+                                    next_capture_retry_at = None;
+                                }
+                                Err(_) => {
+                                    next_capture_retry_at = Some(
+                                        Instant::now()
+                                            + Duration::from_millis(CAMERA_CAPTURE_RETRY_MILLIS),
+                                    );
+                                }
                             }
                         }
                     }
+                    let source_ready = if config.capture_mode == "browser" {
+                        browser_ready
+                    } else {
+                        capture.is_some()
+                    };
                     runtime.update_camera(
                         &app,
                         camera_status(
                             &config,
-                            capture.is_some(),
+                            source_ready,
                             requested_mix_percent > 0,
                             requested_mix_percent,
                             if restart_capture {
@@ -2399,7 +2485,11 @@ fn run_camera_feeder(
                                 "Ajustes visuales aplicados en vivo."
                             },
                         ),
-                        if capture.is_some() { "info" } else { "warning" },
+                        if source_ready || config.capture_mode == "browser" {
+                            "info"
+                        } else {
+                            "warning"
+                        },
                         "camera_settings_updated",
                     );
                 }
@@ -2407,20 +2497,34 @@ fn run_camera_feeder(
             }
         }
 
-        if let Some(active) = capture.as_mut() {
-            if config.capture_mode == "browser" {
-                let next_image = visual_frame.lock().ok().and_then(|latest| {
-                    latest.as_ref().and_then(|frame| {
-                        (frame.sequence > pushed_visual_sequence)
-                            .then(|| (frame.sequence, frame.image.clone()))
-                    })
-                });
-                if let Some((sequence, image)) = next_image {
-                    if active.push_image(&image).is_ok() {
-                        pushed_visual_sequence = sequence;
-                    }
+        if config.capture_mode == "browser" {
+            let next_frame = visual_frame.lock().ok().and_then(|latest| {
+                latest.as_ref().and_then(|frame| {
+                    (frame.sequence > pushed_visual_sequence)
+                        .then(|| (frame.sequence, frame.pixels.clone()))
+                })
+            });
+            if let Some((sequence, pixels)) = next_frame {
+                raw_frame = pixels;
+                pushed_visual_sequence = sequence;
+                last_capture_frame_at = Some(Instant::now());
+                if !browser_ready {
+                    browser_ready = true;
+                    runtime.update_camera(
+                        &app,
+                        camera_status(
+                            &config,
+                            true,
+                            requested_mix_percent > 0,
+                            requested_mix_percent,
+                            "Primer cuadro recibido; fuentes visuales listas en Preview.",
+                        ),
+                        "info",
+                        "camera_ready",
+                    );
                 }
             }
+        } else if let Some(active) = capture.as_mut() {
             let next_frame = active
                 .latest_frame
                 .lock()
@@ -2456,7 +2560,8 @@ fn run_camera_feeder(
             }
         }
 
-        let camera_stalled = capture.is_some()
+        let camera_stalled = config.capture_mode != "browser"
+            && capture.is_some()
             && target_alpha > 0
             && camera_capture_stalled(capture_started_at, last_capture_frame_at);
         if camera_stalled {
@@ -2508,7 +2613,8 @@ fn run_camera_feeder(
             }
         }
 
-        if capture.is_none()
+        if config.capture_mode != "browser"
+            && capture.is_none()
             && next_capture_retry_at.is_some_and(|retry_at| Instant::now() >= retry_at)
         {
             match spawn_camera_capture(&app, &config, &runtime) {
@@ -2564,7 +2670,11 @@ fn run_camera_feeder(
                     &app,
                     camera_status(
                         &config,
-                        true,
+                        if config.capture_mode == "browser" {
+                            browser_ready
+                        } else {
+                            capture.is_some()
+                        },
                         mix_percent > 0,
                         mix_percent,
                         if mix_percent > 0 {
@@ -2643,18 +2753,9 @@ fn spawn_camera_capture(
     config: &BroadcastVideoCompositor,
     runtime: &Arc<RuntimeState>,
 ) -> Result<CameraCapture, String> {
-    let browser_capture = config.capture_mode == "browser";
     let mut child = system::ffmpeg_command(app)
-        .args(if browser_capture {
-            browser_visual_capture_args()
-        } else {
-            camera_capture_args(config)
-        })
-        .stdin(if browser_capture {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .args(camera_capture_args(config))
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2697,39 +2798,10 @@ fn spawn_camera_capture(
             }
         });
     }
-    let input = child.stdin.take();
     Ok(CameraCapture {
         child,
-        input,
         latest_frame,
     })
-}
-
-fn browser_visual_capture_args() -> Vec<String> {
-    vec![
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "warning".to_string(),
-        "-nostdin".to_string(),
-        "-f".to_string(),
-        "image2pipe".to_string(),
-        "-framerate".to_string(),
-        "24".to_string(),
-        "-vcodec".to_string(),
-        "webp".to_string(),
-        "-i".to_string(),
-        "pipe:0".to_string(),
-        "-an".to_string(),
-        "-vf".to_string(),
-        format!("scale={CAMERA_FRAME_WIDTH}:{CAMERA_FRAME_HEIGHT}:flags=bilinear,format=bgra"),
-        "-fps_mode".to_string(),
-        "passthrough".to_string(),
-        "-pix_fmt".to_string(),
-        "bgra".to_string(),
-        "-f".to_string(),
-        "rawvideo".to_string(),
-        "pipe:1".to_string(),
-    ]
 }
 
 fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
@@ -2825,6 +2897,14 @@ struct CameraCanvasLayout {
 
 fn camera_canvas_layout(config: &BroadcastVideoCompositor) -> CameraCanvasLayout {
     match config.camera_layout.as_str() {
+        "free" => {
+            return CameraCanvasLayout {
+                width: usize::from(config.camera_width),
+                height: usize::from(config.camera_height),
+                x: usize::from(config.camera_x),
+                y: usize::from(config.camera_y),
+            };
+        }
         "background" => {
             return CameraCanvasLayout {
                 width: CAMERA_FRAME_WIDTH,
@@ -6151,6 +6231,13 @@ mod tests {
         input.output_kind = OUTPUT_KIND_RTMP.to_string();
         input.video_compositor.screen_position = "outside".to_string();
         assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.camera_layout = "free".to_string();
+        input.video_compositor.camera_x = 300;
+        input.video_compositor.camera_width = 100;
+        assert!(validate_profile(input).is_err());
     }
 
     #[test]
@@ -6165,6 +6252,9 @@ mod tests {
         assert_eq!(config.camera_rotation_degrees, 180);
         assert_eq!(config.camera_framing, "contain");
         assert_eq!(config.camera_layout, "wide");
+        assert_eq!((config.camera_x, config.camera_y), (0, 120));
+        assert_eq!((config.camera_width, config.camera_height), (360, 225));
+        assert_eq!((config.screen_z_index, config.camera_z_index), (1, 2));
     }
 
     #[test]
@@ -6229,15 +6319,28 @@ mod tests {
         assert!(filter.contains("transpose=clock"));
         assert!(filter.contains("force_original_aspect_ratio=increase"));
         assert!(filter.contains("crop=205:205"));
+
+        config.camera_layout = "free".to_string();
+        config.camera_x = 42;
+        config.camera_y = 210;
+        config.camera_width = 180;
+        config.camera_height = 120;
+        assert_eq!(
+            camera_canvas_layout(&config),
+            CameraCanvasLayout {
+                width: 180,
+                height: 120,
+                x: 42,
+                y: 210,
+            }
+        );
     }
 
     #[test]
-    fn browser_visual_capture_accepts_cross_platform_webp_frames() {
-        let args = browser_visual_capture_args();
-        assert!(args.windows(2).any(|pair| pair == ["-f", "image2pipe"]));
-        assert!(args.windows(2).any(|pair| pair == ["-vcodec", "webp"]));
-        assert!(args.windows(2).any(|pair| pair == ["-i", "pipe:0"]));
-        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "bgra"]));
+    fn browser_visual_frames_convert_rgba_to_bgra_without_losing_alpha() {
+        let mut pixels = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        rgba_to_bgra(&mut pixels);
+        assert_eq!(pixels, vec![30, 20, 10, 40, 70, 60, 50, 80]);
     }
 
     #[test]

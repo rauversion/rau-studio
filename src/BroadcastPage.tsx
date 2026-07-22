@@ -87,7 +87,12 @@ type BroadcastVideoCompositor = {
   cameraMirror: boolean;
   cameraRotationDegrees: 0 | 90 | 180 | 270 | number;
   cameraFraming: "contain" | "cover" | string;
-  cameraLayout: "card" | "wide" | "background" | string;
+  cameraLayout: "card" | "wide" | "background" | "free" | string;
+  cameraX: number;
+  cameraY: number;
+  cameraWidth: number;
+  cameraHeight: number;
+  cameraZIndex: number;
   cameraOpacityPercent: number;
   screenEnabled: boolean;
   screenLabel: string;
@@ -97,7 +102,12 @@ type BroadcastVideoCompositor = {
   screenMirror: boolean;
   screenRotationDegrees: number;
   screenFraming: "contain" | "cover" | string;
-  screenLayout: "card" | "wide" | "background" | string;
+  screenLayout: "card" | "wide" | "background" | "free" | string;
+  screenX: number;
+  screenY: number;
+  screenWidth: number;
+  screenHeight: number;
+  screenZIndex: number;
   screenOpacityPercent: number;
   transitionMillis: number;
 };
@@ -279,6 +289,11 @@ const defaultVideoCompositor: BroadcastVideoCompositor = {
   cameraRotationDegrees: 180,
   cameraFraming: "contain",
   cameraLayout: "wide",
+  cameraX: 0,
+  cameraY: 120,
+  cameraWidth: 360,
+  cameraHeight: 225,
+  cameraZIndex: 2,
   cameraOpacityPercent: 100,
   screenEnabled: false,
   screenLabel: "",
@@ -289,6 +304,11 @@ const defaultVideoCompositor: BroadcastVideoCompositor = {
   screenRotationDegrees: 0,
   screenFraming: "contain",
   screenLayout: "background",
+  screenX: 0,
+  screenY: 110,
+  screenWidth: 360,
+  screenHeight: 340,
+  screenZIndex: 1,
   screenOpacityPercent: 100,
   transitionMillis: 800
 };
@@ -1861,11 +1881,15 @@ function VideoStudioModal({
   const [draftMix, setDraftMix] = useState(mixPercent);
   const [handoffPending, setHandoffPending] = useState(false);
   const [activeLayer, setActiveLayer] = useState<"camera" | "screen">("camera");
+  const [gestureConfig, setGestureConfig] = useState<BroadcastVideoCompositor | null>(null);
   const [cameraAvailable, setCameraAvailable] = useState(false);
   const [screenAvailable, setScreenAvailable] = useState(false);
   const [browserCameras, setBrowserCameras] = useState<BroadcastCameraDevice[]>([]);
   const cameraDevices = [...devices.filter((device) => device.kind === "camera"), ...browserCameras]
     .filter((device, index, all) => all.findIndex((candidate) => candidate.label === device.label) === index);
+  const studioConfig = gestureConfig ?? config;
+  const studioConfigRef = useRef(studioConfig);
+  studioConfigRef.current = studioConfig;
 
   const update = useCallback((patch: Partial<BroadcastVideoCompositor>) => {
     onChange({ ...config, ...patch, captureMode: "browser" });
@@ -1998,41 +2022,40 @@ function VideoStudioModal({
       const context = canvas?.getContext("2d");
       if (canvas && context) {
         context.clearRect(0, 0, canvas.width, canvas.height);
-        if (config.screenEnabled && screenAvailable && screenVideo.current) {
-          drawVisualLayer(context, screenVideo.current, visualLayerConfig(config, "screen"));
-        }
-        if (config.cameraEnabled && cameraAvailable && cameraVideo.current) {
-          drawVisualLayer(context, cameraVideo.current, visualLayerConfig(config, "camera"));
-        }
+        const currentConfig = studioConfigRef.current;
+        const layers = [
+          currentConfig.screenEnabled && screenAvailable && screenVideo.current
+            ? { key: "screen" as const, video: screenVideo.current, config: visualLayerConfig(currentConfig, "screen") }
+            : null,
+          currentConfig.cameraEnabled && cameraAvailable && cameraVideo.current
+            ? { key: "camera" as const, video: cameraVideo.current, config: visualLayerConfig(currentConfig, "camera") }
+            : null
+        ].filter((layer): layer is NonNullable<typeof layer> => Boolean(layer))
+          .sort((left, right) => left.config.zIndex - right.config.zIndex);
+        for (const layer of layers) drawVisualLayer(context, layer.video, layer.config);
         for (const monitor of [previewCanvas.current, programCanvas.current]) {
           const monitorContext = monitor?.getContext("2d");
           if (!monitor || !monitorContext) continue;
           monitorContext.clearRect(0, 0, monitor.width, monitor.height);
           monitorContext.drawImage(canvas, 0, 0);
         }
-        if (running && config.enabled && now - lastUploadAt >= 1000 / 24 && !uploadPending.current) {
+        if (running && currentConfig.enabled && layers.length > 0 && now - lastUploadAt >= 1000 / 24 && !uploadPending.current) {
           lastUploadAt = now;
           uploadPending.current = true;
-          canvas.toBlob((blob) => {
-            if (!blob) {
-              uploadPending.current = false;
-              return;
-            }
-            void blob.arrayBuffer()
-              .then((buffer) => invoke("broadcast_push_visual_frame", {
-                sequence: ++visualSequence.current,
-                frameBase64: arrayBufferToBase64(buffer)
-              }))
-              .catch((cause) => setPreviewError(errorMessage(cause, locale)))
-              .finally(() => { uploadPending.current = false; });
-          }, "image/webp", 0.9);
+          const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+          void invoke("broadcast_push_visual_frame", {
+            sequence: ++visualSequence.current,
+            frameBase64: bytesToBase64(pixels)
+          })
+            .catch((cause) => setPreviewError(errorMessage(cause, locale)))
+            .finally(() => { uploadPending.current = false; });
         }
       }
       frameRequest = requestAnimationFrame(render);
     };
     frameRequest = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frameRequest);
-  }, [cameraAvailable, config, locale, running, screenAvailable]);
+  }, [cameraAvailable, locale, running, screenAvailable]);
 
   const faderEnabled = running && config.enabled && cameraReady;
   const take = async (nextMix: number, transitionMillis: number) => {
@@ -2046,7 +2069,15 @@ function VideoStudioModal({
     }
   };
 
-  const layer = visualLayerConfig(config, activeLayer);
+  const layer = visualLayerConfig(studioConfig, activeLayer);
+  const changeLayerRect = useCallback((source: "camera" | "screen", rect: VisualLayerRect, commit: boolean) => {
+    const next = applyVisualLayerRect(config, source, rect);
+    setGestureConfig(next);
+    if (commit) {
+      onChange({ ...next, captureMode: "browser" });
+      setGestureConfig(null);
+    }
+  }, [config, onChange]);
   const updateLayer = (patch: Partial<VisualLayerConfig>) => {
     if (activeLayer === "camera") {
       update({
@@ -2071,6 +2102,15 @@ function VideoStudioModal({
         screenOpacityPercent: patch.opacityPercent ?? config.screenOpacityPercent
       });
     }
+  };
+  const activeZIndex = activeLayer === "camera" ? studioConfig.cameraZIndex : studioConfig.screenZIndex;
+  const otherZIndex = activeLayer === "camera" ? studioConfig.screenZIndex : studioConfig.cameraZIndex;
+  const setLayerDepth = (front: boolean) => {
+    const foreground = front ? 2 : 1;
+    const background = front ? 1 : 2;
+    update(activeLayer === "camera"
+      ? { cameraZIndex: foreground, screenZIndex: background }
+      : { screenZIndex: foreground, cameraZIndex: background });
   };
 
   const captureElements = (
@@ -2105,6 +2145,11 @@ function VideoStudioModal({
               trackTitle={trackTitle}
               visualVisible={config.enabled}
               canvasRef={previewCanvas}
+              visualConfig={studioConfig}
+              interactive
+              selectedLayer={activeLayer}
+              onSelectLayer={setActiveLayer}
+              onLayerRectChange={changeLayerRect}
               visualAvailable={(config.cameraEnabled && cameraAvailable) || (config.screenEnabled && screenAvailable)}
               visualPlaceholder={previewError ? t("Vista previa no disponible") : t("Activa una cámara o elige una pantalla o ventana")}
             />
@@ -2115,6 +2160,7 @@ function VideoStudioModal({
               visualVisible={config.enabled && draftMix > 0}
               visualOpacity={draftMix / 100}
               canvasRef={programCanvas}
+              visualConfig={studioConfig}
               visualAvailable={(config.cameraEnabled && cameraAvailable) || (config.screenEnabled && screenAvailable)}
               visualPlaceholder={t("Fuentes en Program")}
               transitionMillis={config.transitionMillis}
@@ -2240,8 +2286,21 @@ function VideoStudioModal({
                 <option value="card">{t("Tarjeta")}</option>
                 <option value="wide">{t("Ancho completo")}</option>
                 <option value="background">{t("Fondo")}</option>
+                <option value="free">{t("Libre · mover en Preview")}</option>
               </select>
             </Field>
+
+            <div className="flex items-center justify-between gap-2 rounded-md border border-white/10 bg-white/[.03] p-2">
+              <span className="text-[11px] text-white/45">{t("Orden de capa")} · Z{activeZIndex}</span>
+              <div className="flex gap-1">
+                <Button type="button" size="sm" variant="secondary" disabled={activeZIndex > otherZIndex} onClick={() => setLayerDepth(true)}>
+                  <ArrowUp className="h-3.5 w-3.5" />{t("Al frente")}
+                </Button>
+                <Button type="button" size="sm" variant="secondary" disabled={activeZIndex < otherZIndex} onClick={() => setLayerDepth(false)}>
+                  <ArrowDown className="h-3.5 w-3.5" />{t("Al fondo")}
+                </Button>
+              </div>
+            </div>
 
             <div className="grid grid-cols-2 gap-3">
               <Field label={t("Posición") }>
@@ -2320,6 +2379,11 @@ type VisualLayerConfig = {
   layout: string;
   position: string;
   size: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  zIndex: number;
   effect: string;
   mirror: boolean;
   rotationDegrees: number;
@@ -2327,11 +2391,46 @@ type VisualLayerConfig = {
   opacityPercent: number;
 };
 
+type VisualLayerRect = { x: number; y: number; width: number; height: number };
+
+function applyVisualLayerRect(
+  config: BroadcastVideoCompositor,
+  layer: "camera" | "screen",
+  rect: VisualLayerRect
+): BroadcastVideoCompositor {
+  const rounded = {
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height)
+  };
+  return layer === "camera" ? {
+    ...config,
+    cameraLayout: "free",
+    cameraX: rounded.x,
+    cameraY: rounded.y,
+    cameraWidth: rounded.width,
+    cameraHeight: rounded.height
+  } : {
+    ...config,
+    screenLayout: "free",
+    screenX: rounded.x,
+    screenY: rounded.y,
+    screenWidth: rounded.width,
+    screenHeight: rounded.height
+  };
+}
+
 function visualLayerConfig(config: BroadcastVideoCompositor, layer: "camera" | "screen"): VisualLayerConfig {
   return layer === "camera" ? {
     layout: config.cameraLayout,
     position: config.cameraPosition,
     size: config.cameraSize,
+    x: config.cameraX,
+    y: config.cameraY,
+    width: config.cameraWidth,
+    height: config.cameraHeight,
+    zIndex: config.cameraZIndex,
     effect: config.cameraEffect,
     mirror: config.cameraMirror,
     rotationDegrees: config.cameraRotationDegrees,
@@ -2341,6 +2440,11 @@ function visualLayerConfig(config: BroadcastVideoCompositor, layer: "camera" | "
     layout: config.screenLayout,
     position: config.screenPosition,
     size: config.screenSize,
+    x: config.screenX,
+    y: config.screenY,
+    width: config.screenWidth,
+    height: config.screenHeight,
+    zIndex: config.screenZIndex,
     effect: config.screenEffect,
     mirror: config.screenMirror,
     rotationDegrees: config.screenRotationDegrees,
@@ -2350,6 +2454,7 @@ function visualLayerConfig(config: BroadcastVideoCompositor, layer: "camera" | "
 }
 
 function visualLayerRect(config: VisualLayerConfig) {
+  if (config.layout === "free") return { x: config.x, y: config.y, width: config.width, height: config.height };
   if (config.layout === "background") return { x: 0, y: 110, width: 360, height: 340 };
   if (config.layout === "wide") return { x: 0, y: 120, width: 360, height: 225 };
   const size = config.size === "small" ? 105 : config.size === "large" ? 205 : 150;
@@ -2397,8 +2502,7 @@ function drawVisualLayer(context: CanvasRenderingContext2D, video: HTMLVideoElem
   context.restore();
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer) {
-  const bytes = new Uint8Array(buffer);
+function bytesToBase64(bytes: Uint8Array | Uint8ClampedArray) {
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 32_768) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
@@ -2415,6 +2519,11 @@ function StudioMonitor({
   visualAvailable,
   visualPlaceholder,
   canvasRef,
+  visualConfig,
+  interactive = false,
+  selectedLayer = "camera",
+  onSelectLayer,
+  onLayerRectChange,
   transitionMillis = 0
 }: {
   label: string;
@@ -2425,8 +2534,64 @@ function StudioMonitor({
   visualAvailable: boolean;
   visualPlaceholder: string;
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  visualConfig: BroadcastVideoCompositor;
+  interactive?: boolean;
+  selectedLayer?: "camera" | "screen";
+  onSelectLayer?: (layer: "camera" | "screen") => void;
+  onLayerRectChange?: (layer: "camera" | "screen", rect: VisualLayerRect, commit: boolean) => void;
   transitionMillis?: number;
 }) {
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const beginLayerGesture = (
+    event: React.PointerEvent<HTMLElement>,
+    layer: "camera" | "screen",
+    mode: "move" | "resize"
+  ) => {
+    if (!interactive || !onLayerRectChange) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelectLayer?.(layer);
+    const stage = stageRef.current;
+    if (!stage) return;
+    const bounds = stage.getBoundingClientRect();
+    const start = visualLayerRect(visualLayerConfig(visualConfig, layer));
+    const startPointer = { x: event.clientX, y: event.clientY };
+    let latest = start;
+    let changed = false;
+    const move = (pointer: PointerEvent) => {
+      const deltaX = (pointer.clientX - startPointer.x) * 360 / bounds.width;
+      const deltaY = (pointer.clientY - startPointer.y) * 640 / bounds.height;
+      if (mode === "move") {
+        latest = {
+          ...start,
+          x: Math.max(0, Math.min(360 - start.width, start.x + deltaX)),
+          y: Math.max(0, Math.min(640 - start.height, start.y + deltaY))
+        };
+      } else {
+        latest = {
+          ...start,
+          width: Math.max(40, Math.min(360 - start.x, start.width + deltaX)),
+          height: Math.max(40, Math.min(640 - start.y, start.height + deltaY))
+        };
+      }
+      changed = true;
+      onLayerRectChange(layer, latest, false);
+    };
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (changed) onLayerRectChange(layer, latest, true);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
+  };
+  const editableLayers = ([
+    { key: "screen" as const, enabled: visualConfig.screenEnabled, config: visualLayerConfig(visualConfig, "screen") },
+    { key: "camera" as const, enabled: visualConfig.cameraEnabled, config: visualLayerConfig(visualConfig, "camera") }
+  ]).filter((layer) => layer.enabled);
+
   return (
     <div>
       <div className="mb-2 flex items-center justify-between text-[11px] font-bold tracking-[0.2em] text-white/55">
@@ -2434,6 +2599,7 @@ function StudioMonitor({
         <span className={cn("h-2 w-2 rounded-full", label === "PROGRAM" ? "bg-red-500" : "bg-emerald-400")} />
       </div>
       <div
+        ref={stageRef}
         className="relative mx-auto aspect-[9/16] max-h-[58vh] overflow-hidden border border-white/15 bg-[#080b09] shadow-inner"
         style={{
           backgroundImage: "linear-gradient(rgba(255,255,255,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.055) 1px, transparent 1px)",
@@ -2451,7 +2617,38 @@ function StudioMonitor({
           <span className="font-mono text-[clamp(5px,.8vw,9px)] tracking-[0.13em] text-white/50">NOW PLAYING / CURRENT AUDIO</span>
           <strong className="mt-[3%] block line-clamp-3 text-[clamp(9px,1.8vw,18px)] font-medium uppercase leading-tight">{trackTitle}</strong>
         </div>
-        {visualVisible ? <canvas ref={canvasRef} width={360} height={640} className="absolute inset-0 z-20 h-full w-full" style={{ opacity: visualOpacity, transition: `opacity ${transitionMillis}ms linear` }} /> : null}
+        {visualVisible ? <canvas ref={canvasRef} width={360} height={640} className={cn("absolute inset-0 z-20 h-full w-full", interactive && "pointer-events-none")} style={{ opacity: visualOpacity, transition: `opacity ${transitionMillis}ms linear` }} /> : null}
+        {interactive && visualVisible ? editableLayers.map((layer) => {
+          const rect = visualLayerRect(layer.config);
+          const selected = selectedLayer === layer.key;
+          return (
+            <div
+              key={layer.key}
+              className={cn("absolute touch-none border", selected ? "border-emerald-300 shadow-[0_0_0_1px_rgba(16,185,129,.45)]" : "border-white/35 hover:border-white/70")}
+              style={{
+                left: `${rect.x / 3.6}%`,
+                top: `${rect.y / 6.4}%`,
+                width: `${rect.width / 3.6}%`,
+                height: `${rect.height / 6.4}%`,
+                zIndex: selected ? 70 : 40 + layer.config.zIndex,
+                cursor: "move"
+              }}
+              onPointerDown={(event) => beginLayerGesture(event, layer.key, "move")}
+            >
+              <span className={cn("absolute -top-5 left-0 rounded-sm px-1.5 py-0.5 font-mono text-[7px] font-semibold uppercase tracking-wider", selected ? "bg-emerald-300 text-black" : "bg-black/80 text-white/70")}>
+                {layer.key === "camera" ? "CAMERA" : "SCREEN / WINDOW"} · Z{layer.config.zIndex}
+              </span>
+              {selected ? (
+                <button
+                  type="button"
+                  aria-label="Resize layer"
+                  className="absolute -bottom-2 -right-2 h-4 w-4 cursor-nwse-resize rounded-sm border border-black bg-emerald-300 shadow"
+                  onPointerDown={(event) => beginLayerGesture(event, layer.key, "resize")}
+                />
+              ) : null}
+            </div>
+          );
+        }) : null}
         {visualVisible && !visualAvailable ? (
           <div className="absolute inset-x-[15%] top-[30%] z-20 grid h-[18%] place-items-center border border-white/20 bg-black/70 p-2 text-center">
             <div><Monitor className="mx-auto h-5 w-5 text-white/70" /><span className="mt-1 block text-[8px] uppercase tracking-wider text-white/55">{visualPlaceholder}</span></div>

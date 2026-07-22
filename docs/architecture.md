@@ -168,11 +168,14 @@ PCM pipe -> persistent destination publisher --------+
    connected.
 5. The optional cross-platform visual compositor captures a camera with `getUserMedia` and a display or application window
    with the operating system's `getDisplayMedia` picker. Both streams can remain enabled simultaneously. The webview draws
-   the display/window layer first and the camera above it on a transparent 360 × 640 canvas. Each layer owns its layout,
+   both sources in persisted Z order on a transparent 360 × 640 canvas. Each layer owns its layout,
    position, size, fit/crop, orientation, mirror, effect, and opacity. Paced WebP frames cross local Tauri IPC into a persistent
    FFmpeg `image2pipe` decoder, which emits BGRA into the publisher's named pipe. Preview/Program fader commands then change
    the combined layer alpha frame by frame. The same path works on macOS, Windows, and Linux and leaves RTMP connected while
    sources or composition controls change. A native AVFoundation camera path remains available for legacy profiles.
+   The Preview monitor overlays pointer-only editing bounds: dragging or resizing writes bounded integer canvas geometry,
+   switches the selected layer to Free layout, and commits on pointer release. These editing bounds are never rendered into
+   the encoded canvas or Program monitor.
 6. The optional microphone is opened by the Rust process through CPAL/CoreAudio,
    so macOS associates capture permission with Rau Studio instead of the FFmpeg
    sidecar. Native samples are resampled into a bounded stereo PCM buffer and

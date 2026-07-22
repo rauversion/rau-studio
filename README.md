@@ -63,7 +63,8 @@ dynamic station and current-track typography in RTMP video; Rau keeps a
 text-free visual fallback for lean builds. On macOS, Broadcast also exposes a
 Preview/Program video studio: a camera and a selected screen or application window can remain active as independent,
 simultaneous layers. Each can run as a positionable card, full-width strip, or large background, then be fitted or cropped,
-rotated, styled, and dissolved as one composition without reconnecting RTMP on macOS, Windows, or Linux.
+rotated, styled, or freely dragged and resized on the interactive Preview canvas. Layer ordering and the final dissolve can
+be changed without reconnecting RTMP on macOS, Windows, or Linux.
 
 Prepare or validate the macOS sidecars explicitly:
 

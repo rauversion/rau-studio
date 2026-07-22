@@ -114,6 +114,8 @@ visible until cleared. The active row cannot be removed or reordered.
    an entire display or one application window. Select either layer to edit its Card, Full width, or Background layout;
    fit/crop framing, orientation, effect, mirror, opacity, position, and size are independent. The combined visual stays
    out of Program when the broadcast starts.
+   In **PREVIEW**, click a layer and drag it directly. Use its green corner handle to resize it; this switches that layer
+   to **Free** layout. **To front** and **To back** change the Z order. Editing guides never appear in **PROGRAM** or RTMP.
 6. Add tracks to the queue, configure any local inputs, confirm the FFmpeg
    preflight is ready, and choose **Salir al aire**.
 7. Rau Studio sends a 720 × 1280, 30 fps H.264 video with AAC audio and an
@@ -161,7 +163,8 @@ service's bitrate, resolution, and keyframe requirements before going live.
 - Camera and screen/window activation, device, composition, position, size, fit/crop framing, orientation, mirror, effect, maximum opacity, and AUTO
   duration are persisted with the Broadcast profile and can be changed while live. Full width spans the 9:16
   canvas; Background places the source beneath the compact Rau identity and track information. The display/window layer is
-  drawn first and the camera layer above it. Layer changes redraw the transparent canvas; opacity and Preview/Program mix
+  drawn according to its saved Z order. Presets resolve to fixed rectangles, while Free layout persists each layer's canvas
+  coordinates and dimensions. Drag and resize gestures update Preview locally and commit on pointer release. Layer changes redraw the transparent canvas; opacity and Preview/Program mix
   update directly without reconnecting RTMP. Browser media capture keeps this path common across macOS, Windows, and Linux.
 - The destination receives one continuous connection across track transitions.
   When the queue runs out, Rau Studio transmits silence rather than closing the
