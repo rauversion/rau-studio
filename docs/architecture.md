@@ -175,7 +175,9 @@ PCM pipe -> persistent destination publisher --------+
    sources or composition controls change. A native AVFoundation camera path remains available for legacy profiles.
    The Preview monitor overlays pointer-only editing bounds: dragging or resizing writes bounded integer canvas geometry,
    switches the selected layer to Free layout, and commits on pointer release. These editing bounds are never rendered into
-   the encoded canvas or Program monitor.
+   the encoded canvas or Program monitor. The broadcast workspace remains mounted by the application shell while another
+   route is visible, so browser media tracks and the canvas sender survive navigation. Compositor-only changes use their own
+   persisted command and do not depend on saving the complete destination profile.
 6. The optional microphone is opened by the Rust process through CPAL/CoreAudio,
    so macOS associates capture permission with Rau Studio instead of the FFmpeg
    sidecar. Native samples are resampled into a bounded stereo PCM buffer and

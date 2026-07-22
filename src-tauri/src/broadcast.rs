@@ -1337,18 +1337,42 @@ pub fn broadcast_set_camera_mix(
 pub fn broadcast_update_camera_settings(
     app: AppHandle,
     manager: State<'_, BroadcastManager>,
-    mut config: BroadcastVideoCompositor,
+    config: BroadcastVideoCompositor,
 ) -> Result<BroadcastStatus, String> {
+    let config = normalize_video_compositor(config)?;
+    if !config.enabled {
+        return Err("La fuente visual no puede desactivarse mientras el broadcast está iniciado. Usa el fader para sacarla de Program.".to_string());
+    }
+    persist_video_compositor(&app, &config)?;
+    manager.update_camera_settings(config)
+}
+
+#[tauri::command]
+pub fn broadcast_save_video_compositor(
+    app: AppHandle,
+    config: BroadcastVideoCompositor,
+) -> Result<(), String> {
+    let config = normalize_video_compositor(config)?;
+    persist_video_compositor(&app, &config)
+}
+
+fn normalize_video_compositor(
+    mut config: BroadcastVideoCompositor,
+) -> Result<BroadcastVideoCompositor, String> {
     config.camera_device = config.camera_device.trim().to_string();
     config.capture_mode = config.capture_mode.trim().to_lowercase();
     config.screen_label = config.screen_label.trim().to_string();
     validate_video_compositor(&config)?;
-    if !config.enabled {
-        return Err("La fuente visual no puede desactivarse mientras el broadcast está iniciado. Usa el fader para sacarla de Program.".to_string());
-    }
+    Ok(config)
+}
+
+fn persist_video_compositor(
+    app: &AppHandle,
+    config: &BroadcastVideoCompositor,
+) -> Result<(), String> {
     let conn = open_db(&app)?;
     let now = timestamp();
-    let compositor_json = serde_json::to_string(&config)
+    let compositor_json = serde_json::to_string(config)
         .map_err(|error| format!("No se pudo serializar el compositor de video: {error}"))?;
     conn.execute(
         "INSERT INTO broadcast_video_compositor (id, config_json, updated_at)
@@ -1359,7 +1383,7 @@ pub fn broadcast_update_camera_settings(
         params![PROFILE_ID, compositor_json, now],
     )
     .map_err(|error| format!("No se pudo guardar el compositor de video: {error}"))?;
-    manager.update_camera_settings(config)
+    Ok(())
 }
 
 #[tauri::command]
@@ -6270,6 +6294,20 @@ mod tests {
         input.video_compositor.camera_x = 300;
         input.video_compositor.camera_width = 100;
         assert!(validate_profile(input).is_err());
+    }
+
+    #[test]
+    fn standalone_video_compositor_save_normalizes_browser_source_labels() {
+        let mut config = BroadcastVideoCompositor::default();
+        config.capture_mode = "  BROWSER ".to_string();
+        config.camera_device = "  FaceTime Camera  ".to_string();
+        config.screen_label = "  Ventana · Visuals  ".to_string();
+
+        let normalized = normalize_video_compositor(config).unwrap();
+
+        assert_eq!(normalized.capture_mode, "browser");
+        assert_eq!(normalized.camera_device, "FaceTime Camera");
+        assert_eq!(normalized.screen_label, "Ventana · Visuals");
     }
 
     #[test]

@@ -407,6 +407,10 @@ export function BroadcastPage() {
   const nextTerminalLogId = useRef(1);
 
   const running = status ? ["connecting", "live", "reconnecting", "stopping"].includes(status.status) : false;
+  const runningRef = useRef(running);
+  const compositorSaveTimer = useRef<number | null>(null);
+  const compositorSaveRevision = useRef(0);
+  runningRef.current = running;
   const destinationNeedsSave = !profile
     || outputKind !== (profile.output_kind === "rtmp" ? "rtmp" : "icecast")
     || (outputKind === "rtmp" && (
@@ -563,6 +567,12 @@ export function BroadcastPage() {
       stopListeningOnce();
     };
   }, [hydrateProfile, locale]);
+
+  useEffect(() => () => {
+    if (compositorSaveTimer.current !== null) {
+      window.clearTimeout(compositorSaveTimer.current);
+    }
+  }, []);
 
   const selectedPlaylistSource = useMemo(
     () => playlistSources.find((source) => source.key === playlistSourceKey) ?? null,
@@ -804,20 +814,29 @@ export function BroadcastPage() {
     });
   }
 
-  async function changeVideoCompositor(next: BroadcastVideoCompositor) {
-    const previous = videoCompositor;
+  function changeVideoCompositor(next: BroadcastVideoCompositor) {
     setVideoCompositor(next);
-    if (!running) return;
-    try {
-      const nextStatus = await invoke<BroadcastStatus>("broadcast_update_camera_settings", {
-        config: next
-      });
-      setStatus(nextStatus);
-      setProfile((current) => current ? { ...current, video_compositor: next } : current);
-    } catch (cause) {
-      setVideoCompositor(previous);
-      setError(errorMessage(cause, locale));
+    const revision = ++compositorSaveRevision.current;
+    if (compositorSaveTimer.current !== null) {
+      window.clearTimeout(compositorSaveTimer.current);
     }
+    compositorSaveTimer.current = window.setTimeout(() => {
+      compositorSaveTimer.current = null;
+      const command = runningRef.current
+        ? invoke<BroadcastStatus>("broadcast_update_camera_settings", { config: next })
+        : invoke<void>("broadcast_save_video_compositor", { config: next });
+      void command
+        .then((nextStatus) => {
+          if (revision !== compositorSaveRevision.current) return;
+          if (nextStatus) setStatus(nextStatus);
+          setProfile((current) => current ? { ...current, video_compositor: next } : current);
+        })
+        .catch((cause) => {
+          if (revision === compositorSaveRevision.current) {
+            setError(errorMessage(cause, locale));
+          }
+        });
+    }, 100);
   }
 
   async function refreshMicrophones() {

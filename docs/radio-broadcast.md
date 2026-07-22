@@ -166,6 +166,9 @@ service's bitrate, resolution, and keyframe requirements before going live.
   drawn according to its saved Z order. Presets resolve to fixed rectangles, while Free layout persists each layer's canvas
   coordinates and dimensions. Drag and resize gestures update Preview locally and commit on pointer release. Layer changes redraw the transparent canvas; opacity and Preview/Program mix
   update directly without reconnecting RTMP. Browser media capture keeps this path common across macOS, Windows, and Linux.
+  Closing Video Studio or navigating to another Rau Studio section keeps the capture session mounted and Program moving;
+  returning to Broadcast restores the same source handles and composition. Stopping a shared window from the operating-system
+  picker still ends that source and requires selecting it again, as required by browser capture permissions.
 - The destination receives one continuous connection across track transitions.
   When the queue runs out, Rau Studio transmits silence rather than closing the
   connection. New playlists can be appended while it is live.
