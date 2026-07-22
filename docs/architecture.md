@@ -148,7 +148,7 @@ Native microphone (CPAL/CoreAudio) -> bounded PCM buffer -----------------------
                                                                                                    v
                                                       /-> libmp3lame -> Icecast -> listeners
 PCM pipe -> persistent destination publisher --------+
-                                                      \-> AAC + paced branded video + camera layer/libx264 -> RTMP service -> viewers
+                                                      \-> AAC + paced branded video + visual layer/libx264 -> RTMP service -> viewers
 ```
 
 1. The user saves one Broadcast profile with an `output_kind`. Icecast stores
@@ -160,20 +160,28 @@ PCM pipe -> persistent destination publisher --------+
 3. A per-track decoder normalizes audio to stereo 44.1 kHz signed 16-bit PCM.
 4. One long-lived publisher consumes the PCM. Icecast encodes it with
    `libmp3lame` and writes the configured mount. RTMP encodes the PCM as AAC and
-   combines it with an independently paced monochrome source in a 720 × 1280,
-   30 fps H.264/FLV signal. A `drawtext` overlay reloads atomically written
+   combines it with an independently paced presentation source in a 720 × 1280,
+   30 fps H.264/FLV signal. The persisted presentation template selects Signal Grid,
+   Transmission, or Mono Paper before the publisher starts; Preview uses the same scene structure and palette as FFmpeg.
+   A `drawtext` overlay reloads atomically written
    station and current-track text without restarting the publisher. Builds
-   without `drawtext` retain the animated visual as a compatibility fallback.
+   without `drawtext` retain each template's structural colors and grid as a compatibility fallback.
+   The template selector is held while live because the base filter graph is part of the long-lived publisher;
+   changing it applies to the next RTMP session without risking the active connection.
    RTMP emits silence while the queue is empty so the destination remains
    connected.
-5. The optional macOS camera compositor keeps a half-resolution transparent,
-   paced BGRA program canvas connected to that same publisher through a named
-   pipe. Preview/Program fader commands change its alpha frame by frame.
-   AVFoundation remains warm while RTMP is active. Card, full-width, and background compositions are available;
-   background mode fills the live field between the compact Rau header and track information. Position, size, device, composition,
-   framing, orientation, mirror, and effect changes restart only camera capture and redraw that canvas;
-   the publisher connection remains intact. Frame activity is monitored so a
-   missing or repeated camera feed can be restarted independently.
+5. The optional cross-platform visual compositor captures a camera with `getUserMedia` and a display or application window
+   with the operating system's `getDisplayMedia` picker. Both streams can remain enabled simultaneously. The webview draws
+   both sources in persisted Z order on a transparent 360 × 640 canvas. Each layer owns its layout,
+   position, size, fit/crop, orientation, mirror, effect, and opacity. Paced RGBA frames cross local Tauri IPC and Rust converts
+   them directly to BGRA for the publisher's named pipe, preserving transparency without a browser-dependent image codec. Preview/Program fader commands then change
+   the combined layer alpha frame by frame. The same path works on macOS, Windows, and Linux and leaves RTMP connected while
+   sources or composition controls change. A native AVFoundation camera path remains available for legacy profiles.
+   The Preview monitor overlays pointer-only editing bounds: dragging or resizing writes bounded integer canvas geometry,
+   switches the selected layer to Free layout, and commits on pointer release. These editing bounds are never rendered into
+   the encoded canvas or Program monitor. The broadcast workspace remains mounted by the application shell while another
+   route is visible, so browser media tracks and the canvas sender survive navigation. Compositor-only changes use their own
+   persisted command and do not depend on saving the complete destination profile.
 6. The optional microphone is opened by the Rust process through CPAL/CoreAudio,
    so macOS associates capture permission with Rau Studio instead of the FFmpeg
    sidecar. Native samples are resampled into a bounded stereo PCM buffer and
@@ -182,7 +190,8 @@ PCM pipe -> persistent destination publisher --------+
    mono-channel or stereo-pair routing. It replaces the playlist as the primary
    source without ducking. The active track decoder is held while line is live,
    so the queue does not advance, and resumes when the operator returns to the
-   Playlist source.
+   Playlist source. Its PCM writer uses a monotonic 50 ms deadline so processing
+   time is deducted from the wait instead of accumulating capture latency.
 8. The optional Mac-output source uses ScreenCaptureKit on macOS 13+ to capture
    the complete system output by default, excluding Rau Studio itself to avoid
    feedback. It can alternatively filter capture to one selected running

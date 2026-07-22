@@ -61,8 +61,10 @@ MP3/H.264/AAC encoding plus the Icecast and RTMP/RTMPS protocols used by
 Broadcast. Selecting a build with FFmpeg's `drawtext` filter also enables the
 dynamic station and current-track typography in RTMP video; Rau keeps a
 text-free visual fallback for lean builds. On macOS, Broadcast also exposes a
-Preview/Program video studio: the selected camera can run as a positionable card, a full-width strip, or a large
-edge-to-edge background, then be fitted or cropped, rotated, styled, and dissolved live without reconnecting RTMP.
+Preview/Program video studio: a camera and a selected screen or application window can remain active as independent,
+simultaneous layers. Each can run as a positionable card, full-width strip, or large background, then be fitted or cropped,
+rotated, styled, or freely dragged and resized on the interactive Preview canvas. Layer ordering and the final dissolve can
+be changed without reconnecting RTMP on macOS, Windows, or Linux.
 
 Prepare or validate the macOS sidecars explicitly:
 

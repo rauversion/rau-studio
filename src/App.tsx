@@ -310,7 +310,7 @@ export default function App() {
             <Route path="/turn" element={<TurnPage />} />
             <Route path="/mastering" element={<MasteringPage />} />
             <Route path="/connect" element={<P2PPage />} />
-            <Route path="/broadcast" element={<BroadcastPage />} />
+            <Route path="/broadcast" element={<></>} />
             <Route
               path="/settings"
               element={<SettingsPage />}
@@ -341,6 +341,7 @@ function AppShell() {
     () => ({ darkMode, setDarkMode, refreshSystemStatus }),
     [darkMode]
   );
+  const broadcastVisible = location.pathname === "/broadcast";
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -503,6 +504,14 @@ function AppShell() {
               </div>
             </NavLink>
           </header>
+          <div
+            aria-hidden={!broadcastVisible}
+            className={cn(
+              !broadcastVisible && "pointer-events-none fixed inset-0 -z-50 overflow-hidden opacity-0"
+            )}
+          >
+            <BroadcastPage />
+          </div>
           <Outlet context={shellContext} />
         </div>
       </div>

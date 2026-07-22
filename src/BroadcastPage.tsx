@@ -13,6 +13,7 @@ import {
   LoaderCircle,
   Mic,
   MicOff,
+  Monitor,
   Play,
   Plus,
   Radio,
@@ -77,6 +78,9 @@ type BroadcastProfile = {
 
 type BroadcastVideoCompositor = {
   enabled: boolean;
+  graphicTemplate: "signal_grid" | "transmission" | "mono_paper" | string;
+  captureMode: "native" | "browser" | string;
+  cameraEnabled: boolean;
   cameraDevice: string;
   cameraPosition: "top_left" | "top_right" | "center" | "bottom_left" | "bottom_right" | string;
   cameraSize: "small" | "medium" | "large" | string;
@@ -84,8 +88,28 @@ type BroadcastVideoCompositor = {
   cameraMirror: boolean;
   cameraRotationDegrees: 0 | 90 | 180 | 270 | number;
   cameraFraming: "contain" | "cover" | string;
-  cameraLayout: "card" | "wide" | "background" | string;
+  cameraLayout: "card" | "wide" | "background" | "free" | string;
+  cameraX: number;
+  cameraY: number;
+  cameraWidth: number;
+  cameraHeight: number;
+  cameraZIndex: number;
   cameraOpacityPercent: number;
+  screenEnabled: boolean;
+  screenLabel: string;
+  screenPosition: "top_left" | "top_right" | "center" | "bottom_left" | "bottom_right" | string;
+  screenSize: "small" | "medium" | "large" | string;
+  screenEffect: "clean" | "mono" | "contrast" | "dream" | string;
+  screenMirror: boolean;
+  screenRotationDegrees: number;
+  screenFraming: "contain" | "cover" | string;
+  screenLayout: "card" | "wide" | "background" | "free" | string;
+  screenX: number;
+  screenY: number;
+  screenWidth: number;
+  screenHeight: number;
+  screenZIndex: number;
+  screenOpacityPercent: number;
   transitionMillis: number;
 };
 
@@ -124,6 +148,7 @@ type BroadcastApplicationAudioDevice = {
 type BroadcastCameraDevice = {
   id: string;
   label: string;
+  kind: "camera" | "screen" | string;
 };
 
 type BroadcastMicrophoneStatus = {
@@ -255,7 +280,10 @@ type RtmpPlatform = "instagram" | "custom";
 
 const defaultVideoCompositor: BroadcastVideoCompositor = {
   enabled: false,
-  cameraDevice: "",
+  graphicTemplate: "signal_grid",
+  captureMode: "browser",
+  cameraEnabled: true,
+  cameraDevice: "default",
   cameraPosition: "top_right",
   cameraSize: "medium",
   cameraEffect: "mono",
@@ -263,9 +291,50 @@ const defaultVideoCompositor: BroadcastVideoCompositor = {
   cameraRotationDegrees: 180,
   cameraFraming: "contain",
   cameraLayout: "wide",
+  cameraX: 0,
+  cameraY: 120,
+  cameraWidth: 360,
+  cameraHeight: 225,
+  cameraZIndex: 2,
   cameraOpacityPercent: 100,
+  screenEnabled: false,
+  screenLabel: "",
+  screenPosition: "top_left",
+  screenSize: "large",
+  screenEffect: "clean",
+  screenMirror: false,
+  screenRotationDegrees: 0,
+  screenFraming: "contain",
+  screenLayout: "background",
+  screenX: 0,
+  screenY: 110,
+  screenWidth: 360,
+  screenHeight: 340,
+  screenZIndex: 1,
+  screenOpacityPercent: 100,
   transitionMillis: 800
 };
+
+const broadcastGraphicTemplates = [
+  {
+    id: "signal_grid",
+    name: "Signal Grid",
+    description: "Monocromo técnico",
+    swatch: "linear-gradient(135deg,#060807 0 46%,#737773 46% 60%,#f4f4ef 60%)"
+  },
+  {
+    id: "transmission",
+    name: "Transmission",
+    description: "Marfil · acid · rojo",
+    swatch: "linear-gradient(180deg,#f1efe6 0 26%,#d7ff00 26% 38%,#ff4b2b 38% 67%,#0b0b0b 67%)"
+  },
+  {
+    id: "mono_paper",
+    name: "Mono Paper",
+    description: "Editorial mínimo",
+    swatch: "linear-gradient(135deg,#0b0b0b 0 38%,#eeece3 38% 76%,#ff4b2b 76%)"
+  }
+] as const;
 
 const fieldClass =
   "h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none transition focus:border-foreground/35 focus:ring-2 focus:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60";
@@ -361,6 +430,10 @@ export function BroadcastPage() {
   const nextTerminalLogId = useRef(1);
 
   const running = status ? ["connecting", "live", "reconnecting", "stopping"].includes(status.status) : false;
+  const runningRef = useRef(running);
+  const compositorSaveTimer = useRef<number | null>(null);
+  const compositorSaveRevision = useRef(0);
+  runningRef.current = running;
   const destinationNeedsSave = !profile
     || outputKind !== (profile.output_kind === "rtmp" ? "rtmp" : "icecast")
     || (outputKind === "rtmp" && (
@@ -517,6 +590,12 @@ export function BroadcastPage() {
       stopListeningOnce();
     };
   }, [hydrateProfile, locale]);
+
+  useEffect(() => () => {
+    if (compositorSaveTimer.current !== null) {
+      window.clearTimeout(compositorSaveTimer.current);
+    }
+  }, []);
 
   const selectedPlaylistSource = useMemo(
     () => playlistSources.find((source) => source.key === playlistSourceKey) ?? null,
@@ -758,33 +837,29 @@ export function BroadcastPage() {
     });
   }
 
-  async function changeVideoCompositor(next: BroadcastVideoCompositor) {
-    const previous = videoCompositor;
+  function changeVideoCompositor(next: BroadcastVideoCompositor) {
     setVideoCompositor(next);
-    if (!running) return;
-    try {
-      const nextStatus = await invoke<BroadcastStatus>("broadcast_update_camera_settings", {
-        config: next
-      });
-      setStatus(nextStatus);
-      setProfile((current) => current ? { ...current, video_compositor: next } : current);
-    } catch (cause) {
-      setVideoCompositor(previous);
-      setError(errorMessage(cause, locale));
+    const revision = ++compositorSaveRevision.current;
+    if (compositorSaveTimer.current !== null) {
+      window.clearTimeout(compositorSaveTimer.current);
     }
-  }
-
-  async function refreshCameras() {
-    await runAction("cameras", async () => {
-      const devices = await invoke<BroadcastCameraDevice[]>("broadcast_camera_devices");
-      setCameraDevices(devices);
-      if (!devices.some((device) => device.id === videoCompositor.cameraDevice)) {
-        setVideoCompositor((current) => ({
-          ...current,
-          cameraDevice: devices[0]?.id ?? ""
-        }));
-      }
-    });
+    compositorSaveTimer.current = window.setTimeout(() => {
+      compositorSaveTimer.current = null;
+      const command = runningRef.current
+        ? invoke<BroadcastStatus>("broadcast_update_camera_settings", { config: next })
+        : invoke<void>("broadcast_save_video_compositor", { config: next });
+      void command
+        .then((nextStatus) => {
+          if (revision !== compositorSaveRevision.current) return;
+          if (nextStatus) setStatus(nextStatus);
+          setProfile((current) => current ? { ...current, video_compositor: next } : current);
+        })
+        .catch((cause) => {
+          if (revision === compositorSaveRevision.current) {
+            setError(errorMessage(cause, locale));
+          }
+        });
+    }, 100);
   }
 
   async function refreshMicrophones() {
@@ -1372,8 +1447,12 @@ export function BroadcastPage() {
                       variant={status?.camera?.live ? "default" : "secondary"}
                       onClick={() => setVideoStudioOpen(true)}
                     >
-                      <Camera className={cn("h-4 w-4", status?.camera?.live && "animate-pulse")} />
-                      {status?.camera?.live ? t("Cámara en Program") : t("Video Studio")}
+                      {videoCompositor.screenEnabled
+                        ? <Monitor className={cn("h-4 w-4", status?.camera?.live && "animate-pulse")} />
+                        : <Camera className={cn("h-4 w-4", status?.camera?.live && "animate-pulse")} />}
+                      {status?.camera?.live
+                        ? t("Fuentes en Program")
+                        : t("Video Studio")}
                     </Button>
                   ) : null}
                   {running && profile?.microphone_enabled ? (
@@ -1783,7 +1862,6 @@ export function BroadcastPage() {
         busy={busy}
         onClose={() => setVideoStudioOpen(false)}
         onChange={(next) => void changeVideoCompositor(next)}
-        onRefresh={() => void refreshCameras()}
         onMix={sendCameraMix}
         onSave={async () => {
           if (await persistProfile()) setVideoStudioOpen(false);
@@ -1814,7 +1892,6 @@ function VideoStudioModal({
   busy,
   onClose,
   onChange,
-  onRefresh,
   onMix,
   onSave
 }: {
@@ -1829,82 +1906,207 @@ function VideoStudioModal({
   busy: BusyAction;
   onClose: () => void;
   onChange: (config: BroadcastVideoCompositor) => void;
-  onRefresh: () => void;
   onMix: (mixPercent: number, transitionMillis: number) => Promise<void>;
   onSave: () => Promise<void>;
 }) {
-  const { t } = useI18n();
-  const previewVideo = useRef<HTMLVideoElement | null>(null);
-  const programVideo = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const { locale, t } = useI18n();
+  const cameraVideo = useRef<HTMLVideoElement | null>(null);
+  const screenVideo = useRef<HTMLVideoElement | null>(null);
+  const previewCanvas = useRef<HTMLCanvasElement | null>(null);
+  const programCanvas = useRef<HTMLCanvasElement | null>(null);
+  const cameraStream = useRef<MediaStream | null>(null);
+  const screenStream = useRef<MediaStream | null>(null);
+  const offscreenCanvas = useRef<HTMLCanvasElement | null>(null);
+  const uploadPending = useRef(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [draftMix, setDraftMix] = useState(mixPercent);
   const [handoffPending, setHandoffPending] = useState(false);
+  const [activeLayer, setActiveLayer] = useState<"camera" | "screen">("camera");
+  const [gestureConfig, setGestureConfig] = useState<BroadcastVideoCompositor | null>(null);
+  const [cameraAvailable, setCameraAvailable] = useState(false);
+  const [screenAvailable, setScreenAvailable] = useState(false);
+  const [browserCameras, setBrowserCameras] = useState<BroadcastCameraDevice[]>([]);
+  const cameraDevices = [...devices.filter((device) => device.kind === "camera"), ...browserCameras]
+    .filter((device, index, all) => all.findIndex((candidate) => candidate.label === device.label) === index);
+  const studioConfig = gestureConfig ?? config;
+  const studioConfigRef = useRef(studioConfig);
+  studioConfigRef.current = studioConfig;
 
-  const stopPreview = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    if (previewVideo.current) previewVideo.current.srcObject = null;
-    if (programVideo.current) programVideo.current.srcObject = null;
+  const update = useCallback((patch: Partial<BroadcastVideoCompositor>) => {
+    onChange({ ...config, ...patch, captureMode: "browser" });
+  }, [config, onChange]);
+
+  const stopCamera = useCallback(() => {
+    cameraStream.current?.getTracks().forEach((track) => track.stop());
+    cameraStream.current = null;
+    if (cameraVideo.current) cameraVideo.current.srcObject = null;
+    setCameraAvailable(false);
   }, []);
+
+  const stopScreen = useCallback(() => {
+    screenStream.current?.getTracks().forEach((track) => track.stop());
+    screenStream.current = null;
+    if (screenVideo.current) screenVideo.current.srcObject = null;
+    setScreenAvailable(false);
+  }, []);
+
+  const startCamera = useCallback(async (preferredLabel = config.cameraDevice) => {
+    try {
+      setPreviewError(null);
+      stopCamera();
+      let stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } }
+      });
+      const enumerated = await navigator.mediaDevices.enumerateDevices();
+      const cameras = enumerated
+        .filter((device) => device.kind === "videoinput")
+        .map((device, index) => ({
+          id: device.label || device.deviceId || `camera-${index + 1}`,
+          label: device.label || `${t("Cámara")} ${index + 1}`,
+          kind: "camera"
+        }));
+      setBrowserCameras(cameras);
+      const preferred = cameras.find((device) => device.label === preferredLabel || device.id === preferredLabel);
+      const browserDevice = enumerated.find((device) => device.kind === "videoinput" && (
+        device.label === preferred?.label || device.deviceId === preferred?.id
+      ));
+      if (browserDevice && stream.getVideoTracks()[0]?.label !== browserDevice.label) {
+        stream.getTracks().forEach((track) => track.stop());
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            deviceId: { exact: browserDevice.deviceId },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 30 }
+          }
+        });
+      }
+      cameraStream.current = stream;
+      if (cameraVideo.current) {
+        cameraVideo.current.srcObject = stream;
+        await cameraVideo.current.play().catch(() => undefined);
+      }
+      setCameraAvailable(true);
+      const selectedLabel = stream.getVideoTracks()[0]?.label || preferredLabel || "default";
+      if (config.captureMode !== "browser") {
+        update({ captureMode: "browser", cameraEnabled: true, cameraDevice: selectedLabel, cameraRotationDegrees: 0 });
+      }
+      return selectedLabel;
+    } catch (cause) {
+      setPreviewError(cause instanceof Error ? cause.message : String(cause));
+      return null;
+    }
+  }, [config.cameraDevice, config.captureMode, stopCamera, t, update]);
+
+  const chooseScreenOrWindow = useCallback(async () => {
+    try {
+      setPreviewError(null);
+      stopScreen();
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        audio: false,
+        video: { frameRate: { ideal: 30, max: 30 } }
+      });
+      const track = stream.getVideoTracks()[0];
+      if (!track) throw new Error(t("No se recibió video de la pantalla o ventana seleccionada."));
+      screenStream.current = stream;
+      track.addEventListener("ended", () => {
+        screenStream.current = null;
+        setScreenAvailable(false);
+      }, { once: true });
+      if (screenVideo.current) {
+        screenVideo.current.srcObject = stream;
+        await screenVideo.current.play().catch(() => undefined);
+      }
+      const surface = track.getSettings().displaySurface;
+      const surfaceLabel = surface === "window" ? t("Ventana") : surface === "monitor" ? t("Pantalla") : t("Pantalla o ventana");
+      const label = track.label ? `${surfaceLabel} · ${track.label}` : surfaceLabel;
+      setScreenAvailable(true);
+      update({ screenEnabled: true, screenLabel: label });
+    } catch (cause) {
+      setPreviewError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [stopScreen, t, update]);
 
   useEffect(() => setDraftMix(mixPercent), [mixPercent]);
 
   useEffect(() => {
-    if (!open || !config.enabled) {
-      stopPreview();
-      return;
+    if (open && config.enabled && config.cameraEnabled && !cameraStream.current) {
+      void startCamera();
     }
-    let disposed = false;
-    setPreviewError(null);
-    void (async () => {
-      try {
-        let stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { width: { ideal: 1280 }, height: { ideal: 720 } }
-        });
-        const browserDevices = await navigator.mediaDevices.enumerateDevices();
-        const preferred = browserDevices.find((device) =>
-          device.kind === "videoinput" && device.label === config.cameraDevice
-        );
-        if (preferred && stream.getVideoTracks()[0]?.label !== preferred.label) {
-          stream.getTracks().forEach((track) => track.stop());
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: { deviceId: { exact: preferred.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-          });
-        }
-        if (disposed) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        streamRef.current = stream;
-        for (const video of [previewVideo.current, programVideo.current]) {
-          if (!video) continue;
-          video.srcObject = stream;
-          await video.play().catch(() => undefined);
-        }
-      } catch (cause) {
-        if (!disposed) setPreviewError(cause instanceof Error ? cause.message : String(cause));
-      }
-    })();
-    return () => {
-      disposed = true;
-      stopPreview();
-    };
-  }, [config.cameraDevice, config.enabled, open, stopPreview]);
+  }, [config.cameraEnabled, config.enabled, open, startCamera]);
 
   useEffect(() => {
-    const stream = streamRef.current;
-    const video = programVideo.current;
-    if (!stream || !video) return;
-    video.srcObject = stream;
-    void video.play().catch(() => undefined);
-  }, [draftMix]);
+    if (!config.cameraEnabled) stopCamera();
+  }, [config.cameraEnabled, stopCamera]);
 
-  if (!open) return null;
+  useEffect(() => {
+    if (!config.screenEnabled) stopScreen();
+  }, [config.screenEnabled, stopScreen]);
 
-  const update = (patch: Partial<BroadcastVideoCompositor>) => onChange({ ...config, ...patch });
+  useEffect(() => () => {
+    cameraStream.current?.getTracks().forEach((track) => track.stop());
+    screenStream.current?.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  useEffect(() => {
+    if (!offscreenCanvas.current) {
+      offscreenCanvas.current = document.createElement("canvas");
+      offscreenCanvas.current.width = 360;
+      offscreenCanvas.current.height = 640;
+    }
+    let frameRequest = 0;
+    let lastUploadAt = 0;
+    let renderErrorReported = false;
+    const render = (now: number) => {
+      try {
+        const canvas = offscreenCanvas.current;
+        const context = canvas?.getContext("2d");
+        if (canvas && context) {
+          context.clearRect(0, 0, canvas.width, canvas.height);
+          const currentConfig = studioConfigRef.current;
+          const layers = [
+            currentConfig.screenEnabled && screenAvailable && screenVideo.current
+              ? { key: "screen" as const, video: screenVideo.current, config: visualLayerConfig(currentConfig, "screen") }
+              : null,
+            currentConfig.cameraEnabled && cameraAvailable && cameraVideo.current
+              ? { key: "camera" as const, video: cameraVideo.current, config: visualLayerConfig(currentConfig, "camera") }
+              : null
+          ].filter((layer): layer is NonNullable<typeof layer> => Boolean(layer))
+            .sort((left, right) => left.config.zIndex - right.config.zIndex);
+          for (const layer of layers) drawVisualLayer(context, layer.video, layer.config);
+          for (const monitor of [previewCanvas.current, programCanvas.current]) {
+            const monitorContext = monitor?.getContext("2d");
+            if (!monitor || !monitorContext) continue;
+            monitorContext.clearRect(0, 0, monitor.width, monitor.height);
+            monitorContext.drawImage(canvas, 0, 0);
+          }
+          if (running && currentConfig.enabled && layers.length > 0 && now - lastUploadAt >= 1000 / 24 && !uploadPending.current) {
+            lastUploadAt = now;
+            uploadPending.current = true;
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            void invoke("broadcast_push_visual_frame", {
+              frameBase64: bytesToBase64(pixels)
+            })
+              .catch((cause) => setPreviewError(errorMessage(cause, locale)))
+              .finally(() => { uploadPending.current = false; });
+          }
+        }
+      } catch (cause) {
+        uploadPending.current = false;
+        if (!renderErrorReported) {
+          renderErrorReported = true;
+          setPreviewError(errorMessage(cause, locale));
+        }
+      } finally {
+        frameRequest = requestAnimationFrame(render);
+      }
+    };
+    frameRequest = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(frameRequest);
+  }, [cameraAvailable, locale, running, screenAvailable]);
+
   const faderEnabled = running && config.enabled && cameraReady;
   const take = async (nextMix: number, transitionMillis: number) => {
     if (handoffPending || busy === "camera-mix") return;
@@ -1917,8 +2119,61 @@ function VideoStudioModal({
     }
   };
 
+  const layer = visualLayerConfig(studioConfig, activeLayer);
+  const changeLayerRect = useCallback((source: "camera" | "screen", rect: VisualLayerRect, commit: boolean) => {
+    const next = applyVisualLayerRect(config, source, rect);
+    setGestureConfig(next);
+    if (commit) {
+      onChange({ ...next, captureMode: "browser" });
+      setGestureConfig(null);
+    }
+  }, [config, onChange]);
+  const updateLayer = (patch: Partial<VisualLayerConfig>) => {
+    if (activeLayer === "camera") {
+      update({
+        cameraLayout: patch.layout ?? config.cameraLayout,
+        cameraPosition: patch.position ?? config.cameraPosition,
+        cameraSize: patch.size ?? config.cameraSize,
+        cameraEffect: patch.effect ?? config.cameraEffect,
+        cameraMirror: patch.mirror ?? config.cameraMirror,
+        cameraRotationDegrees: patch.rotationDegrees ?? config.cameraRotationDegrees,
+        cameraFraming: patch.framing ?? config.cameraFraming,
+        cameraOpacityPercent: patch.opacityPercent ?? config.cameraOpacityPercent
+      });
+    } else {
+      update({
+        screenLayout: patch.layout ?? config.screenLayout,
+        screenPosition: patch.position ?? config.screenPosition,
+        screenSize: patch.size ?? config.screenSize,
+        screenEffect: patch.effect ?? config.screenEffect,
+        screenMirror: patch.mirror ?? config.screenMirror,
+        screenRotationDegrees: patch.rotationDegrees ?? config.screenRotationDegrees,
+        screenFraming: patch.framing ?? config.screenFraming,
+        screenOpacityPercent: patch.opacityPercent ?? config.screenOpacityPercent
+      });
+    }
+  };
+  const activeZIndex = activeLayer === "camera" ? studioConfig.cameraZIndex : studioConfig.screenZIndex;
+  const otherZIndex = activeLayer === "camera" ? studioConfig.screenZIndex : studioConfig.cameraZIndex;
+  const setLayerDepth = (front: boolean) => {
+    const foreground = front ? 2 : 1;
+    const background = front ? 1 : 2;
+    update(activeLayer === "camera"
+      ? { cameraZIndex: foreground, screenZIndex: background }
+      : { screenZIndex: foreground, cameraZIndex: background });
+  };
+
+  const captureElements = (
+    <div className="pointer-events-none fixed -left-4 top-0 h-px w-px overflow-hidden opacity-0" aria-hidden="true">
+      <video ref={screenVideo} muted playsInline />
+      <video ref={cameraVideo} muted playsInline />
+    </div>
+  );
+
+  if (!open) return <>{captureElements}</>;
+
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center p-3" role="dialog" aria-modal="true" aria-labelledby="video-studio-title">
+    <>{captureElements}<div className="fixed inset-0 z-[80] flex items-center justify-center p-3" role="dialog" aria-modal="true" aria-labelledby="video-studio-title">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
       <section className="relative z-[85] flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-white/15 bg-[#090b0a] text-white shadow-2xl">
         <header className="flex items-start justify-between gap-4 border-b border-white/10 px-5 py-4">
@@ -1938,26 +2193,32 @@ function VideoStudioModal({
               label="PREVIEW"
               stationName={stationName}
               trackTitle={trackTitle}
-              config={config}
-              cameraVisible={config.enabled}
-              videoRef={previewVideo}
-              cameraPlaceholder={previewError ? t("Vista previa no disponible") : t("Preparando cámara...")}
+              visualVisible={config.enabled}
+              canvasRef={previewCanvas}
+              visualConfig={studioConfig}
+              interactive
+              selectedLayer={activeLayer}
+              onSelectLayer={setActiveLayer}
+              onLayerRectChange={changeLayerRect}
+              visualAvailable={(config.cameraEnabled && cameraAvailable) || (config.screenEnabled && screenAvailable)}
+              visualPlaceholder={previewError ? t("Vista previa no disponible") : t("Activa una cámara o elige una pantalla o ventana")}
             />
             <StudioMonitor
               label="PROGRAM"
               stationName={stationName}
               trackTitle={trackTitle}
-              config={config}
-              cameraVisible={config.enabled && draftMix > 0}
-              cameraOpacity={draftMix / 100}
-              cameraPlaceholder={t("Cámara en Program")}
-              videoRef={programVideo}
+              visualVisible={config.enabled && draftMix > 0}
+              visualOpacity={draftMix / 100}
+              canvasRef={programCanvas}
+              visualConfig={studioConfig}
+              visualAvailable={(config.cameraEnabled && cameraAvailable) || (config.screenEnabled && screenAvailable)}
+              visualPlaceholder={t("Fuentes en Program")}
               transitionMillis={config.transitionMillis}
             />
 
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4 sm:col-span-2">
               <div className="flex items-center justify-between gap-3 text-xs font-semibold uppercase tracking-[0.16em] text-white/55">
-                <span>GRAPHIC</span><span>{draftMix}%</span><span>CAMERA</span>
+                <span>GRAPHIC</span><span>{draftMix}%</span><span>VISUAL LAYERS</span>
               </div>
               <input
                 aria-label={t("Fader Preview a Program")}
@@ -1976,7 +2237,7 @@ function VideoStudioModal({
                 <span className="text-xs text-white/45">
                   {running
                     ? cameraReady ? t("El fader controla la señal que recibe Instagram.") : t("Esperando que el compositor quede listo...")
-                    : t("El fader se habilita al iniciar el broadcast; la cámara comienza fuera de Program.")}
+                    : t("El fader se habilita al iniciar el broadcast; la fuente visual comienza fuera de Program.")}
                 </span>
                 <Button
                   type="button"
@@ -1991,9 +2252,43 @@ function VideoStudioModal({
           </div>
 
           <aside className="grid content-start gap-4 border-t border-white/10 bg-black/20 p-4 lg:border-l lg:border-t-0">
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <strong className="text-sm">{t("Plantilla de presentación")}</strong>
+                <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-white/35">PROGRAM</span>
+              </div>
+              <div className="grid gap-2">
+                {broadcastGraphicTemplates.map((template) => {
+                  const selected = config.graphicTemplate === template.id;
+                  return (
+                    <button
+                      key={template.id}
+                      type="button"
+                      disabled={running}
+                      className={cn(
+                        "flex items-center gap-3 rounded-md border p-2 text-left transition disabled:cursor-not-allowed disabled:opacity-55",
+                        selected ? "border-lime-300/70 bg-lime-300/10" : "border-white/10 bg-white/[.025] hover:border-white/25"
+                      )}
+                      onClick={() => update({ graphicTemplate: template.id })}
+                    >
+                      <span className="h-10 w-14 shrink-0 border border-black/40" style={{ background: template.swatch }} />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-semibold">{template.name}</span>
+                        <span className="block truncate text-[10px] text-white/40">{t(template.description)}</span>
+                      </span>
+                      {selected ? <Check className="ml-auto h-4 w-4 shrink-0 text-lime-300" /> : null}
+                    </button>
+                  );
+                })}
+              </div>
+              <span className="mt-2 block text-[10px] leading-relaxed text-white/35">
+                {running ? t("La plantilla queda fija durante el Live para mantener estable RTMP.") : t("La plantilla cambia Preview y la próxima señal RTMP.")}
+              </span>
+            </div>
+
             <div className="flex items-center justify-between gap-3">
               <div>
-                <strong className="text-sm">{t("Fuente de cámara")}</strong>
+                <strong className="text-sm">{t("Fuente visual")}</strong>
                 <span className="block text-xs text-white/40">{config.enabled ? running ? t("Capturando · fuera de Program") : t("Preparada · inicia fuera de Program") : t("Desactivada")}</span>
               </div>
               <label className="flex items-center gap-2 text-xs font-semibold">
@@ -2003,41 +2298,97 @@ function VideoStudioModal({
                   disabled={running}
                   onChange={(event) => update({
                     enabled: event.currentTarget.checked,
-                    cameraDevice: config.cameraDevice || devices[0]?.id || ""
+                    captureMode: "browser",
+                    cameraDevice: config.cameraDevice || "default"
                   })}
                 />
-                {t("Usar cámara")}
+                {t("Usar fuente")}
               </label>
             </div>
 
-            <Field label={t("Cámara") }>
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" className={cn("rounded-md border p-3 text-left", activeLayer === "camera" ? "border-emerald-400/60 bg-emerald-400/10" : "border-white/10 bg-white/[.03]")} onClick={() => setActiveLayer("camera")}>
+                <span className="flex items-center gap-2 text-xs font-semibold"><Camera className="h-4 w-4" />{t("Cámara")}</span>
+                <span className="mt-1 block text-[10px] text-white/40">{cameraAvailable ? t("Activa") : t("Sin señal")}</span>
+              </button>
+              <button type="button" className={cn("rounded-md border p-3 text-left", activeLayer === "screen" ? "border-emerald-400/60 bg-emerald-400/10" : "border-white/10 bg-white/[.03]")} onClick={() => setActiveLayer("screen")}>
+                <span className="flex items-center gap-2 text-xs font-semibold"><Monitor className="h-4 w-4" />{t("Pantalla / ventana")}</span>
+                <span className="mt-1 block truncate text-[10px] text-white/40">{screenAvailable ? config.screenLabel : t("Sin señal")}</span>
+              </button>
+            </div>
+
+            {activeLayer === "camera" ? <Field label={t("Cámara")}>
               <div className="flex gap-2">
                 <select
                   className={cn(fieldClass, "border-white/15 bg-white/5 text-white")}
                   value={config.cameraDevice}
                   disabled={!config.enabled}
-                  onChange={(event) => update({ cameraDevice: event.currentTarget.value })}
+                  onChange={(event) => {
+                    const cameraDevice = event.currentTarget.value;
+                    update({ cameraDevice, cameraEnabled: true, cameraRotationDegrees: 0 });
+                    void startCamera(cameraDevice);
+                  }}
                 >
-                  <option value="">{t("Selecciona una cámara")}</option>
-                  {devices.map((device) => <option key={device.id} value={device.id}>{device.label}</option>)}
+                  <option value="default">{t("Cámara predeterminada")}</option>
+                  {cameraDevices.map((device) => <option key={`${device.kind}:${device.id}`} value={device.label}>{device.label}</option>)}
                 </select>
-                <Button type="button" size="icon" variant="secondary" disabled={busy === "cameras"} onClick={onRefresh} aria-label={t("Refrescar cámaras") }>
-                  <RefreshCcw className={cn("h-4 w-4", busy === "cameras" && "animate-spin")} />
+                <Button type="button" size="icon" variant="secondary" onClick={() => void startCamera()} aria-label={t("Refrescar fuentes") }>
+                  <RefreshCcw className="h-4 w-4" />
                 </Button>
               </div>
-            </Field>
+              <label className="mt-2 flex items-center gap-2 text-xs text-white/65">
+                <input type="checkbox" checked={config.cameraEnabled} disabled={!config.enabled} onChange={(event) => {
+                  if (event.currentTarget.checked) {
+                    update({ cameraEnabled: true, cameraRotationDegrees: config.captureMode === "native" ? 0 : config.cameraRotationDegrees });
+                    void startCamera();
+                  } else {
+                    stopCamera();
+                    update({ cameraEnabled: false });
+                  }
+                }} />
+                {t("Cámara activa")}
+              </label>
+            </Field> : <Field label={t("Pantalla o ventana")}>
+              <Button type="button" variant="secondary" disabled={!config.enabled} onClick={() => void chooseScreenOrWindow()}>
+                <Monitor className="h-4 w-4" />{screenAvailable ? t("Cambiar pantalla o ventana") : t("Elegir pantalla o ventana")}
+              </Button>
+              <label className="mt-2 flex items-center gap-2 text-xs text-white/65">
+                <input type="checkbox" checked={config.screenEnabled} disabled={!config.enabled} onChange={(event) => {
+                  if (event.currentTarget.checked) void chooseScreenOrWindow();
+                  else {
+                    stopScreen();
+                    update({ screenEnabled: false });
+                  }
+                }} />
+                {t("Pantalla o ventana activa")}
+              </label>
+              <span className="mt-2 block text-[11px] leading-relaxed text-white/40">{t("El selector del sistema permite compartir una pantalla completa o una ventana de aplicación.")}</span>
+            </Field>}
 
             <Field label={t("Composición") }>
-              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraLayout} disabled={!config.enabled} onChange={(event) => update({ cameraLayout: event.currentTarget.value })}>
+              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.layout} disabled={!config.enabled} onChange={(event) => updateLayer({ layout: event.currentTarget.value })}>
                 <option value="card">{t("Tarjeta")}</option>
                 <option value="wide">{t("Ancho completo")}</option>
                 <option value="background">{t("Fondo")}</option>
+                <option value="free">{t("Libre · mover en Preview")}</option>
               </select>
             </Field>
 
+            <div className="flex items-center justify-between gap-2 rounded-md border border-white/10 bg-white/[.03] p-2">
+              <span className="text-[11px] text-white/45">{t("Orden de capa")} · Z{activeZIndex}</span>
+              <div className="flex gap-1">
+                <Button type="button" size="sm" variant="secondary" disabled={activeZIndex > otherZIndex} onClick={() => setLayerDepth(true)}>
+                  <ArrowUp className="h-3.5 w-3.5" />{t("Al frente")}
+                </Button>
+                <Button type="button" size="sm" variant="secondary" disabled={activeZIndex < otherZIndex} onClick={() => setLayerDepth(false)}>
+                  <ArrowDown className="h-3.5 w-3.5" />{t("Al fondo")}
+                </Button>
+              </div>
+            </div>
+
             <div className="grid grid-cols-2 gap-3">
               <Field label={t("Posición") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraPosition} disabled={!config.enabled || config.cameraLayout !== "card"} onChange={(event) => update({ cameraPosition: event.currentTarget.value })}>
+                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.position} disabled={!config.enabled || layer.layout !== "card"} onChange={(event) => updateLayer({ position: event.currentTarget.value })}>
                   <option value="top_left">{t("Arriba izquierda")}</option>
                   <option value="top_right">{t("Arriba derecha")}</option>
                   <option value="center">{t("Centro")}</option>
@@ -2046,7 +2397,7 @@ function VideoStudioModal({
                 </select>
               </Field>
               <Field label={t("Tamaño") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraSize} disabled={!config.enabled || config.cameraLayout !== "card"} onChange={(event) => update({ cameraSize: event.currentTarget.value })}>
+                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.size} disabled={!config.enabled || layer.layout !== "card"} onChange={(event) => updateLayer({ size: event.currentTarget.value })}>
                   <option value="small">{t("Pequeña")}</option>
                   <option value="medium">{t("Mediana")}</option>
                   <option value="large">{t("Grande")}</option>
@@ -2056,7 +2407,7 @@ function VideoStudioModal({
 
             <div className="grid grid-cols-2 gap-3">
               <Field label={t("Efecto") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraEffect} disabled={!config.enabled} onChange={(event) => update({ cameraEffect: event.currentTarget.value })}>
+                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.effect} disabled={!config.enabled} onChange={(event) => updateLayer({ effect: event.currentTarget.value })}>
                   <option value="clean">{t("Limpio")}</option>
                   <option value="mono">{t("Monocromo")}</option>
                   <option value="contrast">{t("Contraste editorial")}</option>
@@ -2064,7 +2415,7 @@ function VideoStudioModal({
                 </select>
               </Field>
               <Field label={t("Orientación") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraRotationDegrees} disabled={!config.enabled} onChange={(event) => update({ cameraRotationDegrees: Number(event.currentTarget.value) })}>
+                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.rotationDegrees} disabled={!config.enabled} onChange={(event) => updateLayer({ rotationDegrees: Number(event.currentTarget.value) })}>
                   <option value={0}>{t("Normal · 0°")}</option>
                   <option value={90}>{t("Girar 90°")}</option>
                   <option value={180}>{t("Girar 180°")}</option>
@@ -2074,19 +2425,19 @@ function VideoStudioModal({
             </div>
 
             <label className="flex items-center gap-2 text-xs text-white/65">
-              <input type="checkbox" checked={config.cameraMirror} disabled={!config.enabled} onChange={(event) => update({ cameraMirror: event.currentTarget.checked })} />
-              {t("Espejar cámara")}
+              <input type="checkbox" checked={layer.mirror} disabled={!config.enabled} onChange={(event) => updateLayer({ mirror: event.currentTarget.checked })} />
+              {t("Espejar fuente")}
             </label>
 
             <Field label={t("Encuadre") }>
-              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={config.cameraFraming} disabled={!config.enabled} onChange={(event) => update({ cameraFraming: event.currentTarget.value })}>
+              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.framing} disabled={!config.enabled} onChange={(event) => updateLayer({ framing: event.currentTarget.value })}>
                 <option value="contain">{t("Ajustar · mostrar imagen completa")}</option>
                 <option value="cover">{t("Rellenar · recortar bordes")}</option>
               </select>
             </Field>
 
-            <Field label={t("Opacidad máxima: {value}%", { value: config.cameraOpacityPercent })}>
-              <input type="range" min={20} max={100} step={5} value={config.cameraOpacityPercent} disabled={!config.enabled} onChange={(event) => update({ cameraOpacityPercent: Number(event.currentTarget.value) })} />
+            <Field label={t("Opacidad máxima: {value}%", { value: layer.opacityPercent })}>
+              <input type="range" min={20} max={100} step={5} value={layer.opacityPercent} disabled={!config.enabled} onChange={(event) => updateLayer({ opacityPercent: Number(event.currentTarget.value) })} />
             </Field>
             <Field label={t("Duración AUTO: {value} ms", { value: config.transitionMillis })}>
               <input type="range" min={0} max={3000} step={100} value={config.transitionMillis} disabled={!config.enabled} onChange={(event) => update({ transitionMillis: Number(event.currentTarget.value) })} />
@@ -2094,60 +2445,306 @@ function VideoStudioModal({
 
             {previewError ? <p className="rounded-md border border-amber-400/20 bg-amber-400/10 p-2 text-xs text-amber-100">{previewError}</p> : null}
             {!running ? (
-              <Button type="button" disabled={busy === "saving" || (config.enabled && !config.cameraDevice)} onClick={() => void onSave()}>
+              <Button type="button" disabled={busy === "saving" || (config.enabled && !config.cameraEnabled && !config.screenEnabled)} onClick={() => void onSave()}>
                 {busy === "saving" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                 {t("Guardar composición")}
               </Button>
             ) : (
-              <p className="text-xs text-white/40">{t("Los cambios de cámara se aplican y guardan en vivo sin reiniciar RTMP.")}</p>
+              <p className="text-xs text-white/40">{t("Los cambios de fuente visual se aplican y guardan en vivo sin reiniciar RTMP.")}</p>
             )}
           </aside>
         </div>
       </section>
-    </div>
+    </div></>
   );
+}
+
+type VisualLayerConfig = {
+  layout: string;
+  position: string;
+  size: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  zIndex: number;
+  effect: string;
+  mirror: boolean;
+  rotationDegrees: number;
+  framing: string;
+  opacityPercent: number;
+};
+
+type VisualLayerRect = { x: number; y: number; width: number; height: number };
+
+function applyVisualLayerRect(
+  config: BroadcastVideoCompositor,
+  layer: "camera" | "screen",
+  rect: VisualLayerRect
+): BroadcastVideoCompositor {
+  const rounded = {
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height)
+  };
+  return layer === "camera" ? {
+    ...config,
+    cameraLayout: "free",
+    cameraX: rounded.x,
+    cameraY: rounded.y,
+    cameraWidth: rounded.width,
+    cameraHeight: rounded.height
+  } : {
+    ...config,
+    screenLayout: "free",
+    screenX: rounded.x,
+    screenY: rounded.y,
+    screenWidth: rounded.width,
+    screenHeight: rounded.height
+  };
+}
+
+function visualLayerConfig(config: BroadcastVideoCompositor, layer: "camera" | "screen"): VisualLayerConfig {
+  return layer === "camera" ? {
+    layout: config.cameraLayout,
+    position: config.cameraPosition,
+    size: config.cameraSize,
+    x: config.cameraX,
+    y: config.cameraY,
+    width: config.cameraWidth,
+    height: config.cameraHeight,
+    zIndex: config.cameraZIndex,
+    effect: config.cameraEffect,
+    mirror: config.cameraMirror,
+    rotationDegrees: config.cameraRotationDegrees,
+    framing: config.cameraFraming,
+    opacityPercent: config.cameraOpacityPercent
+  } : {
+    layout: config.screenLayout,
+    position: config.screenPosition,
+    size: config.screenSize,
+    x: config.screenX,
+    y: config.screenY,
+    width: config.screenWidth,
+    height: config.screenHeight,
+    zIndex: config.screenZIndex,
+    effect: config.screenEffect,
+    mirror: config.screenMirror,
+    rotationDegrees: config.screenRotationDegrees,
+    framing: config.screenFraming,
+    opacityPercent: config.screenOpacityPercent
+  };
+}
+
+function visualLayerRect(config: VisualLayerConfig) {
+  if (config.layout === "free") return { x: config.x, y: config.y, width: config.width, height: config.height };
+  if (config.layout === "background") return { x: 0, y: 110, width: 360, height: 340 };
+  if (config.layout === "wide") return { x: 0, y: 120, width: 360, height: 225 };
+  const size = config.size === "small" ? 105 : config.size === "large" ? 205 : 150;
+  const margin = 24;
+  const positions: Record<string, { x: number; y: number }> = {
+    top_left: { x: margin, y: 120 },
+    top_right: { x: 360 - size - margin, y: 120 },
+    center: { x: (360 - size) / 2, y: (640 - size) / 2 },
+    bottom_left: { x: margin, y: 640 - size - margin },
+    bottom_right: { x: 360 - size - margin, y: 640 - size - margin }
+  };
+  return { ...(positions[config.position] ?? positions.top_right), width: size, height: size };
+}
+
+function drawVisualLayer(context: CanvasRenderingContext2D, video: HTMLVideoElement, config: VisualLayerConfig) {
+  if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) return;
+  const box = visualLayerRect(config);
+  const quarterTurn = config.rotationDegrees === 90 || config.rotationDegrees === 270;
+  const targetWidth = quarterTurn ? box.height : box.width;
+  const targetHeight = quarterTurn ? box.width : box.height;
+  const scale = config.framing === "cover"
+    ? Math.max(targetWidth / video.videoWidth, targetHeight / video.videoHeight)
+    : Math.min(targetWidth / video.videoWidth, targetHeight / video.videoHeight);
+  const drawWidth = video.videoWidth * scale;
+  const drawHeight = video.videoHeight * scale;
+  const filters: Record<string, string> = {
+    clean: "none",
+    mono: "grayscale(1)",
+    contrast: "contrast(1.35) saturate(.82)",
+    dream: "blur(1.5px) brightness(1.08) saturate(.72)"
+  };
+
+  context.save();
+  context.globalAlpha = config.opacityPercent / 100;
+  context.beginPath();
+  context.rect(box.x, box.y, box.width, box.height);
+  context.clip();
+  context.fillStyle = "black";
+  context.fillRect(box.x, box.y, box.width, box.height);
+  context.translate(box.x + box.width / 2, box.y + box.height / 2);
+  context.rotate(config.rotationDegrees * Math.PI / 180);
+  context.scale(config.mirror ? -1 : 1, 1);
+  context.filter = filters[config.effect] ?? "none";
+  context.drawImage(video, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+  context.restore();
+}
+
+function bytesToBase64(bytes: Uint8Array | Uint8ClampedArray) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+  }
+  return btoa(binary);
+}
+
+function BroadcastTemplateChrome({
+  template,
+  stationName,
+  trackTitle
+}: {
+  template: string;
+  stationName: string;
+  trackTitle: string;
+}) {
+  if (template === "transmission") {
+    return <>
+      <div className="absolute inset-x-0 top-0 z-10 h-[11.5%] border-b-2 border-black bg-[#f1efe6] px-[5%] py-[4%] text-black">
+        <strong className="block text-[clamp(9px,1.9vw,18px)] font-black tracking-[-0.07em]">RAU <span className="text-[#ff4b2b]">/</span> RADIO</strong>
+        <span className="absolute bottom-[11%] left-[5%] max-w-[58%] truncate font-mono text-[clamp(4px,.65vw,7px)] uppercase tracking-[0.16em] text-black/55">{stationName}</span>
+        <span className="absolute right-[5%] top-[25%] font-mono text-[clamp(4px,.58vw,6px)] tracking-[0.12em]">INDEPENDENT SIGNAL&nbsp; ○</span>
+      </div>
+      <div className="absolute inset-x-0 top-[11.5%] z-0 h-[5.5%] border-b border-black/60 bg-[#d7ff00]" />
+      <div className="absolute inset-x-0 top-[17%] z-0 h-[41%] bg-[#ff4b2b]" style={{ backgroundImage: "linear-gradient(rgba(0,0,0,.18) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.18) 1px,transparent 1px)", backgroundSize: "20% 18%" }}>
+        <span className="absolute left-[5%] top-[6%] font-mono text-[6px] font-semibold tracking-[0.16em] text-black/75">01 / LIVE SOURCE</span>
+        <strong className="absolute left-[5%] top-[14%] text-[clamp(14px,3vw,28px)] font-black uppercase leading-[.78] tracking-[-0.08em] text-black/85">LIVE<br />TRANS<br />MISSION</strong>
+      </div>
+      <div className="absolute inset-x-0 top-[58%] z-10 h-[33%] bg-[#0b0b0b] px-[5.5%] pt-[8%] text-white">
+        <span className="font-mono text-[clamp(4px,.68vw,7px)] font-semibold tracking-[0.16em] text-[#d7ff00]">NOW TRANSMITTING</span>
+        <span className="mt-[5%] block truncate font-mono text-[clamp(5px,.8vw,8px)] uppercase tracking-[0.1em] text-white/45">{stationName}</span>
+        <strong className="mt-[3%] block line-clamp-3 text-[clamp(10px,2vw,20px)] font-semibold uppercase leading-[1.02] tracking-[-0.04em]">{trackTitle}</strong>
+        <div className="absolute inset-x-[5.5%] bottom-[9%] flex h-[10%] items-end gap-[1.5%] border-b border-white/25">
+          {[35, 55, 72, 92, 48, 65, 85, 42, 68, 95, 52, 76].map((height, index) => <span key={index} className="flex-1 bg-[#f1efe6]" style={{ height: `${height}%` }} />)}
+        </div>
+      </div>
+      <div className="absolute inset-x-0 bottom-0 z-10 h-[9%] border-t-2 border-black bg-[#f1efe6] px-[5%] py-[4%] font-mono text-[clamp(4px,.65vw,7px)] tracking-[0.12em] text-black/55">
+        H264 / AAC / 720X1280 / 30FPS <span className="float-right text-black">RAW STREAM ↗</span>
+      </div>
+    </>;
+  }
+
+  if (template === "mono_paper") {
+    return <>
+      <div className="absolute inset-x-0 top-0 z-10 h-[14.5%] bg-black px-[5%] py-[5%] text-white">
+        <strong className="block truncate text-[clamp(9px,1.8vw,17px)] font-semibold uppercase">{stationName}</strong>
+        <span className="absolute bottom-[12%] left-[5%] font-mono text-[clamp(4px,.65vw,7px)] tracking-[0.16em] text-white/50">RAU STUDIO / LIVE VISUAL 01</span>
+        <span className="absolute right-[5%] top-[23%] h-8 w-8 bg-[#ff4b2b]" />
+      </div>
+      <div className="absolute left-[5%] right-[5%] top-[18.5%] z-0 h-[40%] bg-[#151515]" />
+      <div className="absolute left-[5%] top-[18.5%] z-10 h-[40%] w-[1.4%] bg-[#ff4b2b]" />
+      <div className="absolute inset-x-[5%] top-[65%] z-10 border-t-2 border-black pt-[5%] text-black">
+        <span className="font-mono text-[clamp(4px,.7vw,7px)] tracking-[0.14em] text-black/50">CURRENT AUDIO / NOW PLAYING</span>
+        <strong className="mt-[4%] block line-clamp-4 text-[clamp(11px,2.2vw,22px)] font-black uppercase leading-[.98] tracking-[-0.055em]">{trackTitle}</strong>
+      </div>
+      <span className="absolute bottom-[3%] left-[5%] z-10 font-mono text-[clamp(4px,.65vw,7px)] tracking-[0.12em] text-black/45">VERTICAL SIGNAL / INDEPENDENT RADIO</span>
+    </>;
+  }
+
+  return <>
+    <div className="absolute inset-x-0 top-0 z-30 h-[1.6%] bg-white" />
+    <div className="absolute left-[5%] right-[5%] top-[3%] z-30 h-[11%] border border-white/40 bg-black/70 px-[2.5%] py-[1.5%] text-white">
+      <strong className="block truncate text-[clamp(8px,1.8vw,17px)] font-medium uppercase">{stationName}</strong>
+      <span className="absolute bottom-[10%] left-[2.5%] font-mono text-[clamp(4px,.65vw,7px)] tracking-[0.16em] text-white/55">LIVE / RAU BROADCAST SYSTEM</span>
+    </div>
+    <div className="absolute left-[5%] top-[20%] z-10 h-[35%] w-[1.2%] bg-white/85" />
+    <div className="absolute left-[9.5%] right-[5%] top-[20%] z-10 h-[35%] border border-white/30 bg-gradient-to-br from-white/55 via-white/5 to-transparent" />
+    <div className="absolute inset-x-[5%] top-[70%] z-30 border-t border-white/55 bg-black/90 pt-[4%] text-white">
+      <span className="font-mono text-[clamp(5px,.8vw,9px)] tracking-[0.13em] text-white/50">NOW PLAYING / CURRENT AUDIO</span>
+      <strong className="mt-[3%] block line-clamp-3 text-[clamp(9px,1.8vw,18px)] font-medium uppercase leading-tight">{trackTitle}</strong>
+    </div>
+    <span className="absolute bottom-[3%] left-[5%] z-30 font-mono text-[clamp(5px,.7vw,8px)] tracking-[0.12em] text-white/35">H264 / AAC / 720X1280 / 30FPS</span>
+  </>;
 }
 
 function StudioMonitor({
   label,
   stationName,
   trackTitle,
-  config,
-  cameraVisible,
-  cameraOpacity = 1,
-  cameraPlaceholder,
-  videoRef,
+  visualVisible,
+  visualOpacity = 1,
+  visualAvailable,
+  visualPlaceholder,
+  canvasRef,
+  visualConfig,
+  interactive = false,
+  selectedLayer = "camera",
+  onSelectLayer,
+  onLayerRectChange,
   transitionMillis = 0
 }: {
   label: string;
   stationName: string;
   trackTitle: string;
-  config: BroadcastVideoCompositor;
-  cameraVisible: boolean;
-  cameraOpacity?: number;
-  cameraPlaceholder: string;
-  videoRef?: React.RefObject<HTMLVideoElement | null>;
+  visualVisible: boolean;
+  visualOpacity?: number;
+  visualAvailable: boolean;
+  visualPlaceholder: string;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  visualConfig: BroadcastVideoCompositor;
+  interactive?: boolean;
+  selectedLayer?: "camera" | "screen";
+  onSelectLayer?: (layer: "camera" | "screen") => void;
+  onLayerRectChange?: (layer: "camera" | "screen", rect: VisualLayerRect, commit: boolean) => void;
   transitionMillis?: number;
 }) {
-  const positionClass: Record<string, string> = {
-    top_left: "left-[7%] top-[19%]",
-    top_right: "right-[7%] top-[19%]",
-    center: "left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2",
-    bottom_left: "bottom-[4%] left-[7%]",
-    bottom_right: "bottom-[4%] right-[7%]"
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const beginLayerGesture = (
+    event: React.PointerEvent<HTMLElement>,
+    layer: "camera" | "screen",
+    mode: "move" | "resize"
+  ) => {
+    if (!interactive || !onLayerRectChange) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelectLayer?.(layer);
+    const stage = stageRef.current;
+    if (!stage) return;
+    const bounds = stage.getBoundingClientRect();
+    const start = visualLayerRect(visualLayerConfig(visualConfig, layer));
+    const startPointer = { x: event.clientX, y: event.clientY };
+    let latest = start;
+    let changed = false;
+    const move = (pointer: PointerEvent) => {
+      const deltaX = (pointer.clientX - startPointer.x) * 360 / bounds.width;
+      const deltaY = (pointer.clientY - startPointer.y) * 640 / bounds.height;
+      if (mode === "move") {
+        latest = {
+          ...start,
+          x: Math.max(0, Math.min(360 - start.width, start.x + deltaX)),
+          y: Math.max(0, Math.min(640 - start.height, start.y + deltaY))
+        };
+      } else {
+        latest = {
+          ...start,
+          width: Math.max(40, Math.min(360 - start.x, start.width + deltaX)),
+          height: Math.max(40, Math.min(640 - start.y, start.height + deltaY))
+        };
+      }
+      changed = true;
+      onLayerRectChange(layer, latest, false);
+    };
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (changed) onLayerRectChange(layer, latest, true);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
   };
-  const sizeClass: Record<string, string> = { small: "w-[30%]", medium: "w-[43%]", large: "w-[58%]" };
-  const cameraLayoutClass = config.cameraLayout === "background"
-    ? "inset-x-0 top-[17.2%] z-20 h-[53.1%] w-full border-y border-white/40"
-    : config.cameraLayout === "wide"
-      ? "inset-x-0 top-[18.75%] z-20 h-[35.15%] w-full border-y border-white/65"
-      : cn("z-20 aspect-square border border-white/65", positionClass[config.cameraPosition] ?? positionClass.top_right, sizeClass[config.cameraSize] ?? sizeClass.medium);
-  const cameraFilter: Record<string, string> = {
-    clean: "none",
-    mono: "grayscale(1)",
-    contrast: "contrast(1.35) saturate(.82)",
-    dream: "blur(1.5px) brightness(1.08) saturate(.72)"
-  };
+  const editableLayers = ([
+    { key: "screen" as const, enabled: visualConfig.screenEnabled, config: visualLayerConfig(visualConfig, "screen") },
+    { key: "camera" as const, enabled: visualConfig.cameraEnabled, config: visualLayerConfig(visualConfig, "camera") }
+  ]).filter((layer) => layer.enabled);
+  const graphicTemplate = visualConfig.graphicTemplate || "signal_grid";
+
   return (
     <div>
       <div className="mb-2 flex items-center justify-between text-[11px] font-bold tracking-[0.2em] text-white/55">
@@ -2155,47 +2752,56 @@ function StudioMonitor({
         <span className={cn("h-2 w-2 rounded-full", label === "PROGRAM" ? "bg-red-500" : "bg-emerald-400")} />
       </div>
       <div
-        className="relative mx-auto aspect-[9/16] max-h-[58vh] overflow-hidden border border-white/15 bg-[#080b09] shadow-inner"
+        ref={stageRef}
+        className={cn(
+          "relative mx-auto aspect-[9/16] max-h-[58vh] overflow-hidden border shadow-inner",
+          graphicTemplate === "signal_grid" ? "border-white/15 bg-[#080b09]" : "border-black/30 bg-[#f1efe6]"
+        )}
         style={{
-          backgroundImage: "linear-gradient(rgba(255,255,255,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.055) 1px, transparent 1px)",
+          backgroundImage: graphicTemplate === "signal_grid"
+            ? "linear-gradient(rgba(255,255,255,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.055) 1px, transparent 1px)"
+            : "linear-gradient(rgba(0,0,0,.065) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,.065) 1px, transparent 1px)",
           backgroundSize: "12.5% 7.03%"
         }}
       >
-        <div className="absolute inset-x-0 top-0 z-30 h-[1.6%] bg-white" />
-        <div className="absolute left-[5%] right-[5%] top-[3%] z-30 h-[11%] border border-white/40 bg-black/70 px-[2.5%] py-[1.5%]">
-          <strong className="block truncate text-[clamp(8px,1.8vw,17px)] font-medium uppercase">{stationName}</strong>
-          <span className="absolute bottom-[10%] left-[2.5%] font-mono text-[clamp(4px,.65vw,7px)] tracking-[0.16em] text-white/55">LIVE / RAU BROADCAST SYSTEM</span>
-        </div>
-        <div className="absolute left-[5%] top-[20%] z-10 h-[35%] w-[1.2%] bg-white/85" />
-        <div className="absolute left-[9.5%] right-[5%] top-[20%] z-10 h-[35%] border border-white/30 bg-gradient-to-br from-white/55 via-white/5 to-transparent" />
-        <div className="absolute inset-x-[5%] top-[70%] z-30 border-t border-white/55 bg-black/90 pt-[4%]">
-          <span className="font-mono text-[clamp(5px,.8vw,9px)] tracking-[0.13em] text-white/50">NOW PLAYING / CURRENT AUDIO</span>
-          <strong className="mt-[3%] block line-clamp-3 text-[clamp(9px,1.8vw,18px)] font-medium uppercase leading-tight">{trackTitle}</strong>
-        </div>
-        {cameraVisible ? (
-          <div
-            className={cn("absolute overflow-hidden bg-[#111]", cameraLayoutClass)}
-            style={{ opacity: cameraOpacity * config.cameraOpacityPercent / 100, transition: `opacity ${transitionMillis}ms linear` }}
-          >
-            {videoRef ? (
-              <video
-                ref={videoRef}
-                muted
-                playsInline
-                className={cn("h-full w-full bg-black", config.cameraFraming === "contain" ? "object-contain" : "object-cover")}
-                style={{
-                  filter: cameraFilter[config.cameraEffect] ?? "none",
-                  transform: `rotate(${config.cameraRotationDegrees ?? 0}deg) scaleX(${config.cameraMirror ? -1 : 1})`
-                }}
-              />
-            ) : (
-              <div className="grid h-full place-items-center bg-gradient-to-br from-zinc-300 via-zinc-700 to-black p-2 text-center">
-                <div><Camera className="mx-auto h-5 w-5 text-white/70" /><span className="mt-1 block text-[8px] uppercase tracking-wider text-white/55">{cameraPlaceholder}</span></div>
-              </div>
-            )}
+        <BroadcastTemplateChrome template={graphicTemplate} stationName={stationName} trackTitle={trackTitle} />
+        {visualVisible ? <canvas ref={canvasRef} width={360} height={640} className={cn("absolute inset-0 z-20 h-full w-full", interactive && "pointer-events-none")} style={{ opacity: visualOpacity, transition: `opacity ${transitionMillis}ms linear` }} /> : null}
+        {interactive && visualVisible ? editableLayers.map((layer) => {
+          const rect = visualLayerRect(layer.config);
+          const selected = selectedLayer === layer.key;
+          return (
+            <div
+              key={layer.key}
+              className={cn("absolute touch-none border", selected ? "border-emerald-300 shadow-[0_0_0_1px_rgba(16,185,129,.45)]" : "border-white/35 hover:border-white/70")}
+              style={{
+                left: `${rect.x / 3.6}%`,
+                top: `${rect.y / 6.4}%`,
+                width: `${rect.width / 3.6}%`,
+                height: `${rect.height / 6.4}%`,
+                zIndex: selected ? 70 : 40 + layer.config.zIndex,
+                cursor: "move"
+              }}
+              onPointerDown={(event) => beginLayerGesture(event, layer.key, "move")}
+            >
+              <span className={cn("absolute -top-5 left-0 rounded-sm px-1.5 py-0.5 font-mono text-[7px] font-semibold uppercase tracking-wider", selected ? "bg-emerald-300 text-black" : "bg-black/80 text-white/70")}>
+                {layer.key === "camera" ? "CAMERA" : "SCREEN / WINDOW"} · Z{layer.config.zIndex}
+              </span>
+              {selected ? (
+                <button
+                  type="button"
+                  aria-label="Resize layer"
+                  className="absolute -bottom-2 -right-2 h-4 w-4 cursor-nwse-resize rounded-sm border border-black bg-emerald-300 shadow"
+                  onPointerDown={(event) => beginLayerGesture(event, layer.key, "resize")}
+                />
+              ) : null}
+            </div>
+          );
+        }) : null}
+        {visualVisible && !visualAvailable ? (
+          <div className="absolute inset-x-[15%] top-[30%] z-20 grid h-[18%] place-items-center border border-white/20 bg-black/70 p-2 text-center">
+            <div><Monitor className="mx-auto h-5 w-5 text-white/70" /><span className="mt-1 block text-[8px] uppercase tracking-wider text-white/55">{visualPlaceholder}</span></div>
           </div>
         ) : null}
-        <span className="absolute bottom-[3%] left-[5%] z-30 font-mono text-[clamp(5px,.7vw,8px)] tracking-[0.12em] text-white/35">H264 / AAC / 720X1280 / 30FPS</span>
       </div>
     </div>
   );

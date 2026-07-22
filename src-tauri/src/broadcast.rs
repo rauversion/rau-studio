@@ -1,4 +1,5 @@
 use crate::{application_audio, settings, system};
+use base64::Engine as _;
 use chrono::Utc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Data, SampleFormat};
@@ -28,8 +29,24 @@ const RTMP_PLATFORM_CUSTOM: &str = "custom";
 const RTMP_VIDEO_WIDTH: usize = 720;
 const RTMP_VIDEO_HEIGHT: usize = 1280;
 const RTMP_VIDEO_FPS: usize = 30;
-const RTMP_DISPLAY_FONT: &str = "/System/Library/Fonts/SFNS.ttf";
+#[cfg(target_os = "macos")]
+const RTMP_DISPLAY_FONT: &str = "/System/Library/Fonts/Supplemental/Arial Bold.ttf";
+#[cfg(target_os = "macos")]
+const RTMP_HEAVY_FONT: &str = "/System/Library/Fonts/Supplemental/Arial Black.ttf";
+#[cfg(target_os = "macos")]
 const RTMP_MONO_FONT: &str = "/System/Library/Fonts/SFNSMono.ttf";
+#[cfg(target_os = "windows")]
+const RTMP_DISPLAY_FONT: &str = "C\\:/Windows/Fonts/arialbd.ttf";
+#[cfg(target_os = "windows")]
+const RTMP_HEAVY_FONT: &str = "C\\:/Windows/Fonts/ariblk.ttf";
+#[cfg(target_os = "windows")]
+const RTMP_MONO_FONT: &str = "C\\:/Windows/Fonts/consola.ttf";
+#[cfg(target_os = "linux")]
+const RTMP_DISPLAY_FONT: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+#[cfg(target_os = "linux")]
+const RTMP_HEAVY_FONT: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+#[cfg(target_os = "linux")]
+const RTMP_MONO_FONT: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
 const RTMP_OVERLAY_LINE_CHARS: usize = 26;
 const RTMP_OVERLAY_MAX_LINES: usize = 4;
 // A half-resolution transparent program canvas keeps the FIFO bandwidth equal
@@ -127,6 +144,9 @@ pub struct BroadcastProfile {
 #[serde(default, rename_all = "camelCase")]
 pub struct BroadcastVideoCompositor {
     enabled: bool,
+    graphic_template: String,
+    capture_mode: String,
+    camera_enabled: bool,
     camera_device: String,
     camera_position: String,
     camera_size: String,
@@ -135,7 +155,27 @@ pub struct BroadcastVideoCompositor {
     camera_rotation_degrees: u16,
     camera_framing: String,
     camera_layout: String,
+    camera_x: u16,
+    camera_y: u16,
+    camera_width: u16,
+    camera_height: u16,
+    camera_z_index: u16,
     camera_opacity_percent: u16,
+    screen_enabled: bool,
+    screen_label: String,
+    screen_position: String,
+    screen_size: String,
+    screen_effect: String,
+    screen_mirror: bool,
+    screen_rotation_degrees: u16,
+    screen_framing: String,
+    screen_layout: String,
+    screen_x: u16,
+    screen_y: u16,
+    screen_width: u16,
+    screen_height: u16,
+    screen_z_index: u16,
+    screen_opacity_percent: u16,
     transition_millis: u16,
 }
 
@@ -143,7 +183,10 @@ impl Default for BroadcastVideoCompositor {
     fn default() -> Self {
         Self {
             enabled: false,
-            camera_device: String::new(),
+            graphic_template: "signal_grid".to_string(),
+            capture_mode: "native".to_string(),
+            camera_enabled: true,
+            camera_device: "default".to_string(),
             camera_position: "top_right".to_string(),
             camera_size: "medium".to_string(),
             camera_effect: "mono".to_string(),
@@ -151,7 +194,27 @@ impl Default for BroadcastVideoCompositor {
             camera_rotation_degrees: 180,
             camera_framing: "contain".to_string(),
             camera_layout: "wide".to_string(),
+            camera_x: 0,
+            camera_y: 120,
+            camera_width: 360,
+            camera_height: 225,
+            camera_z_index: 2,
             camera_opacity_percent: 100,
+            screen_enabled: false,
+            screen_label: String::new(),
+            screen_position: "top_left".to_string(),
+            screen_size: "large".to_string(),
+            screen_effect: "clean".to_string(),
+            screen_mirror: false,
+            screen_rotation_degrees: 0,
+            screen_framing: "contain".to_string(),
+            screen_layout: "background".to_string(),
+            screen_x: 0,
+            screen_y: 110,
+            screen_width: 360,
+            screen_height: 340,
+            screen_z_index: 1,
+            screen_opacity_percent: 100,
             transition_millis: 800,
         }
     }
@@ -221,6 +284,7 @@ pub struct BroadcastApplicationAudioDevice {
 pub struct BroadcastCameraDevice {
     id: String,
     label: String,
+    kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -332,7 +396,7 @@ impl Default for BroadcastCameraStatus {
             device: None,
             label: None,
             transition_millis: 800,
-            message: "Cámara desactivada.".to_string(),
+            message: "Fuente visual desactivada.".to_string(),
         }
     }
 }
@@ -670,13 +734,23 @@ enum WorkerCommand {
     SetLineInputLive(bool),
     SetApplicationAudioLive(bool),
     SetCameraMix(u8, u16),
-    UpdateCameraSettings(BroadcastVideoCompositor),
+    UpdateCameraSettings(Box<BroadcastVideoCompositor>),
 }
 
 struct WorkerHandle {
     commands: Sender<WorkerCommand>,
-    camera_settings: Arc<Mutex<BroadcastVideoCompositor>>,
+    visual: WorkerVisualState,
     join: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct WorkerVisualState {
+    settings: Arc<Mutex<BroadcastVideoCompositor>>,
+    frame: Arc<Mutex<Option<BrowserVisualFrame>>>,
+}
+
+struct BrowserVisualFrame {
+    pixels: Vec<u8>,
 }
 
 impl WorkerHandle {
@@ -776,8 +850,11 @@ impl BroadcastManager {
         reset_interrupted_entries(&mut conn)?;
         let (sender, receiver) = mpsc::channel();
         let runtime = Arc::clone(&self.runtime);
-        let camera_settings = Arc::new(Mutex::new(profile.video_compositor.clone()));
-        let worker_camera_settings = Arc::clone(&camera_settings);
+        let visual = WorkerVisualState {
+            settings: Arc::new(Mutex::new(profile.video_compositor.clone())),
+            frame: Arc::new(Mutex::new(None)),
+        };
+        let worker_visual = visual.clone();
         let started_at = timestamp();
         runtime.update(
             &app,
@@ -795,12 +872,12 @@ impl BroadcastManager {
                 runtime,
                 receiver,
                 started_at,
-                worker_camera_settings,
+                worker_visual,
             )
         });
         *worker = Some(WorkerHandle {
             commands: sender,
-            camera_settings,
+            visual,
             join: Some(join),
         });
         Ok(self.runtime.snapshot())
@@ -917,7 +994,7 @@ impl BroadcastManager {
         transition_millis: u16,
     ) -> Result<BroadcastStatus, String> {
         if mix_percent > 100 || transition_millis > 3_000 {
-            return Err("Mezcla o duración de transición de cámara inválida.".to_string());
+            return Err("Mezcla o duración de transición visual inválida.".to_string());
         }
         self.cleanup_finished_worker();
         let worker = self
@@ -947,14 +1024,42 @@ impl BroadcastManager {
         let Some(worker) = worker.as_ref() else {
             return Err("La radio no esta transmitiendo.".to_string());
         };
-        if let Ok(mut current) = worker.camera_settings.lock() {
+        if let Ok(mut current) = worker.visual.settings.lock() {
             *current = config.clone();
         }
         worker
             .commands
-            .send(WorkerCommand::UpdateCameraSettings(config))
+            .send(WorkerCommand::UpdateCameraSettings(Box::new(config)))
             .map_err(|_| "El motor de broadcast ya se detuvo.".to_string())?;
         Ok(self.runtime.snapshot())
+    }
+
+    fn push_visual_frame(&self, mut pixels: Vec<u8>) -> Result<(), String> {
+        if pixels.len() != CAMERA_FRAME_BYTES {
+            return Err(format!(
+                "Cuadro visual inválido: se esperaban {CAMERA_FRAME_BYTES} bytes RGBA y llegaron {}.",
+                pixels.len()
+            ));
+        }
+        rgba_to_bgra(&mut pixels);
+        self.cleanup_finished_worker();
+        let worker = self
+            .worker
+            .lock()
+            .map_err(|_| "No se pudo bloquear el motor de broadcast.".to_string())?;
+        let Some(worker) = worker.as_ref() else {
+            return Ok(());
+        };
+        if let Ok(mut latest) = worker.visual.frame.lock() {
+            *latest = Some(BrowserVisualFrame { pixels });
+        }
+        Ok(())
+    }
+}
+
+fn rgba_to_bgra(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
     }
 }
 
@@ -1250,16 +1355,43 @@ pub fn broadcast_set_camera_mix(
 pub fn broadcast_update_camera_settings(
     app: AppHandle,
     manager: State<'_, BroadcastManager>,
-    mut config: BroadcastVideoCompositor,
+    config: BroadcastVideoCompositor,
 ) -> Result<BroadcastStatus, String> {
-    config.camera_device = config.camera_device.trim().to_string();
-    validate_video_compositor(&config)?;
+    let config = normalize_video_compositor(config)?;
     if !config.enabled {
-        return Err("La cámara no puede desactivarse mientras el broadcast está iniciado. Usa el fader para sacarla de Program.".to_string());
+        return Err("La fuente visual no puede desactivarse mientras el broadcast está iniciado. Usa el fader para sacarla de Program.".to_string());
     }
+    persist_video_compositor(&app, &config)?;
+    manager.update_camera_settings(config)
+}
+
+#[tauri::command]
+pub fn broadcast_save_video_compositor(
+    app: AppHandle,
+    config: BroadcastVideoCompositor,
+) -> Result<(), String> {
+    let config = normalize_video_compositor(config)?;
+    persist_video_compositor(&app, &config)
+}
+
+fn normalize_video_compositor(
+    mut config: BroadcastVideoCompositor,
+) -> Result<BroadcastVideoCompositor, String> {
+    config.graphic_template = config.graphic_template.trim().to_lowercase();
+    config.camera_device = config.camera_device.trim().to_string();
+    config.capture_mode = config.capture_mode.trim().to_lowercase();
+    config.screen_label = config.screen_label.trim().to_string();
+    validate_video_compositor(&config)?;
+    Ok(config)
+}
+
+fn persist_video_compositor(
+    app: &AppHandle,
+    config: &BroadcastVideoCompositor,
+) -> Result<(), String> {
     let conn = open_db(&app)?;
     let now = timestamp();
-    let compositor_json = serde_json::to_string(&config)
+    let compositor_json = serde_json::to_string(config)
         .map_err(|error| format!("No se pudo serializar el compositor de video: {error}"))?;
     conn.execute(
         "INSERT INTO broadcast_video_compositor (id, config_json, updated_at)
@@ -1270,7 +1402,18 @@ pub fn broadcast_update_camera_settings(
         params![PROFILE_ID, compositor_json, now],
     )
     .map_err(|error| format!("No se pudo guardar el compositor de video: {error}"))?;
-    manager.update_camera_settings(config)
+    Ok(())
+}
+
+#[tauri::command]
+pub fn broadcast_push_visual_frame(
+    manager: State<'_, BroadcastManager>,
+    frame_base64: String,
+) -> Result<(), String> {
+    let pixels = base64::engine::general_purpose::STANDARD
+        .decode(frame_base64)
+        .map_err(|error| format!("Cuadro visual inválido: {error}"))?;
+    manager.push_visual_frame(pixels)
 }
 
 fn validate_profile(mut input: BroadcastProfileInput) -> Result<BroadcastProfileInput, String> {
@@ -1286,6 +1429,8 @@ fn validate_profile(mut input: BroadcastProfileInput) -> Result<BroadcastProfile
     input.rtmp_platform = input.rtmp_platform.trim().to_lowercase();
     input.rtmp_server_url = input.rtmp_server_url.trim().to_string();
     input.video_compositor.camera_device = input.video_compositor.camera_device.trim().to_string();
+    input.video_compositor.capture_mode = input.video_compositor.capture_mode.trim().to_lowercase();
+    input.video_compositor.screen_label = input.video_compositor.screen_label.trim().to_string();
     input.password = input
         .password
         .map(|value| value.trim().to_string())
@@ -1373,11 +1518,20 @@ fn validate_profile(mut input: BroadcastProfileInput) -> Result<BroadcastProfile
 }
 
 fn validate_video_compositor(config: &BroadcastVideoCompositor) -> Result<(), String> {
+    if !matches!(
+        config.graphic_template.as_str(),
+        "signal_grid" | "transmission" | "mono_paper"
+    ) {
+        return Err("Plantilla gráfica de broadcast inválida.".to_string());
+    }
+    if !matches!(config.capture_mode.as_str(), "native" | "browser") {
+        return Err("Modo de captura visual inválido.".to_string());
+    }
     if config.camera_device.len() > 256
         || config.camera_device.chars().any(char::is_control)
         || (config.enabled && config.camera_device.is_empty())
     {
-        return Err("Selecciona una cámara válida para el compositor.".to_string());
+        return Err("Selecciona una fuente visual válida para el compositor.".to_string());
     }
     if !matches!(
         config.camera_position.as_str(),
@@ -1402,15 +1556,80 @@ fn validate_video_compositor(config: &BroadcastVideoCompositor) -> Result<(), St
     }
     if !matches!(
         config.camera_layout.as_str(),
-        "card" | "wide" | "background"
+        "card" | "wide" | "background" | "free"
     ) {
         return Err("Composición de cámara inválida.".to_string());
     }
+    validate_visual_layer_geometry(
+        "cámara",
+        config.camera_x,
+        config.camera_y,
+        config.camera_width,
+        config.camera_height,
+        config.camera_z_index,
+    )?;
     if config.camera_opacity_percent > 100 {
         return Err("La opacidad de cámara debe estar entre 0% y 100%.".to_string());
     }
+    if !matches!(
+        config.screen_position.as_str(),
+        "top_left" | "top_right" | "center" | "bottom_left" | "bottom_right"
+    ) {
+        return Err("Posición de pantalla inválida.".to_string());
+    }
+    if !matches!(config.screen_size.as_str(), "small" | "medium" | "large") {
+        return Err("Tamaño de pantalla inválido.".to_string());
+    }
+    if !matches!(
+        config.screen_effect.as_str(),
+        "clean" | "mono" | "contrast" | "dream"
+    ) {
+        return Err("Efecto de pantalla inválido.".to_string());
+    }
+    if !matches!(config.screen_rotation_degrees, 0 | 90 | 180 | 270) {
+        return Err("Orientación de pantalla inválida.".to_string());
+    }
+    if !matches!(config.screen_framing.as_str(), "contain" | "cover") {
+        return Err("Encuadre de pantalla inválido.".to_string());
+    }
+    if !matches!(
+        config.screen_layout.as_str(),
+        "card" | "wide" | "background" | "free"
+    ) {
+        return Err("Composición de pantalla inválida.".to_string());
+    }
+    validate_visual_layer_geometry(
+        "pantalla",
+        config.screen_x,
+        config.screen_y,
+        config.screen_width,
+        config.screen_height,
+        config.screen_z_index,
+    )?;
+    if config.screen_opacity_percent > 100 {
+        return Err("La opacidad de pantalla debe estar entre 0% y 100%.".to_string());
+    }
     if config.transition_millis > 3_000 {
         return Err("La transición de cámara no puede superar 3 segundos.".to_string());
+    }
+    Ok(())
+}
+
+fn validate_visual_layer_geometry(
+    label: &str,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    z_index: u16,
+) -> Result<(), String> {
+    if width < 40
+        || height < 40
+        || usize::from(x) + usize::from(width) > CAMERA_FRAME_WIDTH
+        || usize::from(y) + usize::from(height) > CAMERA_FRAME_HEIGHT
+        || z_index > 100
+    {
+        return Err(format!("Geometría libre de {label} inválida."));
     }
     Ok(())
 }
@@ -1718,7 +1937,8 @@ fn ffmpeg_preflight(app: &AppHandle, profile: &BroadcastProfile) -> BroadcastPre
     let flv_muxer_available = list_contains_token(&muxer_text, "flv");
     let visualizer_filter_available = list_contains_token(&filter_text, "testsrc2");
     let overlay_filter_available = list_contains_token(&filter_text, "drawtext");
-    let camera_input_available = list_contains_token(&device_text, "avfoundation");
+    let camera_input_available = profile.video_compositor.capture_mode == "browser"
+        || list_contains_token(&device_text, "avfoundation");
     let camera_filter_available = list_contains_token(&filter_text, "overlay");
     let microphone_input_available = cpal::default_host().default_input_device().is_some();
     let rtmps_required = profile.rtmp_server_url.starts_with("rtmps://");
@@ -1762,12 +1982,12 @@ fn ffmpeg_preflight(app: &AppHandle, profile: &BroadcastProfile) -> BroadcastPre
         && profile.video_compositor.enabled
         && !camera_input_available
     {
-        "FFmpeg no incluye entrada AVFoundation para capturar la cámara.".to_string()
+        "FFmpeg no incluye la entrada requerida por el compositor visual.".to_string()
     } else if profile.output_kind == OUTPUT_KIND_RTMP
         && profile.video_compositor.enabled
         && !camera_filter_available
     {
-        "FFmpeg no incluye el filtro overlay requerido por el compositor de cámara.".to_string()
+        "FFmpeg no incluye el filtro overlay requerido por el compositor visual.".to_string()
     } else if profile.output_kind == OUTPUT_KIND_RTMP && rtmps_required && !rtmps_protocol_available
     {
         "FFmpeg no incluye el protocolo RTMPS requerido por este destino.".to_string()
@@ -1872,7 +2092,7 @@ fn camera_devices(app: &AppHandle) -> Result<Vec<BroadcastCameraDevice>, String>
                 "",
             ])
             .output()
-            .map_err(|error| format!("No se pudieron consultar cámaras: {error}"))?;
+            .map_err(|error| format!("No se pudieron consultar fuentes visuales: {error}"))?;
         let diagnostic = format!(
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
@@ -1880,14 +2100,14 @@ fn camera_devices(app: &AppHandle) -> Result<Vec<BroadcastCameraDevice>, String>
         );
         let devices = parse_avfoundation_video_devices(&diagnostic);
         if devices.is_empty() {
-            return Err("FFmpeg no encontró cámaras disponibles.".to_string());
+            return Err("FFmpeg no encontró cámaras ni pantallas disponibles.".to_string());
         }
         Ok(devices)
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        Err("El compositor de cámara está disponible actualmente en macOS.".to_string())
+        Err("El compositor visual está disponible actualmente en macOS.".to_string())
     }
 }
 
@@ -1912,20 +2132,38 @@ fn parse_avfoundation_video_devices(output: &str) -> Vec<BroadcastCameraDevice> 
         let Some((index, label)) = indexed.split_once("] ") else {
             continue;
         };
-        if index.parse::<u16>().is_err() || label.starts_with("Capture screen") {
+        let Ok(index) = index.parse::<u16>() else {
             continue;
-        }
+        };
         let label = label.trim();
+        let is_screen = label.starts_with("Capture screen");
+        let id = if is_screen {
+            index.to_string()
+        } else {
+            label.to_string()
+        };
         if label.is_empty()
             || result
                 .iter()
-                .any(|device: &BroadcastCameraDevice| device.id == label)
+                .any(|device: &BroadcastCameraDevice| device.id == id)
         {
             continue;
         }
         result.push(BroadcastCameraDevice {
-            id: label.to_string(),
-            label: label.to_string(),
+            id,
+            label: if is_screen {
+                format!(
+                    "Pantalla {}",
+                    result
+                        .iter()
+                        .filter(|device| device.kind == "screen")
+                        .count()
+                        + 1
+                )
+            } else {
+                label.to_string()
+            },
+            kind: if is_screen { "screen" } else { "camera" }.to_string(),
         });
     }
     result
@@ -1998,7 +2236,7 @@ impl PreparedCameraPipe {
     fn create() -> Result<Self, String> {
         let root = std::env::temp_dir().join(format!("rau-camera-{}", Uuid::new_v4()));
         fs::create_dir(&root)
-            .map_err(|error| format!("No se pudo preparar el compositor de cámara: {error}"))?;
+            .map_err(|error| format!("No se pudo preparar el compositor visual: {error}"))?;
         let path = root.join("frames.bgra");
         let output = std::process::Command::new("/usr/bin/mkfifo")
             .arg(&path)
@@ -2024,7 +2262,7 @@ impl Drop for PreparedCameraPipe {
 
 enum CameraFeedCommand {
     SetMix(u8, u16),
-    UpdateSettings(BroadcastVideoCompositor),
+    UpdateSettings(Box<BroadcastVideoCompositor>),
     Stop,
 }
 
@@ -2040,15 +2278,18 @@ impl CameraFeeder {
         config: BroadcastVideoCompositor,
         pipe: PreparedCameraPipe,
         runtime: &Arc<RuntimeState>,
+        visual_frame: Arc<Mutex<Option<BrowserVisualFrame>>>,
     ) -> Result<Self, String> {
         let writer = OpenOptions::new()
             .write(true)
             .open(&pipe.path)
-            .map_err(|error| format!("No se pudo conectar el compositor de cámara: {error}"))?;
+            .map_err(|error| format!("No se pudo conectar el compositor visual: {error}"))?;
         let (commands, receiver) = mpsc::channel();
         let app = app.clone();
         let runtime = Arc::clone(runtime);
-        let join = thread::spawn(move || run_camera_feeder(app, config, writer, receiver, runtime));
+        let join = thread::spawn(move || {
+            run_camera_feeder(app, config, writer, receiver, runtime, visual_frame)
+        });
         Ok(Self {
             commands,
             join: Some(join),
@@ -2059,13 +2300,13 @@ impl CameraFeeder {
     fn set_mix(&self, mix_percent: u8, transition_millis: u16) -> Result<(), String> {
         self.commands
             .send(CameraFeedCommand::SetMix(mix_percent, transition_millis))
-            .map_err(|_| "El compositor de cámara ya se detuvo.".to_string())
+            .map_err(|_| "El compositor visual ya se detuvo.".to_string())
     }
 
     fn update_settings(&self, config: BroadcastVideoCompositor) -> Result<(), String> {
         self.commands
-            .send(CameraFeedCommand::UpdateSettings(config))
-            .map_err(|_| "El compositor de cámara ya se detuvo.".to_string())
+            .send(CameraFeedCommand::UpdateSettings(Box::new(config)))
+            .map_err(|_| "El compositor visual ya se detuvo.".to_string())
     }
 
     fn terminate(mut self) {
@@ -2099,6 +2340,7 @@ fn run_camera_feeder(
     mut writer: fs::File,
     commands: Receiver<CameraFeedCommand>,
     runtime: Arc<RuntimeState>,
+    visual_frame: Arc<Mutex<Option<BrowserVisualFrame>>>,
 ) {
     let mut raw_frame = vec![0u8; CAMERA_FRAME_BYTES];
     let mut output_frame = vec![0u8; CAMERA_FRAME_BYTES];
@@ -2107,28 +2349,41 @@ fn run_camera_feeder(
     let mut current_alpha = 0i32;
     let mut target_alpha = 0i32;
     let mut transition_frames = 0u32;
-    let mut capture = spawn_camera_capture(&app, &config, &runtime).ok();
+    let mut capture = if config.capture_mode == "browser" {
+        None
+    } else {
+        spawn_camera_capture(&app, &config, &runtime).ok()
+    };
+    let mut browser_ready = false;
     let mut capture_started_at = capture.as_ref().map(|_| Instant::now());
     let mut last_capture_frame_at: Option<Instant> = None;
-    let mut next_capture_retry_at = capture
-        .is_none()
+    let mut next_capture_retry_at = (config.capture_mode != "browser" && capture.is_none())
         .then(|| Instant::now() + Duration::from_millis(CAMERA_CAPTURE_RETRY_MILLIS));
+    let source_ready = config.capture_mode == "browser" && browser_ready || capture.is_some();
     runtime.update_camera(
         &app,
         camera_status(
             &config,
-            capture.is_some(),
+            source_ready,
             false,
             0,
-            if capture.is_some() {
-                "Cámara capturando en Preview; fuera de Program."
+            if config.capture_mode == "browser" {
+                "Estudio visual preparado; esperando el primer cuadro de Preview."
+            } else if capture.is_some() {
+                "Fuente visual capturando en Preview; fuera de Program."
             } else {
-                "No se pudo preparar la cámara; se reintentará automáticamente."
+                "No se pudo preparar la fuente visual; se reintentará automáticamente."
             },
         ),
-        if capture.is_some() { "info" } else { "warning" },
-        if capture.is_some() {
+        if config.capture_mode == "browser" || capture.is_some() {
+            "info"
+        } else {
+            "warning"
+        },
+        if source_ready {
             "camera_ready"
+        } else if config.capture_mode == "browser" {
+            "camera_waiting_frame"
         } else {
             "camera_waiting"
         },
@@ -2147,7 +2402,7 @@ fn run_camera_feeder(
                     requested_mix_percent = mix_percent;
                     let next_target =
                         i32::from(u16::from(mix_percent).saturating_mul(maximum_alpha) / 100);
-                    if next_target > 0 && capture.is_none() {
+                    if next_target > 0 && config.capture_mode != "browser" && capture.is_none() {
                         match spawn_camera_capture(&app, &config, &runtime) {
                             Ok(next_capture) => {
                                 capture = Some(next_capture);
@@ -2186,7 +2441,11 @@ fn run_camera_feeder(
                         &app,
                         camera_status(
                             &config,
-                            capture.is_some(),
+                            if config.capture_mode == "browser" {
+                                browser_ready
+                            } else {
+                                capture.is_some()
+                            },
                             mix_percent > 0,
                             mix_percent,
                             if mix_percent > 0 {
@@ -2200,14 +2459,22 @@ fn run_camera_feeder(
                     );
                 }
                 Ok(CameraFeedCommand::UpdateSettings(next_config)) => {
-                    let restart_capture = config.camera_device != next_config.camera_device
-                        || config.camera_position != next_config.camera_position
-                        || config.camera_size != next_config.camera_size
-                        || config.camera_effect != next_config.camera_effect
-                        || config.camera_mirror != next_config.camera_mirror
-                        || config.camera_rotation_degrees != next_config.camera_rotation_degrees
-                        || config.camera_framing != next_config.camera_framing
-                        || config.camera_layout != next_config.camera_layout;
+                    let next_config = *next_config;
+                    let restart_capture = config.capture_mode != next_config.capture_mode
+                        || (next_config.capture_mode == "native"
+                            && (config.camera_device != next_config.camera_device
+                                || config.camera_position != next_config.camera_position
+                                || config.camera_size != next_config.camera_size
+                                || config.camera_effect != next_config.camera_effect
+                                || config.camera_mirror != next_config.camera_mirror
+                                || config.camera_rotation_degrees
+                                    != next_config.camera_rotation_degrees
+                                || config.camera_framing != next_config.camera_framing
+                                || config.camera_layout != next_config.camera_layout
+                                || config.camera_x != next_config.camera_x
+                                || config.camera_y != next_config.camera_y
+                                || config.camera_width != next_config.camera_width
+                                || config.camera_height != next_config.camera_height));
                     config = next_config;
                     maximum_alpha = maximum_camera_alpha(&config);
                     target_alpha = i32::from(
@@ -2219,37 +2486,50 @@ fn run_camera_feeder(
                         if let Some(capture) = capture.take() {
                             capture.terminate();
                         }
-                        match spawn_camera_capture(&app, &config, &runtime) {
-                            Ok(next_capture) => {
-                                capture = Some(next_capture);
-                                capture_started_at = Some(Instant::now());
-                                last_capture_frame_at = None;
-                                next_capture_retry_at = None;
-                            }
-                            Err(_) => {
-                                capture_started_at = None;
-                                last_capture_frame_at = None;
-                                next_capture_retry_at = Some(
-                                    Instant::now()
-                                        + Duration::from_millis(CAMERA_CAPTURE_RETRY_MILLIS),
-                                );
+                        capture_started_at = None;
+                        last_capture_frame_at = None;
+                        if config.capture_mode == "browser" {
+                            browser_ready = false;
+                            next_capture_retry_at = None;
+                        } else {
+                            match spawn_camera_capture(&app, &config, &runtime) {
+                                Ok(next_capture) => {
+                                    capture = Some(next_capture);
+                                    capture_started_at = Some(Instant::now());
+                                    next_capture_retry_at = None;
+                                }
+                                Err(_) => {
+                                    next_capture_retry_at = Some(
+                                        Instant::now()
+                                            + Duration::from_millis(CAMERA_CAPTURE_RETRY_MILLIS),
+                                    );
+                                }
                             }
                         }
                     }
+                    let source_ready = if config.capture_mode == "browser" {
+                        browser_ready
+                    } else {
+                        capture.is_some()
+                    };
                     runtime.update_camera(
                         &app,
                         camera_status(
                             &config,
-                            capture.is_some(),
+                            source_ready,
                             requested_mix_percent > 0,
                             requested_mix_percent,
                             if restart_capture {
-                                "Ajustes de cámara aplicados; captura reiniciada sin cortar RTMP."
+                                "Ajustes visuales aplicados; captura reiniciada sin cortar RTMP."
                             } else {
-                                "Ajustes de cámara aplicados en vivo."
+                                "Ajustes visuales aplicados en vivo."
                             },
                         ),
-                        if capture.is_some() { "info" } else { "warning" },
+                        if source_ready || config.capture_mode == "browser" {
+                            "info"
+                        } else {
+                            "warning"
+                        },
                         "camera_settings_updated",
                     );
                 }
@@ -2257,7 +2537,31 @@ fn run_camera_feeder(
             }
         }
 
-        if let Some(active) = capture.as_mut() {
+        if config.capture_mode == "browser" {
+            let next_frame = visual_frame
+                .lock()
+                .ok()
+                .and_then(|mut latest| latest.take());
+            if let Some(next_frame) = next_frame {
+                raw_frame = next_frame.pixels;
+                last_capture_frame_at = Some(Instant::now());
+                if !browser_ready {
+                    browser_ready = true;
+                    runtime.update_camera(
+                        &app,
+                        camera_status(
+                            &config,
+                            true,
+                            requested_mix_percent > 0,
+                            requested_mix_percent,
+                            "Primer cuadro recibido; fuentes visuales listas en Preview.",
+                        ),
+                        "info",
+                        "camera_ready",
+                    );
+                }
+            }
+        } else if let Some(active) = capture.as_mut() {
             let next_frame = active
                 .latest_frame
                 .lock()
@@ -2284,7 +2588,7 @@ fn run_camera_feeder(
                         requested_mix_percent > 0,
                         requested_mix_percent,
                         format!(
-                            "La cámara se detuvo con estado {status}; se conserva el último cuadro mientras se reconecta."
+                            "La fuente visual se detuvo con estado {status}; se conserva el último cuadro mientras se reconecta."
                         ),
                     ),
                     "warning",
@@ -2293,7 +2597,30 @@ fn run_camera_feeder(
             }
         }
 
-        let camera_stalled = capture.is_some()
+        let browser_stalled = config.capture_mode == "browser"
+            && browser_ready
+            && target_alpha > 0
+            && last_capture_frame_at.is_some_and(|received| {
+                received.elapsed() >= Duration::from_millis(CAMERA_CAPTURE_STALL_MILLIS)
+            });
+        if browser_stalled {
+            browser_ready = false;
+            runtime.update_camera(
+                &app,
+                camera_status(
+                    &config,
+                    false,
+                    true,
+                    requested_mix_percent,
+                    "El estudio dejó de enviar cuadros; se conserva el último frame en Program. Revisa la cámara, pantalla o ventana seleccionada.",
+                ),
+                "warning",
+                "camera_waiting_frame",
+            );
+        }
+
+        let camera_stalled = config.capture_mode != "browser"
+            && capture.is_some()
             && target_alpha > 0
             && camera_capture_stalled(capture_started_at, last_capture_frame_at);
         if camera_stalled {
@@ -2312,7 +2639,7 @@ fn run_camera_feeder(
                         ((current_alpha.max(0) as u32 * 100) / u32::from(maximum_alpha)).min(100)
                             as u8
                     },
-                    "La cámara dejó de entregar cuadros; reiniciando captura sin cortar RTMP.",
+                    "La fuente visual dejó de entregar cuadros; reiniciando captura sin cortar RTMP.",
                 ),
                 "warning",
                 "camera_restarting",
@@ -2345,7 +2672,8 @@ fn run_camera_feeder(
             }
         }
 
-        if capture.is_none()
+        if config.capture_mode != "browser"
+            && capture.is_none()
             && next_capture_retry_at.is_some_and(|retry_at| Instant::now() >= retry_at)
         {
             match spawn_camera_capture(&app, &config, &runtime) {
@@ -2361,7 +2689,7 @@ fn run_camera_feeder(
                             true,
                             requested_mix_percent > 0,
                             requested_mix_percent,
-                            "Cámara reconectada; recuperando video en movimiento.",
+                            "Fuente visual reconectada; recuperando video en movimiento.",
                         ),
                         "info",
                         "camera_recovered",
@@ -2374,7 +2702,7 @@ fn run_camera_feeder(
                         &app,
                         "warning",
                         "camera_retrying",
-                        format!("Reintentando cámara: {error}"),
+                        format!("Reintentando fuente visual: {error}"),
                     );
                 }
             }
@@ -2401,13 +2729,17 @@ fn run_camera_feeder(
                     &app,
                     camera_status(
                         &config,
-                        true,
+                        if config.capture_mode == "browser" {
+                            browser_ready
+                        } else {
+                            capture.is_some()
+                        },
                         mix_percent > 0,
                         mix_percent,
                         if mix_percent > 0 {
-                            "Cámara en Program."
+                            "Fuente visual en Program."
                         } else {
-                            "Cámara capturando en Preview; fuera de Program."
+                            "Fuente visual capturando en Preview; fuera de Program."
                         },
                     ),
                     "info",
@@ -2437,6 +2769,9 @@ fn run_camera_feeder(
 }
 
 fn maximum_camera_alpha(config: &BroadcastVideoCompositor) -> u16 {
+    if config.capture_mode == "browser" {
+        return 255;
+    }
     u16::try_from(usize::from(config.camera_opacity_percent).saturating_mul(255) / 100)
         .unwrap_or(255)
 }
@@ -2483,11 +2818,11 @@ fn spawn_camera_capture(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("No se pudo encender la cámara: {error}"))?;
+        .map_err(|error| format!("No se pudo encender la fuente visual: {error}"))?;
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "No se pudo leer video de la cámara.".to_string())?;
+        .ok_or_else(|| "No se pudo leer video de la fuente visual.".to_string())?;
     let latest_frame = Arc::new(Mutex::new(None));
     let reader_latest_frame = Arc::clone(&latest_frame);
     thread::spawn(move || loop {
@@ -2512,7 +2847,12 @@ fn spawn_camera_capture(
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if !line.trim().is_empty() {
-                    runtime.log(&app, "warning", "ffmpeg_camera", format!("Cámara: {line}"));
+                    runtime.log(
+                        &app,
+                        "warning",
+                        "ffmpeg_camera",
+                        format!("Fuente visual: {line}"),
+                    );
                 }
             }
         });
@@ -2577,7 +2917,7 @@ fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
         ),
         "format=bgra".to_string(),
     ]);
-    vec![
+    let mut args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
@@ -2588,6 +2928,8 @@ fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
         "avfoundation".to_string(),
         "-framerate".to_string(),
         RTMP_VIDEO_FPS.to_string(),
+    ];
+    args.extend([
         "-i".to_string(),
         format!("{}:none", config.camera_device),
         "-an".to_string(),
@@ -2600,7 +2942,8 @@ fn camera_capture_args(config: &BroadcastVideoCompositor) -> Vec<String> {
         "-f".to_string(),
         "rawvideo".to_string(),
         "pipe:1".to_string(),
-    ]
+    ]);
+    args
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2613,6 +2956,14 @@ struct CameraCanvasLayout {
 
 fn camera_canvas_layout(config: &BroadcastVideoCompositor) -> CameraCanvasLayout {
     match config.camera_layout.as_str() {
+        "free" => {
+            return CameraCanvasLayout {
+                width: usize::from(config.camera_width),
+                height: usize::from(config.camera_height),
+                x: usize::from(config.camera_x),
+                y: usize::from(config.camera_y),
+            };
+        }
         "background" => {
             return CameraCanvasLayout {
                 width: CAMERA_FRAME_WIDTH,
@@ -2785,7 +3136,7 @@ fn rtmp_publisher_args(
     ]);
     let base_filter = overlay
         .map(|overlay| overlay.video_filter(profile))
-        .unwrap_or_else(rtmp_fallback_video_filter);
+        .unwrap_or_else(|| rtmp_fallback_video_filter(profile));
     if camera_pipe.is_some() {
         args.extend([
             "-filter_complex".to_string(),
@@ -2871,6 +3222,14 @@ fn rtmp_video_filter(profile: &BroadcastProfile, station_path: &Path, track_path
         "H264 {}K / AAC {}K / {} FPS",
         profile.rtmp_video_bitrate_kbps, profile.rtmp_audio_bitrate_kbps, RTMP_VIDEO_FPS
     );
+    match profile.video_compositor.graphic_template.as_str() {
+        "transmission" => transmission_video_filter(&station_path, &track_path, &technical),
+        "mono_paper" => mono_paper_video_filter(&station_path, &track_path, &technical),
+        _ => signal_grid_video_filter(&station_path, &track_path, &technical),
+    }
+}
+
+fn signal_grid_video_filter(station_path: &str, track_path: &str, technical: &str) -> String {
     format!(
         concat!(
             "scale=180:320:flags=neighbor,",
@@ -2909,24 +3268,141 @@ fn rtmp_video_filter(profile: &BroadcastProfile, station_path: &Path, track_path
     )
 }
 
-fn rtmp_fallback_video_filter() -> String {
+fn transmission_video_filter(station_path: &str, track_path: &str, technical: &str) -> String {
     format!(
         concat!(
-            "scale=180:320:flags=neighbor,",
             "scale={width}:{height}:flags=neighbor,",
-            "eq=contrast=1.85:brightness=-0.18:saturation=0,",
-            "drawgrid=w=90:h=90:t=1:c=white@0.13,",
-            "drawbox=x=0:y=0:w=iw:h=220:c=black@0.90:t=fill,",
-            "drawbox=x=0:y=900:w=iw:h=380:c=black@0.92:t=fill,",
-            "drawbox=x=0:y=0:w=iw:h=22:c=white@0.95:t=fill,",
-            "drawbox=x=36:y=40:w=648:h=142:c=white@0.70:t=2,",
-            "drawbox=x=36:y=260:w=8:h=450:c=white@0.92:t=fill,",
-            "drawbox=x=68:y=260:w=616:h=450:c=white@0.46:t=2,",
-            "drawbox=x=36:y=900:w=648:h=2:c=white@0.72:t=fill"
+            "drawbox=x=0:y=0:w=iw:h=ih:c=0xF1EFE6:t=fill,",
+            "drawgrid=w=90:h=90:t=1:c=black@0.08,",
+            "drawbox=x=0:y=0:w=iw:h=8:c=black:t=fill,",
+            "drawbox=x=0:y=142:w=iw:h=5:c=black:t=fill,",
+            "drawbox=x=0:y=150:w=iw:h=70:c=0xD7FF00:t=fill,",
+            "drawbox=x=0:y=220:w=iw:h=520:c=0xFF4B2B:t=fill,",
+            "drawgrid=w=120:h=120:t=2:c=black@0.22,",
+            "drawbox=x=0:y=740:w=iw:h=420:c=0x0B0B0B:t=fill,",
+            "drawbox=x=0:y=1160:w=iw:h=120:c=0xF1EFE6:t=fill,",
+            "drawbox=x=0:y=1156:w=iw:h=4:c=black:t=fill,",
+            "drawbox=x=650:y=48:w=28:h=28:c=0xFF4B2B:t=fill,",
+            "drawbox=x=40:y=1105:w=38:h=30:c=0xF1EFE6:t=fill,",
+            "drawbox=x=90:y=1092:w=38:h=43:c=0xF1EFE6:t=fill,",
+            "drawbox=x=140:y=1078:w=38:h=57:c=0xF1EFE6:t=fill,",
+            "drawbox=x=190:y=1065:w=38:h=70:c=0xF1EFE6:t=fill,",
+            "drawbox=x=240:y=1098:w=38:h=37:c=0xF1EFE6:t=fill,",
+            "drawbox=x=290:y=1085:w=38:h=50:c=0xF1EFE6:t=fill,",
+            "drawbox=x=340:y=1070:w=38:h=65:c=0xF1EFE6:t=fill,",
+            "drawbox=x=390:y=1100:w=38:h=35:c=0xF1EFE6:t=fill,",
+            "drawbox=x=440:y=1087:w=38:h=48:c=0xF1EFE6:t=fill,",
+            "drawbox=x=490:y=1062:w=38:h=73:c=0xF1EFE6:t=fill,",
+            "drawbox=x=540:y=1094:w=38:h=41:c=0xF1EFE6:t=fill,",
+            "drawbox=x=590:y=1075:w=38:h=60:c=0xF1EFE6:t=fill,",
+            "drawbox=x=40:y=1138:w=588:h=2:c=white@0.30:t=fill,",
+            "drawtext=fontfile='{heavy_font}':text='RAU':",
+            "expansion=none:fontcolor=black:fontsize=35:x=36:y=31,",
+            "drawtext=fontfile='{heavy_font}':text='/':",
+            "expansion=none:fontcolor=0xFF4B2B:fontsize=35:x=106:y=31,",
+            "drawtext=fontfile='{heavy_font}':text='RADIO':",
+            "expansion=none:fontcolor=black:fontsize=35:x=121:y=31,",
+            "drawtext=fontfile='{mono_font}':textfile='{station_path}':",
+            "expansion=none:fontcolor=black@0.70:fontsize=17:x=36:y=98:fix_bounds=1,",
+            "drawtext=fontfile='{mono_font}':text='INDEPENDENT SIGNAL / LIVE':",
+            "expansion=none:fontcolor=black@0.72:fontsize=14:x=w-tw-42:y=42,",
+            "drawtext=fontfile='{mono_font}':text='01 / LIVE SOURCE':",
+            "expansion=none:fontcolor=black:fontsize=14:x=36:y=177,",
+            "drawtext=fontfile='{heavy_font}':text='LIVE':",
+            "expansion=none:fontcolor=black:fontsize=76:x=36:y=250,",
+            "drawtext=fontfile='{heavy_font}':text='TRANS':",
+            "expansion=none:fontcolor=black:fontsize=76:x=36:y=312,",
+            "drawtext=fontfile='{heavy_font}':text='MISSION':",
+            "expansion=none:fontcolor=black:fontsize=76:x=36:y=374,",
+            "drawtext=fontfile='{mono_font}':text='NOW TRANSMITTING':",
+            "expansion=none:fontcolor=0xD7FF00:fontsize=15:x=40:y=780,",
+            "drawtext=fontfile='{mono_font}':textfile='{station_path}':",
+            "expansion=none:fontcolor=white@0.62:fontsize=17:x=40:y=824:fix_bounds=1,",
+            "drawtext=fontfile='{display_font}':textfile='{track_path}':reload=1:",
+            "expansion=none:fontcolor=white:fontsize=44:line_spacing=7:x=40:y=862:fix_bounds=1,",
+            "drawtext=fontfile='{mono_font}':text='{technical}':",
+            "expansion=none:fontcolor=black@0.78:fontsize=14:x=40:y=1194,",
+            "drawtext=fontfile='{mono_font}':text='RAW STREAM / RAU BROADCAST NETWORK':",
+            "expansion=none:fontcolor=black@0.48:fontsize=13:x=40:y=1230"
         ),
         width = RTMP_VIDEO_WIDTH,
         height = RTMP_VIDEO_HEIGHT,
+        display_font = RTMP_DISPLAY_FONT,
+        heavy_font = RTMP_HEAVY_FONT,
+        mono_font = RTMP_MONO_FONT,
+        station_path = station_path,
+        track_path = track_path,
+        technical = technical,
     )
+}
+
+fn mono_paper_video_filter(station_path: &str, track_path: &str, technical: &str) -> String {
+    format!(
+        concat!(
+            "scale={width}:{height}:flags=neighbor,",
+            "drawbox=x=0:y=0:w=iw:h=ih:c=0xEEECE3:t=fill,",
+            "drawgrid=w=90:h=90:t=1:c=black@0.07,",
+            "drawbox=x=0:y=0:w=iw:h=185:c=black:t=fill,",
+            "drawbox=x=36:y=235:w=648:h=510:c=0x151515:t=fill,",
+            "drawbox=x=36:y=235:w=10:h=510:c=0xFF4B2B:t=fill,",
+            "drawbox=x=36:y=820:w=648:h=3:c=black:t=fill,",
+            "drawbox=x=610:y=52:w=74:h=74:c=0xFF4B2B:t=fill,",
+            "drawbox=x=36:y=1160:w=648:h=3:c=black:t=fill,",
+            "drawtext=fontfile='{display_font}':text='RAU STUDIO RADIO':",
+            "expansion=none:fontcolor=white:fontsize=38:x=36:y=40,",
+            "drawtext=fontfile='{mono_font}':textfile='{station_path}':",
+            "expansion=none:fontcolor=white@0.58:fontsize=16:x=36:y=118:fix_bounds=1,",
+            "drawtext=fontfile='{mono_font}':text='LIVE VISUAL / 01':",
+            "expansion=none:fontcolor=white@0.72:fontsize=14:x=500:y=148,",
+            "drawtext=fontfile='{mono_font}':text='CURRENT AUDIO / NOW PLAYING':",
+            "expansion=none:fontcolor=black@0.58:fontsize=15:x=40:y=858,",
+            "drawtext=fontfile='{display_font}':textfile='{track_path}':reload=1:",
+            "expansion=none:fontcolor=black:fontsize=46:line_spacing=8:x=40:y=900:fix_bounds=1,",
+            "drawtext=fontfile='{mono_font}':text='{technical}':",
+            "expansion=none:fontcolor=black@0.72:fontsize=14:x=40:y=1194,",
+            "drawtext=fontfile='{mono_font}':text='VERTICAL SIGNAL / INDEPENDENT RADIO':",
+            "expansion=none:fontcolor=black@0.42:fontsize=13:x=40:y=1230"
+        ),
+        width = RTMP_VIDEO_WIDTH,
+        height = RTMP_VIDEO_HEIGHT,
+        display_font = RTMP_DISPLAY_FONT,
+        mono_font = RTMP_MONO_FONT,
+        station_path = station_path,
+        track_path = track_path,
+        technical = technical,
+    )
+}
+
+fn rtmp_fallback_video_filter(profile: &BroadcastProfile) -> String {
+    match profile.video_compositor.graphic_template.as_str() {
+        "transmission" => format!(
+            "scale={width}:{height}:flags=neighbor,drawbox=x=0:y=0:w=iw:h=ih:c=0xF1EFE6:t=fill,drawgrid=w=90:h=90:t=1:c=black@0.08,drawbox=x=0:y=150:w=iw:h=70:c=0xD7FF00:t=fill,drawbox=x=0:y=220:w=iw:h=520:c=0xFF4B2B:t=fill,drawbox=x=0:y=740:w=iw:h=420:c=black:t=fill,drawbox=x=40:y=1105:w=38:h=30:c=0xF1EFE6:t=fill,drawbox=x=90:y=1092:w=38:h=43:c=0xF1EFE6:t=fill,drawbox=x=140:y=1078:w=38:h=57:c=0xF1EFE6:t=fill,drawbox=x=190:y=1065:w=38:h=70:c=0xF1EFE6:t=fill,drawbox=x=240:y=1098:w=38:h=37:c=0xF1EFE6:t=fill,drawbox=x=290:y=1085:w=38:h=50:c=0xF1EFE6:t=fill,drawbox=x=340:y=1070:w=38:h=65:c=0xF1EFE6:t=fill,drawbox=x=390:y=1100:w=38:h=35:c=0xF1EFE6:t=fill,drawbox=x=440:y=1087:w=38:h=48:c=0xF1EFE6:t=fill,drawbox=x=490:y=1062:w=38:h=73:c=0xF1EFE6:t=fill,drawbox=x=540:y=1094:w=38:h=41:c=0xF1EFE6:t=fill,drawbox=x=590:y=1075:w=38:h=60:c=0xF1EFE6:t=fill",
+            width = RTMP_VIDEO_WIDTH,
+            height = RTMP_VIDEO_HEIGHT,
+        ),
+        "mono_paper" => format!(
+            "scale={width}:{height}:flags=neighbor,drawbox=x=0:y=0:w=iw:h=ih:c=0xEEECE3:t=fill,drawgrid=w=90:h=90:t=1:c=black@0.07,drawbox=x=0:y=0:w=iw:h=185:c=black:t=fill,drawbox=x=36:y=235:w=648:h=510:c=0x151515:t=fill,drawbox=x=36:y=235:w=10:h=510:c=0xFF4B2B:t=fill",
+            width = RTMP_VIDEO_WIDTH,
+            height = RTMP_VIDEO_HEIGHT,
+        ),
+        _ => format!(
+            concat!(
+                "scale=180:320:flags=neighbor,",
+                "scale={width}:{height}:flags=neighbor,",
+                "eq=contrast=1.85:brightness=-0.18:saturation=0,",
+                "drawgrid=w=90:h=90:t=1:c=white@0.13,",
+                "drawbox=x=0:y=0:w=iw:h=220:c=black@0.90:t=fill,",
+                "drawbox=x=0:y=900:w=iw:h=380:c=black@0.92:t=fill,",
+                "drawbox=x=0:y=0:w=iw:h=22:c=white@0.95:t=fill,",
+                "drawbox=x=36:y=40:w=648:h=142:c=white@0.70:t=2,",
+                "drawbox=x=36:y=260:w=8:h=450:c=white@0.92:t=fill,",
+                "drawbox=x=68:y=260:w=616:h=450:c=white@0.46:t=2,",
+                "drawbox=x=36:y=900:w=648:h=2:c=white@0.72:t=fill"
+            ),
+            width = RTMP_VIDEO_WIDTH,
+            height = RTMP_VIDEO_HEIGHT,
+        ),
+    }
 }
 
 fn quote_filter_path(path: &Path) -> String {
@@ -3959,14 +4435,14 @@ impl Publisher {
     fn set_camera_mix(&mut self, mix_percent: u8, transition_millis: u16) -> Result<(), String> {
         self.camera
             .as_ref()
-            .ok_or_else(|| "La cámara no está preparada en este broadcast.".to_string())?
+            .ok_or_else(|| "La fuente visual no está preparada en este broadcast.".to_string())?
             .set_mix(mix_percent, transition_millis)
     }
 
     fn update_camera_settings(&mut self, config: BroadcastVideoCompositor) -> Result<(), String> {
         self.camera
             .as_ref()
-            .ok_or_else(|| "La cámara no está preparada en este broadcast.".to_string())?
+            .ok_or_else(|| "La fuente visual no está preparada en este broadcast.".to_string())?
             .update_settings(config)
     }
 
@@ -3987,6 +4463,7 @@ fn spawn_publisher(
     profile: &BroadcastProfile,
     credential: &str,
     runtime: &Arc<RuntimeState>,
+    visual_frame: Arc<Mutex<Option<BrowserVisualFrame>>>,
 ) -> Result<Publisher, String> {
     let is_rtmp = profile.output_kind == OUTPUT_KIND_RTMP;
     let opened = Arc::new(AtomicBool::new(!is_rtmp));
@@ -4028,7 +4505,13 @@ fn spawn_publisher(
         .ok_or_else(|| "No se pudo abrir stdin del publisher FFmpeg.".to_string())?;
     let camera = match camera_pipe {
         Some(pipe) => {
-            match CameraFeeder::start(app, profile.video_compositor.clone(), pipe, runtime) {
+            match CameraFeeder::start(
+                app,
+                profile.video_compositor.clone(),
+                pipe,
+                runtime,
+                visual_frame,
+            ) {
                 Ok(camera) => Some(camera),
                 Err(error) => {
                     let _ = child.kill();
@@ -4476,7 +4959,7 @@ fn run_worker(
     runtime: Arc<RuntimeState>,
     commands: Receiver<WorkerCommand>,
     started_at: String,
-    camera_settings: Arc<Mutex<BroadcastVideoCompositor>>,
+    visual: WorkerVisualState,
 ) {
     let mut reconnect_attempt = 0u32;
     let mut publisher: Option<Publisher> = None;
@@ -4620,10 +5103,16 @@ fn run_worker(
         }
         if publisher.is_none() {
             let mut effective_profile = profile.clone();
-            if let Ok(settings) = camera_settings.lock() {
+            if let Ok(settings) = visual.settings.lock() {
                 effective_profile.video_compositor = settings.clone();
             }
-            match spawn_publisher(&app, &effective_profile, &credential, &runtime) {
+            match spawn_publisher(
+                &app,
+                &effective_profile,
+                &credential,
+                &runtime,
+                Arc::clone(&visual.frame),
+            ) {
                 Ok(candidate) => {
                     publisher = Some(candidate);
                     reconnect_attempt = 0;
@@ -4866,9 +5355,9 @@ fn run_worker(
             false,
             0,
             if profile.video_compositor.enabled {
-                "Cámara detenida."
+                "Fuente visual detenida."
             } else {
-                "Cámara desactivada."
+                "Fuente visual desactivada."
             },
         ),
         "info",
@@ -5008,7 +5497,7 @@ fn poll_worker_commands(
                 let result = publisher
                     .as_deref_mut()
                     .ok_or_else(|| "El compositor de video todavía no está listo.".to_string())
-                    .and_then(|publisher| publisher.update_camera_settings(config));
+                    .and_then(|publisher| publisher.update_camera_settings(*config));
                 if let Err(error) = result {
                     runtime.log(app, "error", "camera_settings", error);
                 }
@@ -5026,6 +5515,8 @@ fn stream_direct_input(
     worker_audio: &mut WorkerAudio,
 ) -> DirectInputOutcome {
     let started_as_application = worker_audio.application_live;
+    let chunk_duration = Duration::from_millis(LINE_INPUT_CHUNK_MILLIS as u64);
+    let mut next_chunk_deadline = Instant::now();
     while worker_audio.direct_source_live() {
         match poll_worker_commands(commands, app, runtime, worker_audio, Some(&mut *publisher)) {
             WorkerAction::Stop => return DirectInputOutcome::Stop,
@@ -5046,9 +5537,29 @@ fn stream_direct_input(
         if let Err(error) = publisher.write(&output) {
             return DirectInputOutcome::PublisherFailed(error);
         }
-        thread::sleep(Duration::from_millis(LINE_INPUT_CHUNK_MILLIS as u64));
+        if let Some(wait) =
+            advance_audio_deadline(&mut next_chunk_deadline, Instant::now(), chunk_duration)
+        {
+            thread::sleep(wait);
+        }
     }
     DirectInputOutcome::ResumePlaylist
+}
+
+fn advance_audio_deadline(
+    next_deadline: &mut Instant,
+    now: Instant,
+    chunk_duration: Duration,
+) -> Option<Duration> {
+    *next_deadline += chunk_duration;
+    let wait = next_deadline.checked_duration_since(now);
+    if wait.is_none() && now.duration_since(*next_deadline) >= chunk_duration.saturating_mul(4) {
+        // A long scheduler pause should not trigger an unbounded burst, but
+        // normal processing time must be deducted from the cadence or the
+        // capture buffer grows until it drops audio.
+        *next_deadline = now;
+    }
+    wait
 }
 
 fn silence_chunk() -> Vec<u8> {
@@ -5911,6 +6422,47 @@ mod tests {
         input.output_kind = OUTPUT_KIND_RTMP.to_string();
         input.video_compositor.camera_layout = "floating".to_string();
         assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.capture_mode = "window".to_string();
+        assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.screen_opacity_percent = 101;
+        assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.screen_position = "outside".to_string();
+        assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.camera_layout = "free".to_string();
+        input.video_compositor.camera_x = 300;
+        input.video_compositor.camera_width = 100;
+        assert!(validate_profile(input).is_err());
+
+        let mut input = profile_input();
+        input.output_kind = OUTPUT_KIND_RTMP.to_string();
+        input.video_compositor.graphic_template = "unknown".to_string();
+        assert!(validate_profile(input).is_err());
+    }
+
+    #[test]
+    fn standalone_video_compositor_save_normalizes_browser_source_labels() {
+        let mut config = BroadcastVideoCompositor::default();
+        config.capture_mode = "  BROWSER ".to_string();
+        config.camera_device = "  FaceTime Camera  ".to_string();
+        config.screen_label = "  Ventana · Visuals  ".to_string();
+
+        let normalized = normalize_video_compositor(config).unwrap();
+
+        assert_eq!(normalized.capture_mode, "browser");
+        assert_eq!(normalized.camera_device, "FaceTime Camera");
+        assert_eq!(normalized.screen_label, "Ventana · Visuals");
     }
 
     #[test]
@@ -5919,20 +6471,32 @@ mod tests {
             r#"{"enabled":true,"cameraDevice":"MacBook Pro Camera","cameraPosition":"top_right","cameraSize":"medium","cameraEffect":"mono","cameraMirror":true,"cameraOpacityPercent":100,"transitionMillis":800}"#,
         )
         .unwrap();
+        assert_eq!(config.capture_mode, "native");
+        assert_eq!(config.graphic_template, "signal_grid");
+        assert!(config.camera_enabled);
+        assert!(!config.screen_enabled);
         assert_eq!(config.camera_rotation_degrees, 180);
         assert_eq!(config.camera_framing, "contain");
         assert_eq!(config.camera_layout, "wide");
+        assert_eq!((config.camera_x, config.camera_y), (0, 120));
+        assert_eq!((config.camera_width, config.camera_height), (360, 225));
+        assert_eq!((config.screen_z_index, config.camera_z_index), (1, 2));
     }
 
     #[test]
-    fn parses_avfoundation_cameras_without_screen_capture() {
+    fn parses_avfoundation_cameras_and_screens() {
         let output = "[AVFoundation indev @ 0x1] AVFoundation video devices:\n\
 [AVFoundation indev @ 0x1] [0] MacBook Pro Camera\n\
 [AVFoundation indev @ 0x1] [1] Capture screen 0\n\
 [AVFoundation indev @ 0x1] AVFoundation audio devices:";
         let devices = parse_avfoundation_video_devices(output);
-        assert_eq!(devices.len(), 1);
+        assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].id, "MacBook Pro Camera");
+        assert_eq!(devices[0].label, "MacBook Pro Camera");
+        assert_eq!(devices[0].kind, "camera");
+        assert_eq!(devices[1].id, "1");
+        assert_eq!(devices[1].label, "Pantalla 1");
+        assert_eq!(devices[1].kind, "screen");
     }
 
     #[test]
@@ -5981,6 +6545,126 @@ mod tests {
         assert!(filter.contains("transpose=clock"));
         assert!(filter.contains("force_original_aspect_ratio=increase"));
         assert!(filter.contains("crop=205:205"));
+
+        config.camera_layout = "free".to_string();
+        config.camera_x = 42;
+        config.camera_y = 210;
+        config.camera_width = 180;
+        config.camera_height = 120;
+        assert_eq!(
+            camera_canvas_layout(&config),
+            CameraCanvasLayout {
+                width: 180,
+                height: 120,
+                x: 42,
+                y: 210,
+            }
+        );
+    }
+
+    #[test]
+    fn graphic_templates_produce_distinct_ffmpeg_scenes() {
+        let mut profile = profile();
+        profile.output_kind = OUTPUT_KIND_RTMP.to_string();
+        let station = Path::new("/tmp/station.txt");
+        let track = Path::new("/tmp/track.txt");
+
+        profile.video_compositor.graphic_template = "transmission".to_string();
+        let transmission = rtmp_video_filter(&profile, station, track);
+        assert!(transmission.contains("c=0xD7FF00"));
+        assert!(transmission.contains("c=0xFF4B2B"));
+        assert!(transmission.contains("NOW TRANSMITTING"));
+
+        profile.video_compositor.graphic_template = "mono_paper".to_string();
+        let paper = rtmp_video_filter(&profile, station, track);
+        assert!(paper.contains("c=0xEEECE3"));
+        assert!(paper.contains("CURRENT AUDIO / NOW PLAYING"));
+
+        profile.video_compositor.graphic_template = "signal_grid".to_string();
+        let grid = rtmp_video_filter(&profile, station, track);
+        assert!(grid.contains("LIVE / RAU BROADCAST SYSTEM"));
+        assert_ne!(transmission, paper);
+        assert_ne!(paper, grid);
+    }
+
+    #[test]
+    fn bundled_ffmpeg_renders_every_graphic_template_fallback() {
+        let binary_name = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "ffmpeg-aarch64-apple-darwin"
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            "ffmpeg-x86_64-apple-darwin"
+        } else {
+            return;
+        };
+        let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(binary_name);
+        if !ffmpeg.exists() {
+            return;
+        }
+
+        for template in ["signal_grid", "transmission", "mono_paper"] {
+            let mut profile = profile();
+            profile.video_compositor.graphic_template = template.to_string();
+            assert_ffmpeg_filter_renders(&ffmpeg, &rtmp_fallback_video_filter(&profile));
+        }
+    }
+
+    #[test]
+    fn drawtext_ffmpeg_renders_every_complete_graphic_template_when_available() {
+        let filter_listing = match std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-filters"])
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => return,
+        };
+        let listing = String::from_utf8_lossy(&filter_listing.stdout);
+        if !listing.contains("drawtext") {
+            return;
+        }
+
+        for template in ["signal_grid", "transmission", "mono_paper"] {
+            let mut profile = profile();
+            profile.video_compositor.graphic_template = template.to_string();
+            let overlay = RtmpOverlay::create(&profile).expect("template text files");
+            assert_ffmpeg_filter_renders(Path::new("ffmpeg"), &overlay.video_filter(&profile));
+        }
+    }
+
+    fn assert_ffmpeg_filter_renders(ffmpeg: &Path, filter: &str) {
+        let output = std::process::Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=720x1280:rate=1",
+                "-vf",
+                filter,
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+            .expect("run FFmpeg template smoke test");
+        assert!(
+            output.status.success(),
+            "FFmpeg rejected template filter:\n{}\n{}",
+            filter,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn browser_visual_frames_convert_rgba_to_bgra_without_losing_alpha() {
+        let mut pixels = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        rgba_to_bgra(&mut pixels);
+        assert_eq!(pixels, vec![30, 20, 10, 40, 70, 60, 50, 80]);
     }
 
     #[test]
@@ -6193,6 +6877,26 @@ mod tests {
     fn decoder_is_paced_in_real_time_before_mixing() {
         let args = decoder_args("track.wav");
         assert!(args.windows(2).any(|pair| pair == ["-re", "-i"]));
+    }
+
+    #[test]
+    fn direct_input_deadline_deducts_processing_time_and_catches_up() {
+        let start = Instant::now();
+        let chunk = Duration::from_millis(50);
+        let mut deadline = start;
+
+        assert_eq!(
+            advance_audio_deadline(&mut deadline, start + Duration::from_millis(7), chunk),
+            Some(Duration::from_millis(43))
+        );
+        assert_eq!(
+            advance_audio_deadline(&mut deadline, start + Duration::from_millis(60), chunk),
+            Some(Duration::from_millis(40))
+        );
+
+        let late = start + Duration::from_millis(400);
+        assert_eq!(advance_audio_deadline(&mut deadline, late, chunk), None);
+        assert_eq!(deadline, late);
     }
 
     #[test]
