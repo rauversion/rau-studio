@@ -207,6 +207,7 @@ export function P2PPage() {
   const [chatPeer, setChatPeer] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatBody, setChatBody] = useState("");
+  const [activeTab, setActiveTab] = useState<"general" | "archivos" | "chat">("general");
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -723,60 +724,150 @@ export function P2PPage() {
           />
         ) : (
           <>
-            <section className="grid gap-3 md:grid-cols-3">
-              <MetricCard
-                icon={<ShieldCheck className="h-4 w-4" />}
-                label={t("Identidad")}
-                value={identity.display_name ?? t("Configurada")}
-                detail={shortEndpoint(identity.endpoint_id)}
-              />
-              <MetricCard
-                icon={<UsersRound className="h-4 w-4" />}
-                label={t("Contactos")}
-                value={String(peers.length)}
-                detail={peers.some((peer) => peer.presence_status === "online") ? t("Hay contactos conectados") : t("Sin contactos conectados")}
-              />
-              <MetricCard
-                icon={<HardDrive className="h-4 w-4" />}
-                label={t("Catálogo compartido")}
-                value={String(sharedFileCount)}
-                detail={t("{count} carpeta(s)", { count: shares.length })}
-              />
-            </section>
+            <div className="mb-4 flex gap-2 overflow-x-auto border-b border-border pb-px">
+              <button
+                type="button"
+                className={cn(
+                  "px-4 py-2 text-sm font-medium transition-colors hover:text-foreground whitespace-nowrap",
+                  activeTab === "general" ? "border-b-2 border-primary text-foreground" : "border-b-2 border-transparent text-muted-foreground"
+                )}
+                onClick={() => setActiveTab("general")}
+              >
+                {t("General")}
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "px-4 py-2 text-sm font-medium transition-colors hover:text-foreground whitespace-nowrap",
+                  activeTab === "archivos" ? "border-b-2 border-primary text-foreground" : "border-b-2 border-transparent text-muted-foreground"
+                )}
+                onClick={() => setActiveTab("archivos")}
+              >
+                {t("Archivos")}
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "px-4 py-2 text-sm font-medium transition-colors hover:text-foreground whitespace-nowrap",
+                  activeTab === "chat" ? "border-b-2 border-primary text-foreground" : "border-b-2 border-transparent text-muted-foreground"
+                )}
+                onClick={() => setActiveTab("chat")}
+              >
+                {t("Chat P2P")}
+              </button>
+            </div>
 
-            <NetworkPanel
-              network={network}
-              peers={peers}
-              events={networkEvents}
-              remoteTicket={remoteTicket}
-              pingResult={pingResult}
-              busy={busy}
-              onRemoteTicket={setRemoteTicket}
-              onStart={() => void startNetwork()}
-              onStop={() => void stopNetwork()}
-              onCopyTicket={() => void copyOwnTicket()}
-              onPing={pingRemotePeer}
-            />
+            {activeTab === "general" && (
+              <div className="grid gap-4">
+                <section className="grid gap-3 md:grid-cols-3">
+                  <MetricCard
+                    icon={<ShieldCheck className="h-4 w-4" />}
+                    label={t("Identidad")}
+                    value={identity.display_name ?? t("Configurada")}
+                    detail={shortEndpoint(identity.endpoint_id)}
+                  />
+                  <MetricCard
+                    icon={<UsersRound className="h-4 w-4" />}
+                    label={t("Contactos")}
+                    value={String(peers.length)}
+                    detail={peers.some((peer) => peer.presence_status === "online") ? t("Hay contactos conectados") : t("Sin contactos conectados")}
+                  />
+                  <MetricCard
+                    icon={<HardDrive className="h-4 w-4" />}
+                    label={t("Catálogo compartido")}
+                    value={String(sharedFileCount)}
+                    detail={t("{count} carpeta(s)", { count: shares.length })}
+                  />
+                </section>
 
-            <section className="grid items-start gap-4 xl:grid-cols-2">
-              <RemoteCatalogPanel
-                peers={reachablePeers}
-                selectedPeer={remotePeer}
-                query={remoteQuery}
-                results={remoteResults}
-                searched={hasRemoteSearched}
-                transfer={transfer}
-                busy={busy}
-                networkRunning={network?.running === true}
-                onPeer={(endpointId) => {
-                  setRemotePeer(endpointId);
-                  setRemoteResults([]);
-                  setHasRemoteSearched(false);
-                }}
-                onQuery={setRemoteQuery}
-                onSearch={searchRemoteCatalog}
-                onDownload={(result) => void downloadRemoteFile(result)}
-              />
+                <NetworkPanel
+                  network={network}
+                  peers={peers}
+                  events={networkEvents}
+                  remoteTicket={remoteTicket}
+                  pingResult={pingResult}
+                  busy={busy}
+                  onRemoteTicket={setRemoteTicket}
+                  onStart={() => void startNetwork()}
+                  onStop={() => void stopNetwork()}
+                  onCopyTicket={() => void copyOwnTicket()}
+                  onPing={pingRemotePeer}
+                />
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <KeyRound className="h-4 w-4" />
+                      {t("Identidad del dispositivo")}
+                    </CardTitle>
+                    <Button variant="ghost" size="sm" disabled={busy === "lock"} onClick={() => void lockIdentity()}>
+                      {busy === "lock" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}
+                      {t("Bloquear")}
+                    </Button>
+                  </CardHeader>
+                  <CardContent className="grid gap-2 p-3 text-sm sm:grid-cols-[180px_minmax(0,1fr)]">
+                    <span className="text-muted-foreground">{t("Nombre público")}</span>
+                    <strong>{identity.display_name}</strong>
+                    <span className="text-muted-foreground">Endpoint ID</span>
+                    <code className="break-all rounded bg-secondary px-2 py-1 text-xs">{identity.endpoint_id}</code>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {activeTab === "archivos" && (
+              <div className="grid gap-4">
+                <section className="grid items-start gap-4 xl:grid-cols-[minmax(330px,.8fr)_minmax(0,1.2fr)]">
+                  <ShareFolderForm
+                    selectedPath={selectedPath}
+                    shareName={shareName}
+                    visibility={visibility}
+                    busy={busy === "add-share"}
+                    onChoose={() => void chooseSharedFolder()}
+                    onName={setShareName}
+                    onVisibility={setVisibility}
+                    onSubmit={addShare}
+                  />
+                  <SharedFolderList
+                    shares={shares}
+                    busy={busy}
+                    onReindex={(shareId) => void reindexShare(shareId)}
+                    onToggle={(share) => void toggleShare(share)}
+                    onRemove={(share) => void removeShare(share)}
+                  />
+                </section>
+
+                <SharedCatalogSearch
+                  query={searchQuery}
+                  results={searchResults}
+                  searched={hasSearched}
+                  busy={busy === "search"}
+                  onQuery={setSearchQuery}
+                  onSubmit={searchSharedCatalog}
+                />
+
+                <RemoteCatalogPanel
+                  peers={reachablePeers}
+                  selectedPeer={remotePeer}
+                  query={remoteQuery}
+                  results={remoteResults}
+                  searched={hasRemoteSearched}
+                  transfer={transfer}
+                  busy={busy}
+                  networkRunning={network?.running === true}
+                  onPeer={(endpointId) => {
+                    setRemotePeer(endpointId);
+                    setRemoteResults([]);
+                    setHasRemoteSearched(false);
+                  }}
+                  onQuery={setRemoteQuery}
+                  onSearch={searchRemoteCatalog}
+                  onDownload={(result) => void downloadRemoteFile(result)}
+                />
+              </div>
+            )}
+
+            {activeTab === "chat" && (
               <ChatPanel
                 identity={identity}
                 peers={reachablePeers}
@@ -791,55 +882,7 @@ export function P2PPage() {
                 onBody={setChatBody}
                 onSend={sendChatMessage}
               />
-            </section>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <KeyRound className="h-4 w-4" />
-                  {t("Identidad del dispositivo")}
-                </CardTitle>
-                <Button variant="ghost" size="sm" disabled={busy === "lock"} onClick={() => void lockIdentity()}>
-                  {busy === "lock" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}
-                  {t("Bloquear")}
-                </Button>
-              </CardHeader>
-              <CardContent className="grid gap-2 p-3 text-sm sm:grid-cols-[180px_minmax(0,1fr)]">
-                <span className="text-muted-foreground">{t("Nombre público")}</span>
-                <strong>{identity.display_name}</strong>
-                <span className="text-muted-foreground">Endpoint ID</span>
-                <code className="break-all rounded bg-secondary px-2 py-1 text-xs">{identity.endpoint_id}</code>
-              </CardContent>
-            </Card>
-
-            <section className="grid items-start gap-4 xl:grid-cols-[minmax(330px,.8fr)_minmax(0,1.2fr)]">
-              <ShareFolderForm
-                selectedPath={selectedPath}
-                shareName={shareName}
-                visibility={visibility}
-                busy={busy === "add-share"}
-                onChoose={() => void chooseSharedFolder()}
-                onName={setShareName}
-                onVisibility={setVisibility}
-                onSubmit={addShare}
-              />
-              <SharedFolderList
-                shares={shares}
-                busy={busy}
-                onReindex={(shareId) => void reindexShare(shareId)}
-                onToggle={(share) => void toggleShare(share)}
-                onRemove={(share) => void removeShare(share)}
-              />
-            </section>
-
-            <SharedCatalogSearch
-              query={searchQuery}
-              results={searchResults}
-              searched={hasSearched}
-              busy={busy === "search"}
-              onQuery={setSearchQuery}
-              onSubmit={searchSharedCatalog}
-            />
+            )}
           </>
         )}
       </div>
