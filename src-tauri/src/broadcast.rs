@@ -1188,6 +1188,11 @@ pub fn broadcast_camera_devices(app: AppHandle) -> Result<Vec<BroadcastCameraDev
 }
 
 #[tauri::command]
+pub fn broadcast_application_audio_support() -> application_audio::ApplicationAudioSupport {
+    application_audio::support()
+}
+
+#[tauri::command]
 pub fn broadcast_application_audio_devices() -> Result<Vec<BroadcastApplicationAudioDevice>, String>
 {
     application_audio::list_applications().map(|applications| {

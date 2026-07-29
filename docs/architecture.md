@@ -194,7 +194,10 @@ PCM pipe -> persistent destination publisher --------+
    time is deducted from the wait instead of accumulating capture latency.
 8. The optional Mac-output source uses ScreenCaptureKit on macOS 13+ to capture
    the complete system output by default, excluding Rau Studio itself to avoid
-   feedback. It can alternatively filter capture to one selected running
+   feedback. The application itself targets macOS 12.3+, detects the runtime
+   version before touching Ventura-only audio APIs, and disables this source on
+   Monterey while leaving playlists, microphones, and line inputs available. On
+   supported systems it can alternatively filter capture to one selected running
    application. It is stereo, does not apply ducking or mix the microphone, and
    holds the playlist decoder just as direct line does. The OS Screen & System
    Audio Recording permission gates capture and application discovery.

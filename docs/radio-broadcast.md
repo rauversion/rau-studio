@@ -43,9 +43,10 @@ server; do not expose an unprotected Icecast admin interface.
 - Upload bandwidth above the selected bitrate. Leave headroom for reconnects
   and other traffic. A 128 kbps station uses roughly 58 MB per hour; a 3.5 Mbps
   video signal uses roughly 1.6 GB per hour.
-- macOS 13 or newer for Mac audio capture. Capturing the Mac's complete output or one application's
-  output uses ScreenCaptureKit and the system's Screen & System Audio Recording
-  permission.
+- The application runs on macOS Monterey 12.3 or newer. Mac audio capture
+  requires Ventura 13 or newer; on Monterey, use a microphone or line input
+  instead. Capturing the Mac's complete output or one application's output uses
+  ScreenCaptureKit and the system's Screen & System Audio Recording permission.
 
 The signed macOS build includes FFmpeg with `libmp3lame`, `libx264`, AAC, the
 FLV muxer, the `testsrc2` filter, and the

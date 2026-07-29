@@ -1456,6 +1456,7 @@ pub fn run() {
             broadcast::broadcast_preflight,
             broadcast::broadcast_microphone_devices,
             broadcast::broadcast_camera_devices,
+            broadcast::broadcast_application_audio_support,
             broadcast::broadcast_application_audio_devices,
             broadcast::broadcast_open_application_audio_settings,
             broadcast::broadcast_queue,

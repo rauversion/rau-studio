@@ -13,7 +13,7 @@
       "binaries/COPYING.LAME-LGPLv2"
     ],
     "macOS": {
-      "minimumSystemVersion": "13.0",
+      "minimumSystemVersion": "12.3",
       "entitlements": "Entitlements.plist"
     }
   }

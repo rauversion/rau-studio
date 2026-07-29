@@ -439,6 +439,8 @@ const translations: Record<Locale, Record<string, string>> = {
       "Temporarily replaces the playlist with everything playing on the Mac, without microphone or ducking. Rau Studio excludes its own audio to prevent feedback.",
     "Activa esta opción para enviar toda la salida normal del computador al broadcast. También puedes limitarla a una aplicación.":
       "Enable this option to send the computer's full output to the broadcast. You can also limit it to one application.",
+    "La captura de la salida del Mac requiere macOS Ventura 13 o posterior. En Monterey puedes usar micrófono o entrada de línea.":
+      "Capturing Mac output requires macOS Ventura 13 or later. On Monterey, you can use a microphone or line input.",
     "Salida del Mac al aire": "Mac output live",
     "Salida completa del Mac al aire.": "Full Mac output live.",
     "Audio estéreo del sistema": "Stereo system audio",

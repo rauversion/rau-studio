@@ -224,6 +224,25 @@ jobs:
             --bundles app
 
           app="${{ matrix.bundle_dir }}/macos/Rau Studio.app"
+          bundle_minimum="$(plutil -extract LSMinimumSystemVersion raw "$app/Contents/Info.plist")"
+          if [[ "$bundle_minimum" != "12.3" ]]; then
+            echo "Unexpected macOS bundle minimum: $bundle_minimum (expected 12.3)." >&2
+            exit 1
+          fi
+
+          for binary_and_minimum in "rau-studio:12.3" "ffmpeg:11.0" "ffprobe:11.0"; do
+            binary="${binary_and_minimum%%:*}"
+            expected_minimum="${binary_and_minimum##*:}"
+            actual_minimum="$(
+              xcrun vtool -show-build "$app/Contents/MacOS/$binary" |
+                awk '$1 == "minos" { print $2; exit }'
+            )"
+            if [[ "$actual_minimum" != "$expected_minimum" ]]; then
+              echo "Unexpected deployment target for $binary: $actual_minimum (expected $expected_minimum)." >&2
+              exit 1
+            fi
+          done
+
           for tool in ffmpeg ffprobe; do
             test -x "$app/Contents/MacOS/$tool"
             codesign --verify --strict --verbose=2 "$app/Contents/MacOS/$tool"

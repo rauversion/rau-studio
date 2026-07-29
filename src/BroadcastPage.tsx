@@ -145,6 +145,13 @@ type BroadcastApplicationAudioDevice = {
   process_id: number;
 };
 
+type BroadcastApplicationAudioSupport = {
+  supported: boolean;
+  minimum_macos_version: string;
+  current_macos_version?: string | null;
+  message: string;
+};
+
 type BroadcastCameraDevice = {
   id: string;
   label: string;
@@ -384,6 +391,7 @@ export function BroadcastPage() {
   const [playlistSources, setPlaylistSources] = useState<BroadcastPlaylistSource[]>([]);
   const [microphoneDevices, setMicrophoneDevices] = useState<BroadcastMicrophoneDevice[]>([]);
   const [applicationAudioDevices, setApplicationAudioDevices] = useState<BroadcastApplicationAudioDevice[]>([]);
+  const [applicationAudioSupport, setApplicationAudioSupport] = useState<BroadcastApplicationAudioSupport | null>(null);
   const [cameraDevices, setCameraDevices] = useState<BroadcastCameraDevice[]>([]);
   const [playlistSourceKey, setPlaylistSourceKey] = useState("");
   const [playlistComboboxOpen, setPlaylistComboboxOpen] = useState(false);
@@ -447,6 +455,7 @@ export function BroadcastPage() {
   const queuedTotal = queuedEntries.length;
   const completedTotal = queue.filter((entry) => entry.status === "played").length;
   const failedTotal = queue.filter((entry) => entry.status === "failed").length;
+  const applicationAudioSupported = applicationAudioSupport?.supported ?? false;
   const applicationAudioDetail = translateBackendMessage(
     locale,
     status?.application_audio?.message ?? t("Audio del Mac esperando inicio.")
@@ -520,16 +529,18 @@ export function BroadcastPage() {
       invoke<BroadcastStatus>("broadcast_status"),
       invoke<BroadcastQueueEntry[]>("broadcast_queue"),
       invoke<BroadcastPreflight>("broadcast_preflight"),
+      invoke<BroadcastApplicationAudioSupport>("broadcast_application_audio_support"),
       loadBroadcastPlaylistSources(),
       invoke<BroadcastMicrophoneDevice[]>("broadcast_microphone_devices"),
       invoke<BroadcastCameraDevice[]>("broadcast_camera_devices").catch(() => [])
     ])
-      .then(([nextProfile, nextStatus, nextQueue, nextPreflight, nextPlaylistSources, nextMicrophones, nextCameras]) => {
+      .then(([nextProfile, nextStatus, nextQueue, nextPreflight, nextApplicationAudioSupport, nextPlaylistSources, nextMicrophones, nextCameras]) => {
         if (disposed) return;
         hydrateProfile(nextProfile);
         setStatus(nextStatus);
         setQueue(nextQueue);
         setPreflight(nextPreflight);
+        setApplicationAudioSupport(nextApplicationAudioSupport);
         setPlaylistSources(nextPlaylistSources);
         setMicrophoneDevices(nextMicrophones);
         setCameraDevices(nextCameras);
@@ -1176,7 +1187,7 @@ export function BroadcastPage() {
                       id="broadcast-source-system-tab"
                       controls="broadcast-source-system-panel"
                       active={sourceTab === "system_audio"}
-                      enabled={applicationAudioEnabled}
+                      enabled={applicationAudioEnabled && applicationAudioSupported}
                       icon={<AudioLines className="h-3.5 w-3.5" />}
                       label={t("Sistema")}
                       onClick={() => setSourceTab("system_audio")}
@@ -1337,11 +1348,11 @@ export function BroadcastPage() {
                     </div>
                     <div className="flex flex-wrap justify-end gap-1">
                       {applicationAudioDevices.length === 0 ? (
-                        <Button type="button" size="sm" variant="ghost" disabled={running || busy === "application-settings"} onClick={() => void openApplicationAudioSettings()}>
+                        <Button type="button" size="sm" variant="ghost" disabled={!applicationAudioSupported || running || busy === "application-settings"} onClick={() => void openApplicationAudioSettings()}>
                           {t("Abrir ajustes")}
                         </Button>
                       ) : null}
-                      <Button type="button" size="sm" variant="ghost" disabled={running || busy === "applications"} onClick={() => void refreshApplications()}>
+                      <Button type="button" size="sm" variant="ghost" disabled={!applicationAudioSupported || running || busy === "applications"} onClick={() => void refreshApplications()}>
                         <RefreshCcw className={cn("h-4 w-4", busy === "applications" && "animate-spin")} />
                         {applicationAudioDevices.length === 0 ? t("Solicitar acceso") : t("Refrescar")}
                       </Button>
@@ -1351,9 +1362,10 @@ export function BroadcastPage() {
                     <input
                       type="checkbox"
                       checked={applicationAudioEnabled}
-                      disabled={running}
+                      disabled={running || (!applicationAudioSupported && !applicationAudioEnabled)}
                       onChange={(event) => {
                         const enabled = event.target.checked;
+                        if (enabled && !applicationAudioSupported) return;
                         setApplicationAudioEnabled(enabled);
                         if (enabled && !applicationAudioBundleId) {
                           setApplicationAudioBundleId(SYSTEM_AUDIO_TARGET_ID);
@@ -1362,7 +1374,12 @@ export function BroadcastPage() {
                     />
                     {t("Preparar salida del Mac al iniciar")}
                   </label>
-                  {applicationAudioEnabled ? (
+                  {!applicationAudioSupported ? (
+                    <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span>{translateBackendMessage(locale, applicationAudioSupport?.message ?? "")}</span>
+                    </div>
+                  ) : applicationAudioEnabled ? (
                     <>
                       <Field label={t("Fuente de audio") }>
                         <select className={fieldClass} value={applicationAudioBundleId} disabled={running} onChange={(event) => setApplicationAudioBundleId(event.target.value)}>

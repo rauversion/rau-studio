@@ -1,16 +1,30 @@
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 pub const APPLICATION_AUDIO_SAMPLE_RATE: u32 = 48_000;
 pub const SYSTEM_AUDIO_TARGET_ID: &str = "__system_audio__";
 pub const SYSTEM_AUDIO_LABEL: &str = "Salida completa del Mac";
+pub const APPLICATION_AUDIO_MINIMUM_MACOS_VERSION: &str = "13.0";
+#[cfg(target_os = "macos")]
 const APPLICATION_AUDIO_BUFFER_SECONDS: usize = 2;
+#[cfg(any(target_os = "macos", test))]
+const APPLICATION_AUDIO_UNSUPPORTED_MESSAGE: &str =
+    "La captura de la salida del Mac requiere macOS Ventura 13 o posterior. En Monterey puedes usar micrófono o entrada de línea.";
 
 #[derive(Debug, Clone)]
 pub struct ApplicationAudioDevice {
     pub id: String,
     pub label: String,
     pub process_id: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplicationAudioSupport {
+    pub supported: bool,
+    pub minimum_macos_version: String,
+    pub current_macos_version: Option<String>,
+    pub message: String,
 }
 
 pub struct ApplicationAudioCapture {
@@ -24,11 +38,59 @@ pub struct ApplicationAudioCaptureParts {
     pub stream_error: Arc<Mutex<Option<String>>>,
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct MacosVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+    display: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_version(value: &str) -> Option<MacosVersion> {
+    let display = value.trim();
+    let mut components = display.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components.next().unwrap_or("0").parse().ok()?;
+    let patch = components.next().unwrap_or("0").parse().ok()?;
+    Some(MacosVersion {
+        major,
+        minor,
+        patch,
+        display: display.to_string(),
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn support_for_macos_version(version: Option<MacosVersion>) -> ApplicationAudioSupport {
+    let supported = version.as_ref().is_some_and(|version| version.major >= 13);
+    ApplicationAudioSupport {
+        supported,
+        minimum_macos_version: APPLICATION_AUDIO_MINIMUM_MACOS_VERSION.to_string(),
+        current_macos_version: version.map(|version| version.display),
+        message: if supported {
+            String::new()
+        } else {
+            APPLICATION_AUDIO_UNSUPPORTED_MESSAGE.to_string()
+        },
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
-    use screencapturekit::prelude::*;
-    use screencapturekit::stream::delegate_trait::ErrorHandler;
+    use core_foundation::error::CFError;
+    use core_media_rs::cm_sample_buffer::CMSampleBuffer;
+    use screencapturekit::{
+        shareable_content::SCShareableContent,
+        stream::{
+            configuration::SCStreamConfiguration, content_filter::SCContentFilter,
+            delegate_trait::SCStreamDelegateTrait, output_trait::SCStreamOutputTrait,
+            output_type::SCStreamOutputType, SCStream,
+        },
+    };
+    use std::process::Command;
 
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
@@ -38,7 +100,6 @@ mod platform {
 
     struct AudioHandler {
         buffer: Arc<Mutex<VecDeque<[i16; 2]>>>,
-        stream_error: Arc<Mutex<Option<String>>>,
         maximum_frames: usize,
     }
 
@@ -51,19 +112,7 @@ mod platform {
             if output_type != SCStreamOutputType::Audio {
                 return;
             }
-            let supported = sample.format_description().is_some_and(|format| {
-                format.audio_is_float() && format.audio_bits_per_channel() == Some(32)
-            });
-            if !supported {
-                if let Ok(mut target) = self.stream_error.lock() {
-                    *target = Some(
-                        "La aplicación entregó un formato de audio no soportado; se esperaba PCM Float32."
-                            .to_string(),
-                    );
-                }
-                return;
-            }
-            let Some(audio_buffers) = sample.audio_buffer_list() else {
+            let Ok(audio_buffers) = sample.get_audio_buffer_list() else {
                 return;
             };
             let Ok(mut target) = self.buffer.lock() else {
@@ -77,7 +126,33 @@ mod platform {
         }
     }
 
+    struct StreamDelegate {
+        stream_error: Arc<Mutex<Option<String>>>,
+    }
+
+    impl SCStreamDelegateTrait for StreamDelegate {
+        fn did_stop_with_error(&self, _stream: SCStream, error: CFError) {
+            if let Ok(mut target) = self.stream_error.lock() {
+                *target = Some(format!("La captura de audio del Mac se detuvo: {error}"));
+            }
+        }
+    }
+
+    pub fn support() -> ApplicationAudioSupport {
+        let version = Command::new("/usr/bin/sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                let value = String::from_utf8(output.stdout).ok()?;
+                parse_macos_version(&value)
+            });
+        support_for_macos_version(version)
+    }
+
     pub fn list_applications() -> Result<Vec<ApplicationAudioDevice>, String> {
+        ensure_supported()?;
         let content = shareable_content()?;
         let own_process_id = std::process::id() as i32;
         let mut applications = content
@@ -106,16 +181,18 @@ mod platform {
     }
 
     pub fn start_capture(target_id: &str) -> Result<ApplicationAudioCaptureParts, String> {
+        ensure_supported()?;
         let content = shareable_content()?;
         let displays = content.displays();
         let display = displays
             .first()
             .ok_or_else(|| "No hay una pantalla disponible para capturar audio.".to_string())?;
         let filter = if target_id == SYSTEM_AUDIO_TARGET_ID {
-            SCContentFilter::create()
-                .with_display(display)
-                .with_excluding_applications(&[], &[])
-                .build()
+            SCContentFilter::new().with_display_excluding_applications_excepting_windows(
+                display,
+                &[],
+                &[],
+            )
         } else {
             let applications = content.applications();
             let application = applications
@@ -124,38 +201,48 @@ mod platform {
                 .ok_or_else(|| {
                     "La aplicación seleccionada ya no está abierta o disponible.".to_string()
                 })?;
-            SCContentFilter::create()
-                .with_display(display)
-                .with_including_applications(&[application], &[])
-                .build()
+            SCContentFilter::new().with_display_including_application_excepting_windows(
+                display,
+                &[application],
+                &[],
+            )
         };
         let configuration = SCStreamConfiguration::new()
-            .with_width(2)
-            .with_height(2)
-            .with_queue_depth(1)
-            .with_shows_cursor(false)
-            .with_captures_audio(true)
-            .with_excludes_current_process_audio(true)
-            .with_sample_rate(APPLICATION_AUDIO_SAMPLE_RATE as i32)
-            .with_channel_count(2);
+            .set_width(2)
+            .map_err(configuration_error)?
+            .set_height(2)
+            .map_err(configuration_error)?
+            .set_queue_depth(1)
+            .map_err(configuration_error)?
+            .set_shows_cursor(false)
+            .map_err(configuration_error)?
+            .set_captures_audio(true)
+            .map_err(configuration_error)?
+            .set_excludes_current_process_audio(true)
+            .map_err(configuration_error)?
+            .set_sample_rate(APPLICATION_AUDIO_SAMPLE_RATE)
+            .map_err(configuration_error)?
+            .set_channel_count(2)
+            .map_err(configuration_error)?;
         let buffer = Arc::new(Mutex::new(VecDeque::new()));
         let stream_error = Arc::new(Mutex::new(None));
-        let delegate_error = Arc::clone(&stream_error);
-        let delegate = ErrorHandler::new(move |error| {
-            if let Ok(mut target) = delegate_error.lock() {
-                *target = Some(format!("La captura de audio del Mac se detuvo: {error}"));
-            }
-        });
+        let delegate = StreamDelegate {
+            stream_error: Arc::clone(&stream_error),
+        };
         let mut stream = SCStream::new_with_delegate(&filter, &configuration, delegate);
-        stream.add_output_handler(
-            AudioHandler {
-                buffer: Arc::clone(&buffer),
-                stream_error: Arc::clone(&stream_error),
-                maximum_frames: APPLICATION_AUDIO_SAMPLE_RATE as usize
-                    * APPLICATION_AUDIO_BUFFER_SECONDS,
-            },
-            SCStreamOutputType::Audio,
-        );
+        if stream
+            .add_output_handler(
+                AudioHandler {
+                    buffer: Arc::clone(&buffer),
+                    maximum_frames: APPLICATION_AUDIO_SAMPLE_RATE as usize
+                        * APPLICATION_AUDIO_BUFFER_SECONDS,
+                },
+                SCStreamOutputType::Audio,
+            )
+            .is_none()
+        {
+            return Err("No se pudo registrar la salida de audio del Mac.".to_string());
+        }
         stream.start_capture().map_err(|error| {
             format!(
                 "No se pudo capturar el audio del Mac. Revisa el permiso de Grabación de pantalla y audio para Rau Studio: {error}"
@@ -169,11 +256,21 @@ mod platform {
     }
 
     pub fn open_permission_settings() -> Result<(), String> {
-        std::process::Command::new("open")
+        ensure_supported()?;
+        Command::new("open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("No se pudieron abrir los ajustes de privacidad: {error}"))
+    }
+
+    fn ensure_supported() -> Result<(), String> {
+        let support = support();
+        support.supported.then_some(()).ok_or(support.message)
+    }
+
+    fn configuration_error(error: CFError) -> String {
+        format!("No se pudo configurar la captura de audio del Mac: {error}")
     }
 
     fn shareable_content() -> Result<SCShareableContent, String> {
@@ -193,7 +290,7 @@ mod platform {
     }
 
     fn append_float32_audio(
-        audio_buffers: &screencapturekit::cm::AudioBufferList,
+        audio_buffers: &core_audio_types_rs::audio_buffer_list::AudioBufferList,
         target: &mut VecDeque<[i16; 2]>,
     ) {
         if audio_buffers.num_buffers() >= 2 {
@@ -246,7 +343,17 @@ mod platform {
 }
 
 #[cfg(target_os = "macos")]
-pub use platform::{list_applications, open_permission_settings, start_capture};
+pub use platform::{list_applications, open_permission_settings, start_capture, support};
+
+#[cfg(not(target_os = "macos"))]
+pub fn support() -> ApplicationAudioSupport {
+    ApplicationAudioSupport {
+        supported: false,
+        minimum_macos_version: APPLICATION_AUDIO_MINIMUM_MACOS_VERSION.to_string(),
+        current_macos_version: None,
+        message: "La captura de audio del sistema solo está disponible en macOS.".to_string(),
+    }
+}
 
 #[cfg(not(target_os = "macos"))]
 pub fn list_applications() -> Result<Vec<ApplicationAudioDevice>, String> {
@@ -270,7 +377,10 @@ impl ApplicationAudioCapture {
 
 #[cfg(test)]
 mod tests {
-    use super::{SYSTEM_AUDIO_LABEL, SYSTEM_AUDIO_TARGET_ID};
+    use super::{
+        parse_macos_version, support_for_macos_version, MacosVersion, SYSTEM_AUDIO_LABEL,
+        SYSTEM_AUDIO_TARGET_ID,
+    };
 
     #[test]
     fn float_pcm_conversion_is_clamped() {
@@ -284,5 +394,42 @@ mod tests {
     fn system_audio_target_has_a_stable_persisted_id() {
         assert_eq!(SYSTEM_AUDIO_TARGET_ID, "__system_audio__");
         assert_eq!(SYSTEM_AUDIO_LABEL, "Salida completa del Mac");
+    }
+
+    #[test]
+    fn parses_macos_versions_with_optional_components() {
+        assert_eq!(
+            parse_macos_version("12.7.6\n"),
+            Some(MacosVersion {
+                major: 12,
+                minor: 7,
+                patch: 6,
+                display: "12.7.6".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_macos_version("13"),
+            Some(MacosVersion {
+                major: 13,
+                minor: 0,
+                patch: 0,
+                display: "13".to_string(),
+            })
+        );
+        assert_eq!(parse_macos_version("not-a-version"), None);
+    }
+
+    #[test]
+    fn application_audio_requires_ventura() {
+        let monterey = support_for_macos_version(parse_macos_version("12.7.6"));
+        assert!(!monterey.supported);
+        assert_eq!(monterey.current_macos_version.as_deref(), Some("12.7.6"));
+
+        let ventura = support_for_macos_version(parse_macos_version("13.0"));
+        assert!(ventura.supported);
+        assert!(ventura.message.is_empty());
+
+        let unknown = support_for_macos_version(None);
+        assert!(!unknown.supported);
     }
 }

@@ -48,6 +48,11 @@ Rau Studio uses Tauri 2, Rust, React, TypeScript, SQLite, OpenAI-compatible AI f
 - Stable Rust.
 - Node.js and npm.
 
+The macOS application supports Monterey 12.3 or newer on both Apple Silicon and
+Intel. Mac system/application audio capture remains available on Ventura 13 or
+newer; on Monterey, Broadcast continues to support playlists, microphones, and
+line inputs.
+
 The signed macOS installer includes compatible `ffmpeg` and `ffprobe` binaries,
 so end users do not need Homebrew or a system installation. Manually configured
 paths remain available as an advanced override. Windows and Linux builds still
