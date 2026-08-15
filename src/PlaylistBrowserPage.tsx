@@ -65,6 +65,7 @@ type PlaylistIndexTrack = {
 type PlaylistDraft = {
   id: string;
   library_id: string;
+  library_name?: string;
   name: string;
   description?: string | null;
   track_count: number;
@@ -189,7 +190,7 @@ export function PlaylistBrowserPage({ kind }: { kind: BrowserKind }) {
 
   async function loadDrafts(libraryId = activeLibraryId) {
     if (!libraryId) return;
-    const response = await invoke<PlaylistDraft[]>("playlist_index_drafts", { libraryId });
+    const response = await invoke<PlaylistDraft[]>("playlist_index_playlist_targets");
     setDrafts(response);
   }
 
@@ -306,8 +307,9 @@ export function PlaylistBrowserPage({ kind }: { kind: BrowserKind }) {
     setErrorMessage("");
 
     try {
-      const updatedTracks = await invoke<PlaylistIndexTrack[]>("playlist_index_add_tracks_to_draft", {
-        draftId,
+      const updatedTracks = await invoke<PlaylistIndexTrack[]>("playlist_index_add_tracks_to_target", {
+        targetId: draftId,
+        sourceLibraryId: activeLibraryId,
         trackIds
       });
       await loadDrafts(activeLibraryId);

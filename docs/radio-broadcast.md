@@ -59,45 +59,95 @@ fall back to the same animated graphic without text.
 ## Configure and Start Icecast
 
 1. Open **Broadcast** in the Studio sidebar.
-2. Enter the Icecast destination:
+2. Open **Destinos de salida**. Create a named destination or select and
+   activate an existing one. Each saved destination keeps its endpoint, video
+   compositor, and encrypted Icecast source password separately.
+3. Enter the Icecast destination:
    - **Host**: hostname only, without `http://`, path, or credentials.
    - **Port**: commonly `8000` without TLS or `443`/provider-specific with TLS.
    - **Mountpoint MP3**: for example `/live.mp3`.
    - **Source user**: commonly `source`, unless the provider says otherwise.
    - **Source password**: the source credential, not the admin password.
    - **Use TLS**: enable only when the endpoint accepts secure source traffic.
-3. Choose an MP3 bitrate from 96 to 320 kbps and save the profile.
-4. Optionally enable **Preparar micrófono al iniciar**, choose the input device,
+4. Choose an MP3 bitrate from 96 to 320 kbps and save the destination.
+5. Open **Control**. Under **Fuentes de entrada**, optionally enable **Preparar
+   micrófono al iniciar**, choose the input device,
    and set its gain. The microphone always starts muted for privacy.
-5. Optionally enable **Preparar línea directa al iniciar**, choose an audio
+6. Optionally enable **Preparar línea directa al iniciar**, choose an audio
    interface, select a mono channel or stereo pair, and set its gain. Line input
    is prepared in standby and never starts live automatically.
-6. Optionally enable **Preparar salida del Mac al iniciar** and leave **Toda la
+7. Optionally enable **Preparar salida del Mac al iniciar** and leave **Toda la
    salida del Mac** selected to broadcast the computer's normal output. You can
    instead restrict capture to one open application. Set its gain; this source
    is prepared in standby and never starts live automatically.
-   These three sources are organized as tabs in the destination form;
-   the green dot identifies sources configured for the next broadcast start.
-7. Confirm that the FFmpeg preflight reports ready.
-8. Select an indexed library and playlist, then choose **Agregar**. Adding more
+   These three sources are global: they remain unchanged when another output
+   destination is activated. They are organized as tabs in **Control**; the
+   green dot identifies sources configured for the next broadcast start. Save
+   them with **Guardar fuentes**.
+8. Confirm that the FFmpeg preflight reports ready.
+9. In **Control**, select an indexed library and playlist, then choose
+   **Agregar**. Adding more
    playlists appends them to the existing queue.
    Individual indexed-track rows throughout Rau Studio also expose **Agregar al
    broadcast**, which appends only that track to the same durable queue.
-9. Choose **Salir al aire**. The status changes through connecting to live.
-10. Use **Micrófono al aire** only while speaking, then choose
+10. Choose **Salir al aire**. The status changes through connecting to live.
+11. Use **Micrófono al aire** only while speaking, then choose
    **Silenciar micrófono**.
-11. Use **Línea directa al aire** to temporarily replace the playlist with the
+12. Use **Línea directa al aire** to temporarily replace the playlist with the
     selected hardware input. Choose **Volver a Playlist** to resume the held
     track and queue.
-12. Use **Salida del Mac al aire** to replace the playlist with the Mac's stereo
+13. Use **Salida del Mac al aire** to replace the playlist with the Mac's stereo
     output. Choose **Volver a Playlist** to resume.
-13. Test the displayed listener URL in another device or network.
+14. Test the displayed listener URL in another device or network.
 
 The queue is durable in SQLite. Each non-playing row has **Play now**, which
 cuts the current decoder and starts the selected track without reconnecting the
 destination. Queued rows can be dragged, moved with the arrow controls, or
 sorted by title, artist, and duration. Played, skipped, and failed rows remain
 visible until cleared. The active row cannot be removed or reordered.
+
+## Immediate and Scheduled Playback
+
+The playlist workspace has two persistent operating modes:
+
+- **Immediate** is the original durable queue. Added playlists and individual
+  tracks play in queue order and can be manually reordered or selected.
+- **Scheduled** exposes a local-day music schedule. Choose a date and time, a
+  playlist source, optionally one specific track, and an activation policy.
+  **After the current track** waits for a clean track boundary. **Exact time**
+  stops the current decoder and starts the scheduled block while the persistent
+  destination connection stays open.
+
+Scheduled blocks are stored independently from the immediate queue. When a
+block is created, its playable local files become an editable ordered track
+list. Choose **Edit** on a pending block to open its modal, change the date,
+time, or activation policy, reorder or remove tracks, and append another track
+or full playlist. Existing blocks are upgraded to this editable list when they
+are first opened. The most recently activated block remains editable both on air
+and off air: its modal shows only queue entries that have not started, permits
+reordering or removing them, and appends new tracks or playlists directly to its
+active queue. Its original time and activation policy remain locked, and the
+currently playing track is never changed by the editor. Older activated blocks
+stay read-only execution history. When a block becomes due, its exact list is loaded into the
+front of the scheduled queue. When the next block activates, any queued remainder
+from the previous scheduled block is marked skipped and is not resumed later;
+immediate-queue rows are left untouched. An **Exact time** block also cuts the
+track currently playing, while **After the current track** activates at that
+track's natural end. Immediate rows never fill gaps in Scheduled mode; the music
+bed or silence holds the signal until the next block. The daily view estimates
+each block's duration and warns when it overlaps the following block. Its info
+popover explains the next block's activation rule and shows the available window,
+content duration, and estimated overflow. Pending blocks can be removed; activated,
+skipped, and failed blocks remain visible as execution history. If Rau Studio
+was closed or the Mac asleep, a block can recover within 15 minutes. Older
+pending blocks are marked skipped instead of unexpectedly playing hours later.
+
+Scheduled mode also supports one **music bed** selected from an indexed
+playlist. The bed is decoded as a loop and replaces idle silence only while no
+primary track is queued. Its gain is independent, and optional voice detection
+ducks it under the live microphone. It never occupies a queue position, so it
+cannot block a scheduled block. Stop Broadcast before changing the bed; the
+Immediate/Scheduled mode itself can be changed while live.
 
 ## Configure and Start Instagram Live
 
@@ -179,8 +229,9 @@ service's bitrate, resolution, and keyframe requirements before going live.
   returning to Broadcast restores the same source handles and composition. Stopping a shared window from the operating-system
   picker still ends that source and requires selecting it again, as required by browser capture permissions.
 - The destination receives one continuous connection across track transitions.
-  When the queue runs out, Rau Studio transmits silence rather than closing the
-  connection. New playlists can be appended while it is live.
+  When the queue runs out, Rau Studio transmits the configured looping music
+  bed or silence rather than closing the connection. New playlists can be
+  appended while it is live.
 - RTMP processes server control messages after every muxed packet and reports
   `connected` only after at least two seconds of media have advanced. Opening
   the destination is reported separately while the preview is prepared.

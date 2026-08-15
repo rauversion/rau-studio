@@ -140,7 +140,9 @@ RTMP service such as Instagram receives a vertical live-video signal and owns
 the preview and final go-live step. Both connections are outbound from the Mac.
 
 ```text
-Indexed playlist -> SQLite queue -> per-track FFmpeg decoder ----\
+Schedule resolver -> SQLite queue -> per-track FFmpeg decoder ---\
+Indexed playlist -----------------> SQLite queue -----------------+
+Looping idle music bed -> FFmpeg decoder -------------------------+
 Native line input (CPAL/CoreAudio) -> bounded PCM buffer ---------+-> primary source selector --\
 Mac/system audio (ScreenCaptureKit) -> bounded PCM buffer -------/                            +-> Rust PCM mixer
 Native microphone (CPAL/CoreAudio) -> bounded PCM buffer ------------------------------------/
@@ -151,12 +153,32 @@ PCM pipe -> persistent destination publisher --------+
                                                       \-> AAC + paced branded video + visual layer/libx264 -> RTMP service -> viewers
 ```
 
-1. The user saves one Broadcast profile with an `output_kind`. Icecast stores
-   its source password in the existing encrypted settings vault. RTMP stores
-   the server URL and encoding preset, but the stream key is supplied only to
-   the start command and is never persisted.
+1. The user saves one or more named Broadcast destination profiles with an
+   `output_kind`, then activates the destination used by the next start. Each
+   Icecast destination stores its own source password in the existing encrypted
+   settings vault. RTMP stores the server URL and encoding preset, but the stream
+   key is supplied only to the start command and is never persisted. Microphone,
+   direct-line, and Mac/system-audio preparation live in the singleton
+   `broadcast_control_settings` record instead of belonging to a destination;
+   loading or switching profiles overlays these global Control settings.
 2. Adding an indexed playlist snapshots its playable local paths and original
    order into `broadcast_queue_entries`.
+   Scheduled playlist/track blocks live separately in
+   `broadcast_schedule_items`; their editable, ordered track snapshots live in
+   `broadcast_schedule_tracks`. The schedule editor can update time and policy,
+   append playlist or track content, and persist a new track order while the
+   block remains pending. `broadcast_schedule_queue_entries.schedule_track_id`
+   preserves the link between that snapshot and its materialized queue row. The
+   latest activated block can therefore edit only its still-queued rows—even while
+   Broadcast is stopped—without changing the current/played track or resurrecting
+   an older block. While Scheduled mode is active, the worker
+   resolves due blocks into the front of the same queue. Soft blocks activate
+   at track boundaries; exact blocks are checked during decoder reads and
+   replace the current decoder without restarting the publisher. Activating a
+   block marks all still-queued entries linked to earlier scheduled blocks as
+   skipped, but preserves entries from the independent immediate queue. A 15-minute
+   recovery window prevents stale programs from unexpectedly running after a
+   long sleep or shutdown.
 3. A per-track decoder normalizes audio to stereo 44.1 kHz signed 16-bit PCM.
 4. One long-lived publisher consumes the PCM. Icecast encodes it with
    `libmp3lame` and writes the configured mount. RTMP encodes the PCM as AAC and
@@ -168,8 +190,10 @@ PCM pipe -> persistent destination publisher --------+
    without `drawtext` retain each template's structural colors and grid as a compatibility fallback.
    The template selector is held while live because the base filter graph is part of the long-lived publisher;
    changing it applies to the next RTMP session without risking the active connection.
-   RTMP emits silence while the queue is empty so the destination remains
-   connected.
+   When configured, a separately paced looping decoder supplies the idle music
+   bed at its saved gain while the queue is empty. Otherwise RTMP emits silence,
+   so the destination remains connected in either case. The microphone mixer
+   can apply the same voice-triggered ducking envelope to the bed.
 5. The optional cross-platform visual compositor captures a camera with `getUserMedia` and a display or application window
    with the operating system's `getDisplayMedia` picker. Both streams can remain enabled simultaneously. The webview draws
    both sources in persisted Z order on a transparent 360 × 640 canvas. Each layer owns its layout,

@@ -1,6 +1,6 @@
 use crate::{application_audio, settings, system};
 use base64::Engine as _;
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Data, SampleFormat};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -74,10 +74,13 @@ const MICROPHONE_ENVELOPE_RELEASE: f32 = 0.0002;
 const MICROPHONE_DUCKING_ATTACK: f32 = 0.002;
 const MICROPHONE_DUCKING_RELEASE: f32 = 0.00008;
 const LINE_INPUT_CHUNK_MILLIS: usize = 50;
+const SCHEDULE_GRACE_MINUTES: i64 = 15;
+const SCHEDULE_POLL_MILLIS: u64 = 500;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BroadcastProfileInput {
+    name: String,
     output_kind: String,
     host: String,
     port: u16,
@@ -88,17 +91,6 @@ pub struct BroadcastProfileInput {
     bitrate_kbps: u16,
     tls: bool,
     public: bool,
-    microphone_enabled: bool,
-    microphone_device: String,
-    microphone_gain_percent: u16,
-    line_input_enabled: bool,
-    line_input_device: String,
-    line_input_channel: u16,
-    line_input_stereo: bool,
-    line_input_gain_percent: u16,
-    application_audio_enabled: bool,
-    application_audio_bundle_id: String,
-    application_audio_gain_percent: u16,
     rtmp_platform: String,
     rtmp_server_url: String,
     rtmp_video_bitrate_kbps: u16,
@@ -112,6 +104,8 @@ pub struct BroadcastProfileInput {
 #[derive(Debug, Clone, Serialize)]
 pub struct BroadcastProfile {
     id: String,
+    name: String,
+    active: bool,
     output_kind: String,
     host: String,
     port: u16,
@@ -140,6 +134,38 @@ pub struct BroadcastProfile {
     video_compositor: BroadcastVideoCompositor,
     password_configured: bool,
     listener_url: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastControlSettingsInput {
+    microphone_enabled: bool,
+    microphone_device: String,
+    microphone_gain_percent: u16,
+    line_input_enabled: bool,
+    line_input_device: String,
+    line_input_channel: u16,
+    line_input_stereo: bool,
+    line_input_gain_percent: u16,
+    application_audio_enabled: bool,
+    application_audio_bundle_id: String,
+    application_audio_gain_percent: u16,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BroadcastControlSettings {
+    microphone_enabled: bool,
+    microphone_device: String,
+    microphone_gain_percent: u16,
+    line_input_enabled: bool,
+    line_input_device: String,
+    line_input_channel: u16,
+    line_input_stereo: bool,
+    line_input_gain_percent: u16,
+    application_audio_enabled: bool,
+    application_audio_bundle_id: String,
+    application_audio_gain_percent: u16,
     updated_at: String,
 }
 
@@ -237,6 +263,7 @@ pub struct BroadcastQueueEntry {
     position: i64,
     status: String,
     error: Option<String>,
+    scheduled: bool,
     inserted_at: String,
     updated_at: String,
 }
@@ -246,6 +273,104 @@ pub struct BroadcastQueueAppendResult {
     appended_total: usize,
     skipped_missing_total: usize,
     queue: Vec<BroadcastQueueEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastScheduleItemInput {
+    start_at: String,
+    policy: String,
+    source_kind: String,
+    library_id: String,
+    source_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastScheduleItemUpdateInput {
+    start_at: String,
+    policy: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastScheduleContentInput {
+    source_kind: String,
+    library_id: String,
+    source_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BroadcastScheduleTrack {
+    id: String,
+    library_id: String,
+    track_id: String,
+    source_path: String,
+    title: String,
+    artist: Option<String>,
+    duration_seconds: Option<u64>,
+    position: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BroadcastScheduleItem {
+    id: String,
+    start_at: String,
+    policy: String,
+    source_kind: String,
+    library_id: String,
+    source_id: String,
+    source_name: String,
+    track_count: usize,
+    duration_seconds: Option<u64>,
+    status: String,
+    error: Option<String>,
+    activated_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    tracks: Vec<BroadcastScheduleTrack>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastAutomationSettingsInput {
+    mode: String,
+    bed_enabled: bool,
+    bed_library_id: Option<String>,
+    bed_track_id: Option<String>,
+    bed_gain_percent: u16,
+    bed_ducking: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BroadcastAutomationSettings {
+    mode: String,
+    bed_enabled: bool,
+    bed_library_id: Option<String>,
+    bed_track_id: Option<String>,
+    bed_source_path: Option<String>,
+    bed_title: Option<String>,
+    bed_artist: Option<String>,
+    bed_gain_percent: u16,
+    bed_ducking: bool,
+    updated_at: String,
+}
+
+impl Default for BroadcastAutomationSettings {
+    fn default() -> Self {
+        Self {
+            mode: "immediate".to_string(),
+            bed_enabled: false,
+            bed_library_id: None,
+            bed_track_id: None,
+            bed_source_path: None,
+            bed_title: None,
+            bed_artist: None,
+            bed_gain_percent: 25,
+            bed_ducking: true,
+            updated_at: timestamp(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -835,7 +960,7 @@ impl BroadcastManager {
         let credential = if profile.output_kind == OUTPUT_KIND_RTMP {
             validate_stream_key(stream_key)?
         } else {
-            settings::load_icecast_source_password(&app)?
+            settings::load_icecast_source_password_for_profile(&app, &profile.id)?
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| "Configura la contraseña source de Icecast.".to_string())?
         };
@@ -1072,24 +1197,158 @@ pub fn broadcast_profile(app: AppHandle) -> Result<BroadcastProfile, String> {
 }
 
 #[tauri::command]
+pub fn broadcast_control_settings(app: AppHandle) -> Result<BroadcastControlSettings, String> {
+    let conn = open_db(&app)?;
+    load_control_settings(&conn)
+}
+
+#[tauri::command]
+pub fn broadcast_save_control_settings(
+    app: AppHandle,
+    settings: BroadcastControlSettingsInput,
+) -> Result<BroadcastControlSettings, String> {
+    let conn = open_db(&app)?;
+    save_control_settings(&conn, settings)
+}
+
+#[tauri::command]
+pub fn broadcast_profiles(app: AppHandle) -> Result<Vec<BroadcastProfile>, String> {
+    let conn = open_db(&app)?;
+    let active_id = active_profile_id(&conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM broadcast_profiles
+             ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, profile_name COLLATE NOCASE, updated_at DESC",
+        )
+        .map_err(|error| format!("No se pudo preparar la lista de destinos: {error}"))?;
+    let ids = stmt
+        .query_map(params![active_id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("No se pudieron leer los destinos: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("No se pudieron mapear los destinos: {error}"))?;
+    ids.iter()
+        .map(|id| load_profile_by_id(&app, &conn, id, &active_id))
+        .collect()
+}
+
+#[tauri::command]
+pub fn broadcast_create_profile(app: AppHandle, name: String) -> Result<BroadcastProfile, String> {
+    let name = validate_profile_name(&name)?;
+    let conn = open_db(&app)?;
+    let source_id = active_profile_id(&conn)?;
+    let profile_id = Uuid::new_v4().to_string();
+    let now = timestamp();
+    conn.execute(
+        "INSERT INTO broadcast_profiles (
+           id, profile_name, output_kind, host, port, mount, username, station_name, description,
+           bitrate_kbps, tls, public, rtmp_platform, rtmp_server_url,
+           rtmp_video_bitrate_kbps, rtmp_audio_bitrate_kbps, updated_at
+         )
+         SELECT ?1, ?2, output_kind, host, port, mount, username, station_name, description,
+                bitrate_kbps, tls, public, rtmp_platform, rtmp_server_url,
+                rtmp_video_bitrate_kbps, rtmp_audio_bitrate_kbps, ?3
+         FROM broadcast_profiles WHERE id = ?4",
+        params![profile_id, name, now, source_id],
+    )
+    .map_err(|error| format!("No se pudo crear el destino: {error}"))?;
+    conn.execute(
+        "INSERT INTO broadcast_video_compositor (id, config_json, updated_at)
+         SELECT ?1, config_json, ?2 FROM broadcast_video_compositor WHERE id = ?3",
+        params![profile_id, now, source_id],
+    )
+    .map_err(|error| format!("No se pudo copiar el compositor del destino: {error}"))?;
+    if let Some(password) = settings::load_icecast_source_password_for_profile(&app, &source_id)? {
+        settings::save_icecast_source_password_for_profile(&app, &profile_id, Some(password))?;
+    }
+    set_active_profile_id(&conn, &profile_id)?;
+    load_profile_by_id(&app, &conn, &profile_id, &profile_id)
+}
+
+#[tauri::command]
+pub fn broadcast_activate_profile(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<BroadcastProfile, String> {
+    let profile_id = validate_profile_id(&profile_id)?;
+    let conn = open_db(&app)?;
+    let exists = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM broadcast_profiles WHERE id = ?1)",
+            params![profile_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("No se pudo comprobar el destino: {error}"))?;
+    if !exists {
+        return Err("El destino de salida ya no existe.".to_string());
+    }
+    set_active_profile_id(&conn, &profile_id)?;
+    load_profile_by_id(&app, &conn, &profile_id, &profile_id)
+}
+
+#[tauri::command]
+pub fn broadcast_delete_profile(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<BroadcastProfile, String> {
+    let profile_id = validate_profile_id(&profile_id)?;
+    let conn = open_db(&app)?;
+    let total = conn
+        .query_row("SELECT COUNT(*) FROM broadcast_profiles", [], |row| {
+            row.get::<_, usize>(0)
+        })
+        .map_err(|error| format!("No se pudieron contar los destinos: {error}"))?;
+    if total <= 1 {
+        return Err("Debe quedar al menos un destino de salida.".to_string());
+    }
+    let deleted = conn
+        .execute(
+            "DELETE FROM broadcast_profiles WHERE id = ?1",
+            params![profile_id],
+        )
+        .map_err(|error| format!("No se pudo eliminar el destino: {error}"))?;
+    if deleted == 0 {
+        return Err("El destino de salida ya no existe.".to_string());
+    }
+    settings::save_icecast_source_password_for_profile(&app, &profile_id, None)?;
+    let active_id = active_profile_id(&conn)?;
+    let active_exists = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM broadcast_profiles WHERE id = ?1)",
+            params![active_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("No se pudo comprobar el destino activo: {error}"))?;
+    let next_id = if active_exists {
+        active_id
+    } else {
+        conn.query_row(
+            "SELECT id FROM broadcast_profiles ORDER BY updated_at DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| format!("No se pudo elegir otro destino: {error}"))?
+    };
+    set_active_profile_id(&conn, &next_id)?;
+    load_profile_by_id(&app, &conn, &next_id, &next_id)
+}
+
+#[tauri::command]
 pub fn broadcast_save_profile(
     app: AppHandle,
     profile: BroadcastProfileInput,
 ) -> Result<BroadcastProfile, String> {
     let input = validate_profile(profile)?;
     let conn = open_db(&app)?;
+    let profile_id = active_profile_id(&conn)?;
     let now = timestamp();
     conn.execute(
         "INSERT INTO broadcast_profiles (
-           id, output_kind, host, port, mount, username, station_name, description,
-           bitrate_kbps, tls, public, microphone_enabled, microphone_device,
-           microphone_gain_percent, line_input_enabled, line_input_device,
-           line_input_channel, line_input_stereo, line_input_gain_percent,
-           application_audio_enabled, application_audio_bundle_id,
-           application_audio_gain_percent, rtmp_platform, rtmp_server_url,
+           id, profile_name, output_kind, host, port, mount, username, station_name, description,
+           bitrate_kbps, tls, public, rtmp_platform, rtmp_server_url,
            rtmp_video_bitrate_kbps, rtmp_audio_bitrate_kbps, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(id) DO UPDATE SET
+           profile_name = excluded.profile_name,
            output_kind = excluded.output_kind,
            host = excluded.host,
            port = excluded.port,
@@ -1100,24 +1359,14 @@ pub fn broadcast_save_profile(
            bitrate_kbps = excluded.bitrate_kbps,
            tls = excluded.tls,
            public = excluded.public,
-           microphone_enabled = excluded.microphone_enabled,
-           microphone_device = excluded.microphone_device,
-           microphone_gain_percent = excluded.microphone_gain_percent,
-           line_input_enabled = excluded.line_input_enabled,
-           line_input_device = excluded.line_input_device,
-           line_input_channel = excluded.line_input_channel,
-           line_input_stereo = excluded.line_input_stereo,
-           line_input_gain_percent = excluded.line_input_gain_percent,
-           application_audio_enabled = excluded.application_audio_enabled,
-           application_audio_bundle_id = excluded.application_audio_bundle_id,
-           application_audio_gain_percent = excluded.application_audio_gain_percent,
            rtmp_platform = excluded.rtmp_platform,
            rtmp_server_url = excluded.rtmp_server_url,
            rtmp_video_bitrate_kbps = excluded.rtmp_video_bitrate_kbps,
            rtmp_audio_bitrate_kbps = excluded.rtmp_audio_bitrate_kbps,
            updated_at = excluded.updated_at",
         params![
-            PROFILE_ID,
+            profile_id,
+            input.name,
             input.output_kind,
             input.host,
             input.port,
@@ -1128,17 +1377,6 @@ pub fn broadcast_save_profile(
             input.bitrate_kbps,
             input.tls,
             input.public,
-            input.microphone_enabled,
-            input.microphone_device,
-            input.microphone_gain_percent,
-            input.line_input_enabled,
-            input.line_input_device,
-            input.line_input_channel,
-            input.line_input_stereo,
-            input.line_input_gain_percent,
-            input.application_audio_enabled,
-            input.application_audio_bundle_id,
-            input.application_audio_gain_percent,
             input.rtmp_platform,
             input.rtmp_server_url,
             input.rtmp_video_bitrate_kbps,
@@ -1156,14 +1394,14 @@ pub fn broadcast_save_profile(
          ON CONFLICT(id) DO UPDATE SET
            config_json = excluded.config_json,
            updated_at = excluded.updated_at",
-        params![PROFILE_ID, compositor_json, now],
+        params![profile_id, compositor_json, now],
     )
     .map_err(|error| format!("No se pudo guardar el compositor de video: {error}"))?;
 
     if input.clear_password {
-        settings::save_icecast_source_password(&app, None)?;
+        settings::save_icecast_source_password_for_profile(&app, &profile_id, None)?;
     } else if let Some(password) = input.password {
-        settings::save_icecast_source_password(&app, Some(password))?;
+        settings::save_icecast_source_password_for_profile(&app, &profile_id, Some(password))?;
     }
 
     load_profile(&app)
@@ -1216,6 +1454,109 @@ pub fn broadcast_open_application_audio_settings() -> Result<(), String> {
 pub fn broadcast_queue(app: AppHandle) -> Result<Vec<BroadcastQueueEntry>, String> {
     let conn = open_db(&app)?;
     list_queue(&conn)
+}
+
+#[tauri::command]
+pub fn broadcast_schedule_items(app: AppHandle) -> Result<Vec<BroadcastScheduleItem>, String> {
+    let conn = open_db(&app)?;
+    list_schedule_items(&conn)
+}
+
+#[tauri::command]
+pub fn broadcast_create_schedule_item(
+    app: AppHandle,
+    item: BroadcastScheduleItemInput,
+) -> Result<BroadcastScheduleItem, String> {
+    let conn = open_db(&app)?;
+    create_schedule_item(&conn, item)
+}
+
+#[tauri::command]
+pub fn broadcast_schedule_item(
+    app: AppHandle,
+    item_id: String,
+) -> Result<BroadcastScheduleItem, String> {
+    let conn = open_db(&app)?;
+    ensure_schedule_item_tracks(&conn, &item_id)?;
+    get_schedule_item(&conn, &item_id)?
+        .ok_or_else(|| "El bloque programado ya no existe.".to_string())
+}
+
+#[tauri::command]
+pub fn broadcast_update_schedule_item(
+    app: AppHandle,
+    item_id: String,
+    schedule: BroadcastScheduleItemUpdateInput,
+) -> Result<BroadcastScheduleItem, String> {
+    let conn = open_db(&app)?;
+    update_schedule_item(&conn, &item_id, schedule)
+}
+
+#[tauri::command]
+pub fn broadcast_append_schedule_content(
+    app: AppHandle,
+    item_id: String,
+    content: BroadcastScheduleContentInput,
+) -> Result<BroadcastScheduleItem, String> {
+    let mut conn = open_db(&app)?;
+    ensure_schedule_item_tracks(&conn, &item_id)?;
+    let transaction = conn
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar la edición del bloque: {error}"))?;
+    append_schedule_content(&transaction, &item_id, content, true)?;
+    let item = get_schedule_item(&transaction, &item_id)?
+        .ok_or_else(|| "El bloque programado ya no existe.".to_string())?;
+    transaction
+        .commit()
+        .map_err(|error| format!("No se pudo confirmar la edición del bloque: {error}"))?;
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn broadcast_reorder_schedule_tracks(
+    app: AppHandle,
+    item_id: String,
+    track_ids: Vec<String>,
+) -> Result<BroadcastScheduleItem, String> {
+    let mut conn = open_db(&app)?;
+    reorder_schedule_tracks(&mut conn, &item_id, &track_ids)?;
+    get_schedule_item(&conn, &item_id)?
+        .ok_or_else(|| "El bloque programado ya no existe.".to_string())
+}
+
+#[tauri::command]
+pub fn broadcast_remove_schedule_track(
+    app: AppHandle,
+    item_id: String,
+    track_id: String,
+) -> Result<BroadcastScheduleItem, String> {
+    let mut conn = open_db(&app)?;
+    remove_schedule_track(&mut conn, &item_id, &track_id)?;
+    get_schedule_item(&conn, &item_id)?
+        .ok_or_else(|| "El bloque programado ya no existe.".to_string())
+}
+
+#[tauri::command]
+pub fn broadcast_delete_schedule_item(app: AppHandle, item_id: String) -> Result<String, String> {
+    let conn = open_db(&app)?;
+    delete_schedule_item(&conn, &item_id)
+}
+
+#[tauri::command]
+pub fn broadcast_automation_settings(
+    app: AppHandle,
+) -> Result<BroadcastAutomationSettings, String> {
+    let conn = open_db(&app)?;
+    load_automation_settings(&conn)
+}
+
+#[tauri::command]
+pub fn broadcast_save_automation_settings(
+    app: AppHandle,
+    settings: BroadcastAutomationSettingsInput,
+) -> Result<BroadcastAutomationSettings, String> {
+    let conn = open_db(&app)?;
+    save_automation_settings(&conn, settings)
 }
 
 #[tauri::command]
@@ -1292,7 +1633,12 @@ pub fn broadcast_remove_queue_entry(app: AppHandle, entry_id: String) -> Result<
 pub fn broadcast_clear_queue(app: AppHandle) -> Result<usize, String> {
     let conn = open_db(&app)?;
     conn.execute(
-        "DELETE FROM broadcast_queue_entries WHERE status != 'playing'",
+        "DELETE FROM broadcast_queue_entries
+         WHERE status != 'playing'
+           AND NOT EXISTS (
+             SELECT 1 FROM broadcast_schedule_queue_entries sq
+             WHERE sq.queue_entry_id = broadcast_queue_entries.id
+           )",
         [],
     )
     .map_err(|error| format!("No se pudo limpiar cola de broadcast: {error}"))
@@ -1398,6 +1744,7 @@ fn persist_video_compositor(
     config: &BroadcastVideoCompositor,
 ) -> Result<(), String> {
     let conn = open_db(&app)?;
+    let profile_id = active_profile_id(&conn)?;
     let now = timestamp();
     let compositor_json = serde_json::to_string(config)
         .map_err(|error| format!("No se pudo serializar el compositor de video: {error}"))?;
@@ -1407,7 +1754,7 @@ fn persist_video_compositor(
          ON CONFLICT(id) DO UPDATE SET
            config_json = excluded.config_json,
            updated_at = excluded.updated_at",
-        params![PROFILE_ID, compositor_json, now],
+        params![profile_id, compositor_json, now],
     )
     .map_err(|error| format!("No se pudo guardar el compositor de video: {error}"))?;
     Ok(())
@@ -1424,16 +1771,134 @@ pub fn broadcast_push_visual_frame(
     manager.push_visual_frame(pixels)
 }
 
+fn validate_control_settings(
+    mut input: BroadcastControlSettingsInput,
+) -> Result<BroadcastControlSettingsInput, String> {
+    input.microphone_device = input.microphone_device.trim().to_string();
+    input.line_input_device = input.line_input_device.trim().to_string();
+    input.application_audio_bundle_id = input.application_audio_bundle_id.trim().to_string();
+    if input.microphone_device.is_empty()
+        || input.microphone_device.len() > 512
+        || input.microphone_device.chars().any(char::is_control)
+    {
+        return Err("Dispositivo de micrófono invalido.".to_string());
+    }
+    if input.microphone_gain_percent > 200 {
+        return Err("La ganancia del micrófono debe estar entre 0% y 200%.".to_string());
+    }
+    if input.line_input_device.is_empty()
+        || input.line_input_device.len() > 512
+        || input.line_input_device.chars().any(char::is_control)
+    {
+        return Err("Dispositivo de línea directa inválido.".to_string());
+    }
+    if !(1..=64).contains(&input.line_input_channel) {
+        return Err("El canal de línea debe estar entre 1 y 64.".to_string());
+    }
+    if input.line_input_gain_percent > 200 {
+        return Err("La ganancia de línea debe estar entre 0% y 200%.".to_string());
+    }
+    if input.application_audio_bundle_id.len() > 512
+        || input
+            .application_audio_bundle_id
+            .chars()
+            .any(char::is_control)
+    {
+        return Err("La fuente de audio del Mac seleccionada es inválida.".to_string());
+    }
+    if input.application_audio_enabled && input.application_audio_bundle_id.is_empty() {
+        return Err(
+            "Selecciona la salida completa del Mac o una aplicación específica.".to_string(),
+        );
+    }
+    if input.application_audio_gain_percent > 200 {
+        return Err("La ganancia del audio del Mac debe estar entre 0% y 200%.".to_string());
+    }
+    Ok(input)
+}
+
+fn load_control_settings(conn: &Connection) -> Result<BroadcastControlSettings, String> {
+    conn.query_row(
+        "SELECT microphone_enabled, microphone_device, microphone_gain_percent,
+                line_input_enabled, line_input_device, line_input_channel,
+                line_input_stereo, line_input_gain_percent, application_audio_enabled,
+                application_audio_bundle_id, application_audio_gain_percent, updated_at
+         FROM broadcast_control_settings WHERE id = ?1",
+        params![PROFILE_ID],
+        |row| {
+            Ok(BroadcastControlSettings {
+                microphone_enabled: row.get(0)?,
+                microphone_device: row.get(1)?,
+                microphone_gain_percent: row.get(2)?,
+                line_input_enabled: row.get(3)?,
+                line_input_device: row.get(4)?,
+                line_input_channel: row.get(5)?,
+                line_input_stereo: row.get(6)?,
+                line_input_gain_percent: row.get(7)?,
+                application_audio_enabled: row.get(8)?,
+                application_audio_bundle_id: row.get(9)?,
+                application_audio_gain_percent: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        },
+    )
+    .map_err(|error| format!("No se pudo leer la configuración de Control: {error}"))
+}
+
+fn save_control_settings(
+    conn: &Connection,
+    input: BroadcastControlSettingsInput,
+) -> Result<BroadcastControlSettings, String> {
+    let input = validate_control_settings(input)?;
+    let now = timestamp();
+    conn.execute(
+        "INSERT INTO broadcast_control_settings (
+           id, microphone_enabled, microphone_device, microphone_gain_percent,
+           line_input_enabled, line_input_device, line_input_channel, line_input_stereo,
+           line_input_gain_percent, application_audio_enabled, application_audio_bundle_id,
+           application_audio_gain_percent, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(id) DO UPDATE SET
+           microphone_enabled = excluded.microphone_enabled,
+           microphone_device = excluded.microphone_device,
+           microphone_gain_percent = excluded.microphone_gain_percent,
+           line_input_enabled = excluded.line_input_enabled,
+           line_input_device = excluded.line_input_device,
+           line_input_channel = excluded.line_input_channel,
+           line_input_stereo = excluded.line_input_stereo,
+           line_input_gain_percent = excluded.line_input_gain_percent,
+           application_audio_enabled = excluded.application_audio_enabled,
+           application_audio_bundle_id = excluded.application_audio_bundle_id,
+           application_audio_gain_percent = excluded.application_audio_gain_percent,
+           updated_at = excluded.updated_at",
+        params![
+            PROFILE_ID,
+            input.microphone_enabled,
+            input.microphone_device,
+            input.microphone_gain_percent,
+            input.line_input_enabled,
+            input.line_input_device,
+            input.line_input_channel,
+            input.line_input_stereo,
+            input.line_input_gain_percent,
+            input.application_audio_enabled,
+            input.application_audio_bundle_id,
+            input.application_audio_gain_percent,
+            &now,
+        ],
+    )
+    .map_err(|error| format!("No se pudo guardar la configuración de Control: {error}"))?;
+    load_control_settings(conn)
+}
+
 fn validate_profile(mut input: BroadcastProfileInput) -> Result<BroadcastProfileInput, String> {
+    input.name = validate_profile_name(&input.name)?;
     input.output_kind = input.output_kind.trim().to_lowercase();
     input.host = input.host.trim().to_string();
     input.mount = input.mount.trim().to_string();
     input.username = input.username.trim().to_string();
     input.station_name = input.station_name.trim().to_string();
     input.description = input.description.trim().to_string();
-    input.microphone_device = input.microphone_device.trim().to_string();
-    input.line_input_device = input.line_input_device.trim().to_string();
-    input.application_audio_bundle_id = input.application_audio_bundle_id.trim().to_string();
     input.rtmp_platform = input.rtmp_platform.trim().to_lowercase();
     input.rtmp_server_url = input.rtmp_server_url.trim().to_string();
     input.video_compositor.camera_device = input.video_compositor.camera_device.trim().to_string();
@@ -1484,45 +1949,29 @@ fn validate_profile(mut input: BroadcastProfileInput) -> Result<BroadcastProfile
     if input.station_name.is_empty() || input.station_name.len() > 120 {
         return Err("Nombre de estación invalido.".to_string());
     }
-    if input.microphone_device.is_empty()
-        || input.microphone_device.len() > 512
-        || input.microphone_device.chars().any(char::is_control)
-    {
-        return Err("Dispositivo de micrófono invalido.".to_string());
-    }
-    if input.microphone_gain_percent > 200 {
-        return Err("La ganancia del micrófono debe estar entre 0% y 200%.".to_string());
-    }
-    if input.line_input_device.is_empty()
-        || input.line_input_device.len() > 512
-        || input.line_input_device.chars().any(char::is_control)
-    {
-        return Err("Dispositivo de línea directa inválido.".to_string());
-    }
-    if !(1..=64).contains(&input.line_input_channel) {
-        return Err("El canal de línea debe estar entre 1 y 64.".to_string());
-    }
-    if input.line_input_gain_percent > 200 {
-        return Err("La ganancia de línea debe estar entre 0% y 200%.".to_string());
-    }
-    if input.application_audio_bundle_id.len() > 512
-        || input
-            .application_audio_bundle_id
-            .chars()
-            .any(char::is_control)
-    {
-        return Err("La fuente de audio del Mac seleccionada es inválida.".to_string());
-    }
-    if input.application_audio_enabled && input.application_audio_bundle_id.is_empty() {
-        return Err(
-            "Selecciona la salida completa del Mac o una aplicación específica.".to_string(),
-        );
-    }
-    if input.application_audio_gain_percent > 200 {
-        return Err("La ganancia del audio del Mac debe estar entre 0% y 200%.".to_string());
-    }
     validate_video_compositor(&input.video_compositor)?;
     Ok(input)
+}
+
+fn validate_profile_name(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 80 || value.chars().any(char::is_control) {
+        return Err("El nombre del destino debe tener entre 1 y 80 caracteres.".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn validate_profile_id(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err("Identificador de destino de broadcast inválido.".to_string());
+    }
+    Ok(value.to_string())
 }
 
 fn validate_video_compositor(config: &BroadcastVideoCompositor) -> Result<(), String> {
@@ -1728,6 +2177,16 @@ fn validate_stream_key(stream_key: Option<String>) -> Result<String, String> {
 
 fn load_profile(app: &AppHandle) -> Result<BroadcastProfile, String> {
     let conn = open_db(app)?;
+    let profile_id = active_profile_id(&conn)?;
+    load_profile_by_id(app, &conn, &profile_id, &profile_id)
+}
+
+fn load_profile_by_id(
+    app: &AppHandle,
+    conn: &Connection,
+    profile_id: &str,
+    active_id: &str,
+) -> Result<BroadcastProfile, String> {
     let stored = conn
         .query_row(
             "SELECT id, output_kind, host, port, mount, username, station_name, description,
@@ -1739,7 +2198,7 @@ fn load_profile(app: &AppHandle) -> Result<BroadcastProfile, String> {
                     rtmp_platform, rtmp_server_url, rtmp_video_bitrate_kbps,
                     rtmp_audio_bitrate_kbps, updated_at
              FROM broadcast_profiles WHERE id = ?1",
-            params![PROFILE_ID],
+            params![profile_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -1786,17 +2245,17 @@ fn load_profile(app: &AppHandle) -> Result<BroadcastProfile, String> {
         bitrate,
         tls,
         public,
-        microphone_enabled,
-        microphone_device,
-        microphone_gain_percent,
-        line_input_enabled,
-        line_input_device,
-        line_input_channel,
-        line_input_stereo,
-        line_input_gain_percent,
-        application_audio_enabled,
-        application_audio_bundle_id,
-        application_audio_gain_percent,
+        _stored_microphone_enabled,
+        _stored_microphone_device,
+        _stored_microphone_gain_percent,
+        _stored_line_input_enabled,
+        _stored_line_input_device,
+        _stored_line_input_channel,
+        _stored_line_input_stereo,
+        _stored_line_input_gain_percent,
+        _stored_application_audio_enabled,
+        _stored_application_audio_bundle_id,
+        _stored_application_audio_gain_percent,
         rtmp_platform,
         rtmp_server_url,
         rtmp_video_bitrate_kbps,
@@ -1804,7 +2263,7 @@ fn load_profile(app: &AppHandle) -> Result<BroadcastProfile, String> {
         updated_at,
     ) = stored.unwrap_or_else(|| {
         (
-            PROFILE_ID.to_string(),
+            profile_id.to_string(),
             OUTPUT_KIND_ICECAST.to_string(),
             "127.0.0.1".to_string(),
             8000,
@@ -1833,11 +2292,22 @@ fn load_profile(app: &AppHandle) -> Result<BroadcastProfile, String> {
             timestamp(),
         )
     });
-    let password_configured = settings::load_icecast_source_password(app)?.is_some();
+    let name = conn
+        .query_row(
+            "SELECT profile_name FROM broadcast_profiles WHERE id = ?1",
+            params![profile_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo leer el nombre del destino: {error}"))?
+        .unwrap_or_else(|| "Destino principal".to_string());
+    let password_configured =
+        settings::load_icecast_source_password_for_profile(app, profile_id)?.is_some();
+    let control = load_control_settings(conn)?;
     let video_compositor = conn
         .query_row(
             "SELECT config_json FROM broadcast_video_compositor WHERE id = ?1",
-            params![PROFILE_ID],
+            params![profile_id],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -1848,6 +2318,8 @@ fn load_profile(app: &AppHandle) -> Result<BroadcastProfile, String> {
     let listener_url = format!("{scheme}://{host}:{port}{mount}");
     Ok(BroadcastProfile {
         id,
+        name,
+        active: profile_id == active_id,
         output_kind,
         host,
         port,
@@ -1858,17 +2330,17 @@ fn load_profile(app: &AppHandle) -> Result<BroadcastProfile, String> {
         bitrate_kbps: bitrate,
         tls,
         public,
-        microphone_enabled,
-        microphone_device,
-        microphone_gain_percent,
-        line_input_enabled,
-        line_input_device,
-        line_input_channel,
-        line_input_stereo,
-        line_input_gain_percent,
-        application_audio_enabled,
-        application_audio_bundle_id,
-        application_audio_gain_percent,
+        microphone_enabled: control.microphone_enabled,
+        microphone_device: control.microphone_device,
+        microphone_gain_percent: control.microphone_gain_percent,
+        line_input_enabled: control.line_input_enabled,
+        line_input_device: control.line_input_device,
+        line_input_channel: control.line_input_channel,
+        line_input_stereo: control.line_input_stereo,
+        line_input_gain_percent: control.line_input_gain_percent,
+        application_audio_enabled: control.application_audio_enabled,
+        application_audio_bundle_id: control.application_audio_bundle_id,
+        application_audio_gain_percent: control.application_audio_gain_percent,
         rtmp_platform,
         rtmp_server_url,
         rtmp_video_bitrate_kbps,
@@ -1883,6 +2355,8 @@ fn load_profile(app: &AppHandle) -> Result<BroadcastProfile, String> {
 fn default_profile(app: &AppHandle) -> BroadcastProfile {
     BroadcastProfile {
         id: PROFILE_ID.to_string(),
+        name: "Destino principal".to_string(),
+        active: true,
         output_kind: OUTPUT_KIND_ICECAST.to_string(),
         host: "127.0.0.1".to_string(),
         port: 8000,
@@ -1909,7 +2383,7 @@ fn default_profile(app: &AppHandle) -> BroadcastProfile {
         rtmp_video_bitrate_kbps: 3_500,
         rtmp_audio_bitrate_kbps: 128,
         video_compositor: BroadcastVideoCompositor::default(),
-        password_configured: settings::load_icecast_source_password(app)
+        password_configured: settings::load_icecast_source_password_for_profile(app, PROFILE_ID)
             .ok()
             .flatten()
             .is_some(),
@@ -3568,6 +4042,60 @@ fn decoder_args(path: &str) -> Vec<String> {
     ]
 }
 
+fn bed_decoder_args(path: &str) -> Vec<String> {
+    let mut args = decoder_args(path);
+    let input_index = args.iter().position(|value| value == "-re").unwrap_or(4);
+    args.splice(
+        input_index..input_index,
+        ["-stream_loop".to_string(), "-1".to_string()],
+    );
+    args
+}
+
+struct BedDecoder {
+    child: Child,
+    stdout: ChildStdout,
+}
+
+impl BedDecoder {
+    fn spawn(app: &AppHandle, source_path: &str) -> Result<Self, String> {
+        let mut child = system::ffmpeg_command(app)
+            .args(bed_decoder_args(source_path))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("No se pudo iniciar la cortina musical: {error}"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "No se pudo leer el audio de la cortina.".to_string())?;
+        Ok(Self { child, stdout })
+    }
+
+    fn read_chunk(&mut self) -> Result<Vec<u8>, String> {
+        let mut chunk = silence_chunk();
+        self.stdout
+            .read_exact(&mut chunk)
+            .map_err(|error| format!("La cortina musical dejó de entregar audio: {error}"))?;
+        Ok(chunk)
+    }
+
+    fn terminate(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn scale_pcm_chunk(output: &mut [u8], gain_percent: u16) {
+    for sample in output.chunks_exact_mut(2) {
+        let value = i16::from_le_bytes([sample[0], sample[1]]);
+        let scaled = (i32::from(value) * i32::from(gain_percent) / 100)
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        sample.copy_from_slice(&scaled.to_le_bytes());
+    }
+}
+
 enum AudioInputOwner {
     Device { _stream: cpal::Stream },
     Application(application_audio::ApplicationAudioCapture),
@@ -3592,7 +4120,12 @@ struct AudioInputMix {
 }
 
 impl AudioInputCapture {
-    fn mix_into(&mut self, output: &mut [u8], gain_percent: u16) -> Result<AudioInputMix, String> {
+    fn mix_into(
+        &mut self,
+        output: &mut [u8],
+        gain_percent: u16,
+        ducking_percent: f32,
+    ) -> Result<AudioInputMix, String> {
         if let Some(error) = self
             .stream_error
             .lock()
@@ -3658,7 +4191,7 @@ impl AudioInputCapture {
             self.microphone_envelope +=
                 (microphone_level - self.microphone_envelope) * envelope_rate;
             let target_music_gain = if self.microphone_envelope >= MICROPHONE_DUCKING_THRESHOLD {
-                MICROPHONE_DUCKING_PERCENT
+                ducking_percent
             } else {
                 100.0
             };
@@ -3695,7 +4228,7 @@ impl AudioInputCapture {
         output.fill(0);
         self.microphone_envelope = 0.0;
         self.music_gain_percent = 100.0;
-        self.mix_into(output, gain_percent)
+        self.mix_into(output, gain_percent, 100.0)
     }
 
     fn clear(&mut self) {
@@ -4238,6 +4771,16 @@ impl WorkerAudio {
     }
 
     fn process_chunk(&mut self, app: &AppHandle, runtime: &Arc<RuntimeState>, output: &mut [u8]) {
+        self.process_chunk_with_ducking(app, runtime, output, MICROPHONE_DUCKING_PERCENT);
+    }
+
+    fn process_chunk_with_ducking(
+        &mut self,
+        app: &AppHandle,
+        runtime: &Arc<RuntimeState>,
+        output: &mut [u8],
+        ducking_percent: f32,
+    ) {
         let Some(microphone) = self.microphone.as_mut() else {
             return;
         };
@@ -4245,7 +4788,7 @@ impl WorkerAudio {
             microphone.clear();
             return;
         }
-        match microphone.mix_into(output, self.gain_percent) {
+        match microphone.mix_into(output, self.gain_percent, ducking_percent) {
             Ok(mixed) => {
                 self.microphone_receiving_audio = mixed.mixed_frames > 0;
                 self.microphone_level_percent = mixed.peak_percent;
@@ -4836,7 +5379,27 @@ fn play_entry(
     }
 
     let mut buffer = [0u8; 16 * 1024];
+    let mut last_schedule_poll = Instant::now();
     loop {
+        if last_schedule_poll.elapsed() >= Duration::from_millis(SCHEDULE_POLL_MILLIS) {
+            match activate_due_schedule_items(app, false) {
+                Ok(Some(entry_id)) => {
+                    let _ = decoder.kill();
+                    let _ = decoder.wait();
+                    let _ = update_entry_status(app, &entry.id, "skipped", None);
+                    runtime.log(
+                        app,
+                        "info",
+                        "schedule_exact",
+                        format!("Horario exacto activado durante: {}", display_title(entry)),
+                    );
+                    return PlayOutcome::Selected(entry_id);
+                }
+                Ok(None) => {}
+                Err(error) => runtime.log(app, "error", "schedule", error),
+            }
+            last_schedule_poll = Instant::now();
+        }
         match poll_worker_commands(commands, app, runtime, worker_audio, Some(&mut *publisher)) {
             WorkerAction::Stop => {
                 let _ = decoder.kill();
@@ -4999,7 +5562,24 @@ fn run_worker(
     let mut publisher: Option<Publisher> = None;
     let mut terminal_error: Option<String> = None;
     let mut selected_entry_id: Option<String> = None;
+    let mut idle_bed_announced = false;
     let mut worker_audio = WorkerAudio::from_profile(&profile);
+    let automation = open_db(&app)
+        .and_then(|conn| load_automation_settings(&conn))
+        .unwrap_or_default();
+    let mut bed_decoder = if automation.bed_enabled {
+        automation
+            .bed_source_path
+            .as_deref()
+            .map(|source_path| BedDecoder::spawn(&app, source_path))
+            .transpose()
+            .unwrap_or_else(|error| {
+                runtime.log(&app, "error", "music_bed", error);
+                None
+            })
+    } else {
+        None
+    };
     if profile.output_kind != OUTPUT_KIND_RTMP || !profile.video_compositor.enabled {
         runtime.update_camera(
             &app,
@@ -5269,6 +5849,11 @@ fn run_worker(
             continue;
         }
 
+        match activate_due_schedule_items(&app, true) {
+            Ok(Some(entry_id)) => selected_entry_id = Some(entry_id),
+            Ok(None) => {}
+            Err(error) => runtime.log(&app, "error", "schedule", error),
+        }
         let selected = selected_entry_id.take();
         let next = open_db(&app).and_then(|conn| match selected.as_deref() {
             Some(entry_id) => queue_entry_by_id(&conn, entry_id),
@@ -5276,6 +5861,7 @@ fn run_worker(
         });
         match next {
             Ok(Some(entry)) => {
+                idle_bed_announced = false;
                 let session = BroadcastSession {
                     profile: &profile,
                     credential: &credential,
@@ -5326,18 +5912,74 @@ fn run_worker(
                 }
             }
             Ok(None) => {
+                let idle_title = bed_decoder
+                    .as_ref()
+                    .and(automation.bed_title.as_deref())
+                    .unwrap_or("WAITING FOR NEXT TRACK");
+                if bed_decoder.is_some() && !idle_bed_announced {
+                    let display = match (
+                        automation.bed_artist.as_deref(),
+                        automation.bed_title.as_deref(),
+                    ) {
+                        (Some(artist), Some(title)) if !artist.trim().is_empty() => {
+                            format!("{artist} — {title}")
+                        }
+                        (_, Some(title)) => title.to_string(),
+                        _ => "Cortina musical".to_string(),
+                    };
+                    runtime.update(
+                        &app,
+                        "live",
+                        format!("Cortina al aire: {display}"),
+                        None,
+                        Some(started_at.clone()),
+                        ("info", "music_bed_started"),
+                    );
+                    update_output_metadata_value_async(
+                        profile.clone(),
+                        credential.clone(),
+                        display,
+                        &runtime,
+                        app.clone(),
+                    );
+                    idle_bed_announced = true;
+                }
                 update_video_overlay(
                     &app,
                     &runtime,
                     publisher.as_mut().expect("publisher initialized"),
-                    "WAITING FOR NEXT TRACK",
+                    idle_title,
                 );
-                let mut silence = silence_chunk();
-                worker_audio.process_chunk(&app, &runtime, &mut silence);
+                let (mut idle_audio, bed_paced) = match bed_decoder.as_mut() {
+                    Some(decoder) => match decoder.read_chunk() {
+                        Ok(mut chunk) => {
+                            scale_pcm_chunk(&mut chunk, automation.bed_gain_percent);
+                            (chunk, true)
+                        }
+                        Err(error) => {
+                            runtime.log(&app, "error", "music_bed", error);
+                            if let Some(decoder) = bed_decoder.take() {
+                                decoder.terminate();
+                            }
+                            (silence_chunk(), false)
+                        }
+                    },
+                    None => (silence_chunk(), false),
+                };
+                worker_audio.process_chunk_with_ducking(
+                    &app,
+                    &runtime,
+                    &mut idle_audio,
+                    if automation.bed_ducking {
+                        MICROPHONE_DUCKING_PERCENT
+                    } else {
+                        100.0
+                    },
+                );
                 let result = publisher
                     .as_mut()
                     .expect("publisher initialized")
-                    .write(&silence);
+                    .write(&idle_audio);
                 if let Err(error) = result {
                     let fatal_message = publisher.as_ref().and_then(|publisher| {
                         fatal_publisher_failure_message(
@@ -5366,7 +6008,7 @@ fn run_worker(
                     ) {
                         break;
                     }
-                } else {
+                } else if !bed_paced {
                     thread::sleep(Duration::from_millis(SILENCE_CHUNK_MILLIS as u64));
                 }
             }
@@ -5379,6 +6021,9 @@ fn run_worker(
 
     if let Some(publisher) = publisher.take() {
         publisher.terminate();
+    }
+    if let Some(decoder) = bed_decoder.take() {
+        decoder.terminate();
     }
     worker_audio.terminate();
     runtime.update_camera(
@@ -5937,6 +6582,7 @@ fn append_track(
         position,
         status: "queued".to_string(),
         error: None,
+        scheduled: false,
         inserted_at: now.clone(),
         updated_at: now,
     };
@@ -5966,12 +6612,1189 @@ fn append_track(
     Ok(entry)
 }
 
+fn create_schedule_item(
+    conn: &Connection,
+    mut input: BroadcastScheduleItemInput,
+) -> Result<BroadcastScheduleItem, String> {
+    input.policy = input.policy.trim().to_ascii_lowercase();
+    input.source_kind = input.source_kind.trim().to_ascii_lowercase();
+    input.library_id = input.library_id.trim().to_string();
+    input.source_id = input.source_id.trim().to_string();
+    if !matches!(input.policy.as_str(), "soft" | "exact") {
+        return Err("Selecciona una política horaria válida.".to_string());
+    }
+    if !matches!(input.source_kind.as_str(), "playlist" | "draft" | "track") {
+        return Err("Selecciona un origen válido para la parrilla.".to_string());
+    }
+    if input.library_id.is_empty()
+        || input.source_id.is_empty()
+        || input.library_id.len() > 512
+        || input.source_id.len() > 1024
+        || input.library_id.chars().any(char::is_control)
+        || input.source_id.chars().any(char::is_control)
+    {
+        return Err("No se pudo identificar el contenido programado.".to_string());
+    }
+    let start_at = DateTime::parse_from_rfc3339(input.start_at.trim())
+        .map_err(|_| "La fecha y hora programadas no son válidas.".to_string())?
+        .with_timezone(&Utc);
+    if start_at < Utc::now() - ChronoDuration::seconds(30) {
+        return Err("La hora programada ya pasó.".to_string());
+    }
+    let (source_name, track_count, duration_seconds) = schedule_source_summary(
+        conn,
+        &input.source_kind,
+        &input.library_id,
+        &input.source_id,
+    )?;
+    let id = Uuid::new_v4().to_string();
+    let now = timestamp();
+    conn.execute(
+        "INSERT INTO broadcast_schedule_items (
+           id, start_at, policy, source_kind, library_id, source_id, source_name,
+           track_count, duration_seconds, status, error, activated_at, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', NULL, NULL, ?10, ?10)",
+        params![
+            &id,
+            start_at.to_rfc3339(),
+            &input.policy,
+            &input.source_kind,
+            &input.library_id,
+            &input.source_id,
+            &source_name,
+            track_count as i64,
+            duration_seconds,
+            &now,
+        ],
+    )
+    .map_err(|error| format!("No se pudo guardar el bloque programado: {error}"))?;
+    if let Err(error) = append_schedule_content(
+        conn,
+        &id,
+        BroadcastScheduleContentInput {
+            source_kind: input.source_kind,
+            library_id: input.library_id,
+            source_id: input.source_id,
+        },
+        false,
+    ) {
+        let _ = conn.execute(
+            "DELETE FROM broadcast_schedule_tracks WHERE schedule_item_id = ?1",
+            params![&id],
+        );
+        let _ = conn.execute(
+            "DELETE FROM broadcast_schedule_items WHERE id = ?1",
+            params![&id],
+        );
+        return Err(error);
+    }
+    get_schedule_item(conn, &id)?.ok_or_else(|| "No se pudo leer el bloque creado.".to_string())
+}
+
+fn schedule_source_summary(
+    conn: &Connection,
+    source_kind: &str,
+    library_id: &str,
+    source_id: &str,
+) -> Result<(String, usize, Option<u64>), String> {
+    match source_kind {
+        "playlist" => conn
+            .query_row(
+                "SELECT p.name, COUNT(t.track_id), SUM(t.total_time)
+                 FROM playlist_index_playlists p
+                 JOIN playlist_index_memberships m
+                   ON m.library_id = p.library_id AND m.playlist_path = p.path
+                 JOIN playlist_index_tracks t
+                   ON t.library_id = m.library_id AND t.track_id = m.track_id
+                 WHERE p.library_id = ?1 AND p.path = ?2 AND t.source_exists = 1
+                 GROUP BY p.library_id, p.path",
+                params![library_id, source_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        i64_to_usize(row.get(1)?),
+                        row.get::<_, Option<u64>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("No se pudo leer la playlist programada: {error}"))?
+            .filter(|(_, count, _)| *count > 0)
+            .ok_or_else(|| {
+                "La playlist programada no tiene pistas locales disponibles.".to_string()
+            }),
+        "draft" => conn
+            .query_row(
+                "SELECT d.name, COUNT(t.track_id), SUM(t.total_time)
+                 FROM playlist_drafts d
+                 JOIN playlist_draft_tracks dt ON dt.draft_id = d.id
+                 JOIN playlist_index_tracks t
+                   ON t.library_id = d.library_id AND t.track_id = dt.track_id
+                 WHERE d.id = ?1 AND d.library_id = ?2 AND t.source_exists = 1
+                 GROUP BY d.id",
+                params![source_id, library_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        i64_to_usize(row.get(1)?),
+                        row.get::<_, Option<u64>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("No se pudo leer la playlist local programada: {error}"))?
+            .filter(|(_, count, _)| *count > 0)
+            .ok_or_else(|| "La playlist local no tiene pistas disponibles.".to_string()),
+        "track" => conn
+            .query_row(
+                "SELECT COALESCE(NULLIF(TRIM(name), ''), 'Sin título'), total_time
+                 FROM playlist_index_tracks
+                 WHERE library_id = ?1 AND track_id = ?2
+                   AND source_exists = 1 AND source_path IS NOT NULL",
+                params![library_id, source_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        1usize,
+                        row.get::<_, Option<u64>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("No se pudo leer la pista programada: {error}"))?
+            .ok_or_else(|| "La pista programada no tiene un archivo local disponible.".to_string()),
+        _ => Err("Origen programado inválido.".to_string()),
+    }
+}
+
+type BroadcastScheduleTrackSnapshot = (String, String, String, String, Option<String>, Option<u64>);
+
+fn schedule_content_tracks(
+    conn: &Connection,
+    content: &mut BroadcastScheduleContentInput,
+) -> Result<Vec<BroadcastScheduleTrackSnapshot>, String> {
+    content.source_kind = content.source_kind.trim().to_ascii_lowercase();
+    content.library_id = content.library_id.trim().to_string();
+    content.source_id = content.source_id.trim().to_string();
+    if !matches!(content.source_kind.as_str(), "playlist" | "draft" | "track")
+        || content.library_id.is_empty()
+        || content.source_id.is_empty()
+        || content.library_id.len() > 512
+        || content.source_id.len() > 1024
+        || content.library_id.chars().any(char::is_control)
+        || content.source_id.chars().any(char::is_control)
+    {
+        return Err("No se pudo identificar el contenido programado.".to_string());
+    }
+    let mut tracks = match content.source_kind.as_str() {
+        "playlist" => {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT m.library_id, m.track_id, t.source_path,
+                            COALESCE(NULLIF(TRIM(t.name), ''), 'Sin título'),
+                            t.artist, t.total_time
+                     FROM playlist_index_memberships m
+                     JOIN playlist_index_tracks t
+                       ON t.library_id = m.library_id AND t.track_id = m.track_id
+                     WHERE m.library_id = ?1 AND m.playlist_path = ?2
+                       AND t.source_exists = 1 AND t.source_path IS NOT NULL
+                     ORDER BY m.position, m.track_id",
+                )
+                .map_err(|error| format!("No se pudo preparar la playlist programada: {error}"))?;
+            let rows = stmt
+                .query_map(params![&content.library_id, &content.source_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<u64>>(5)?,
+                    ))
+                })
+                .map_err(|error| format!("No se pudieron leer pistas programadas: {error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("No se pudieron mapear pistas programadas: {error}"))?
+        }
+        "draft" => {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT d.library_id, dt.track_id, t.source_path,
+                            COALESCE(NULLIF(TRIM(t.name), ''), 'Sin título'),
+                            t.artist, t.total_time
+                     FROM playlist_drafts d
+                     JOIN playlist_draft_tracks dt ON dt.draft_id = d.id
+                     JOIN playlist_index_tracks t
+                       ON t.library_id = d.library_id AND t.track_id = dt.track_id
+                     WHERE d.id = ?1 AND d.library_id = ?2
+                       AND t.source_exists = 1 AND t.source_path IS NOT NULL
+                     ORDER BY dt.position, dt.track_id",
+                )
+                .map_err(|error| format!("No se pudo preparar la playlist local: {error}"))?;
+            let rows = stmt
+                .query_map(params![&content.source_id, &content.library_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<u64>>(5)?,
+                    ))
+                })
+                .map_err(|error| format!("No se pudieron leer pistas locales: {error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("No se pudieron mapear pistas locales: {error}"))?
+        }
+        "track" => conn
+            .query_row(
+                "SELECT library_id, track_id, source_path,
+                        COALESCE(NULLIF(TRIM(name), ''), 'Sin título'), artist, total_time
+                 FROM playlist_index_tracks
+                 WHERE library_id = ?1 AND track_id = ?2
+                   AND source_exists = 1 AND source_path IS NOT NULL",
+                params![&content.library_id, &content.source_id],
+                |row| {
+                    Ok(vec![(
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<u64>>(5)?,
+                    )])
+                },
+            )
+            .optional()
+            .map_err(|error| format!("No se pudo leer la pista programada: {error}"))?
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    tracks.retain(|(_, _, source_path, _, _, _)| !source_path.trim().is_empty());
+    if tracks.is_empty() {
+        return Err("El contenido no tiene pistas locales disponibles.".to_string());
+    }
+    Ok(tracks)
+}
+
+fn append_schedule_content(
+    conn: &Connection,
+    item_id: &str,
+    mut content: BroadcastScheduleContentInput,
+    skip_duplicates: bool,
+) -> Result<usize, String> {
+    let item_id = validate_queue_entry_id(item_id)?;
+    let edit_status = require_editable_schedule_item(conn, &item_id)?;
+    let tracks = schedule_content_tracks(conn, &mut content)?;
+    let mut position = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position), 0) FROM broadcast_schedule_tracks WHERE schedule_item_id = ?1",
+            params![&item_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("No se pudo calcular el orden del bloque: {error}"))?;
+    let now = timestamp();
+    let mut appended = 0usize;
+    let mut appended_track_ids = Vec::new();
+    for (library_id, track_id, source_path, title, artist, duration_seconds) in tracks {
+        if skip_duplicates {
+            let exists = conn
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM broadcast_schedule_tracks
+                       WHERE schedule_item_id = ?1 AND library_id = ?2 AND track_id = ?3
+                     )",
+                    params![&item_id, &library_id, &track_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| format!("No se pudo comprobar la pista programada: {error}"))?;
+            if exists {
+                continue;
+            }
+        }
+        position += 1;
+        let schedule_track_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO broadcast_schedule_tracks (
+               id, schedule_item_id, library_id, track_id, source_path, title,
+               artist, duration_seconds, position, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                &schedule_track_id,
+                &item_id,
+                library_id,
+                track_id,
+                source_path,
+                title,
+                artist,
+                duration_seconds,
+                position,
+                &now,
+            ],
+        )
+        .map_err(|error| format!("No se pudo agregar una pista al bloque: {error}"))?;
+        appended_track_ids.push(schedule_track_id);
+        appended += 1;
+    }
+    if appended == 0 && skip_duplicates {
+        return Err("Todas las pistas seleccionadas ya estaban en el bloque.".to_string());
+    }
+    if edit_status == "activated" {
+        enqueue_appended_schedule_tracks(conn, &item_id, &appended_track_ids)?;
+    }
+    sync_schedule_item_summary(conn, &item_id)?;
+    Ok(appended)
+}
+
+fn enqueue_appended_schedule_tracks(
+    conn: &Connection,
+    item_id: &str,
+    schedule_track_ids: &[String],
+) -> Result<(), String> {
+    if schedule_track_ids.is_empty() {
+        return Ok(());
+    }
+    let source_name = conn
+        .query_row(
+            "SELECT source_name FROM broadcast_schedule_items WHERE id = ?1",
+            params![item_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| format!("No se pudo leer el bloque activo: {error}"))?;
+    let mut position = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position), 0) FROM broadcast_queue_entries",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("No se pudo calcular la cola activa: {error}"))?;
+    let now = timestamp();
+    for schedule_track_id in schedule_track_ids {
+        let track = conn
+            .query_row(
+                "SELECT library_id, track_id, source_path, title, artist, duration_seconds
+                 FROM broadcast_schedule_tracks
+                 WHERE id = ?1 AND schedule_item_id = ?2",
+                params![schedule_track_id, item_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<u64>>(5)?,
+                    ))
+                },
+            )
+            .map_err(|error| format!("No se pudo leer una pista agregada: {error}"))?;
+        position += 1;
+        let queue_entry_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO broadcast_queue_entries (
+               id, library_id, track_id, playlist_path, playlist_name, source_path,
+               title, artist, duration_seconds, position, status, error, inserted_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'queued', NULL, ?11, ?11)",
+            params![
+                &queue_entry_id,
+                track.0,
+                track.1,
+                format!("__scheduled__:{item_id}"),
+                &source_name,
+                track.2,
+                track.3,
+                track.4,
+                track.5,
+                position,
+                &now,
+            ],
+        )
+        .map_err(|error| format!("No se pudo agregar la pista a la cola activa: {error}"))?;
+        conn.execute(
+            "INSERT INTO broadcast_schedule_queue_entries (
+               schedule_item_id, queue_entry_id, schedule_track_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![item_id, &queue_entry_id, schedule_track_id, &now],
+        )
+        .map_err(|error| format!("No se pudo vincular la pista con la cola activa: {error}"))?;
+    }
+    Ok(())
+}
+
+fn ensure_schedule_item_tracks(conn: &Connection, item_id: &str) -> Result<(), String> {
+    let item_id = validate_queue_entry_id(item_id)?;
+    let count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM broadcast_schedule_tracks WHERE schedule_item_id = ?1",
+            params![&item_id],
+            |row| row.get::<_, usize>(0),
+        )
+        .map_err(|error| format!("No se pudo revisar el contenido del bloque: {error}"))?;
+    if count > 0 {
+        return Ok(());
+    }
+    let legacy = conn
+        .query_row(
+            "SELECT source_kind, library_id, source_id, status
+             FROM broadcast_schedule_items WHERE id = ?1",
+            params![&item_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo leer el bloque heredado: {error}"))?
+        .ok_or_else(|| "El bloque programado ya no existe.".to_string())?;
+    if legacy.3 != "pending" {
+        return Ok(());
+    }
+    append_schedule_content(
+        conn,
+        &item_id,
+        BroadcastScheduleContentInput {
+            source_kind: legacy.0,
+            library_id: legacy.1,
+            source_id: legacy.2,
+        },
+        false,
+    )?;
+    Ok(())
+}
+
+fn sync_schedule_item_summary(conn: &Connection, item_id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE broadcast_schedule_items
+         SET track_count = (
+               SELECT COUNT(*) FROM broadcast_schedule_tracks WHERE schedule_item_id = ?1
+             ),
+             duration_seconds = (
+               SELECT SUM(duration_seconds) FROM broadcast_schedule_tracks WHERE schedule_item_id = ?1
+             ),
+             updated_at = ?2
+         WHERE id = ?1",
+        params![item_id, timestamp()],
+    )
+    .map_err(|error| format!("No se pudo actualizar el resumen del bloque: {error}"))?;
+    Ok(())
+}
+
+fn require_editable_schedule_item(conn: &Connection, item_id: &str) -> Result<String, String> {
+    let status = conn
+        .query_row(
+            "SELECT status FROM broadcast_schedule_items WHERE id = ?1",
+            params![item_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo leer el estado del bloque: {error}"))?
+        .ok_or_else(|| "El bloque programado ya no existe.".to_string())?;
+    if status == "pending" {
+        return Ok(status);
+    }
+    if status != "activated" {
+        return Err(
+            "Solo se pueden editar bloques pendientes o el bloque activo actual.".to_string(),
+        );
+    }
+    let current_id = conn
+        .query_row(
+            "SELECT id FROM broadcast_schedule_items
+             WHERE status = 'activated'
+             ORDER BY COALESCE(activated_at, updated_at) DESC, start_at DESC, created_at DESC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo identificar el bloque activo: {error}"))?;
+    if current_id.as_deref() != Some(item_id) {
+        return Err(
+            "Ese bloque ya terminó y no puede volver a insertarse en la cola activa.".to_string(),
+        );
+    }
+    Ok(status)
+}
+
+fn require_pending_schedule_item(conn: &Connection, item_id: &str) -> Result<(), String> {
+    if require_editable_schedule_item(conn, item_id)? != "pending" {
+        return Err("El horario ya comenzó y no puede modificarse.".to_string());
+    }
+    Ok(())
+}
+
+fn update_schedule_item(
+    conn: &Connection,
+    item_id: &str,
+    mut input: BroadcastScheduleItemUpdateInput,
+) -> Result<BroadcastScheduleItem, String> {
+    let item_id = validate_queue_entry_id(item_id)?;
+    require_pending_schedule_item(conn, &item_id)?;
+    input.policy = input.policy.trim().to_ascii_lowercase();
+    if !matches!(input.policy.as_str(), "soft" | "exact") {
+        return Err("Selecciona una política horaria válida.".to_string());
+    }
+    let start_at = DateTime::parse_from_rfc3339(input.start_at.trim())
+        .map_err(|_| "La fecha y hora programadas no son válidas.".to_string())?
+        .with_timezone(&Utc);
+    if start_at < Utc::now() - ChronoDuration::seconds(30) {
+        return Err("La hora programada ya pasó.".to_string());
+    }
+    let updated = conn
+        .execute(
+            "UPDATE broadcast_schedule_items
+             SET start_at = ?2, policy = ?3, error = NULL, updated_at = ?4
+             WHERE id = ?1 AND status = 'pending'",
+            params![item_id, start_at.to_rfc3339(), input.policy, timestamp()],
+        )
+        .map_err(|error| format!("No se pudo actualizar el bloque: {error}"))?;
+    if updated == 0 {
+        return Err("El bloque ya fue ejecutado o no existe.".to_string());
+    }
+    get_schedule_item(conn, &item_id)?
+        .ok_or_else(|| "No se pudo leer el bloque actualizado.".to_string())
+}
+
+fn list_schedule_tracks(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<Vec<BroadcastScheduleTrack>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, library_id, track_id, source_path, title, artist,
+                    duration_seconds, position
+             FROM broadcast_schedule_tracks
+             WHERE schedule_item_id = ?1 ORDER BY position, created_at",
+        )
+        .map_err(|error| format!("No se pudo preparar el contenido del bloque: {error}"))?;
+    let rows = stmt
+        .query_map(params![item_id], |row| {
+            Ok(BroadcastScheduleTrack {
+                id: row.get(0)?,
+                library_id: row.get(1)?,
+                track_id: row.get(2)?,
+                source_path: row.get(3)?,
+                title: row.get(4)?,
+                artist: row.get(5)?,
+                duration_seconds: row.get(6)?,
+                position: row.get(7)?,
+            })
+        })
+        .map_err(|error| format!("No se pudo leer el contenido del bloque: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("No se pudo mapear el contenido del bloque: {error}"))
+}
+
+fn list_active_schedule_tracks(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<Vec<BroadcastScheduleTrack>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT st.id, st.library_id, st.track_id, st.source_path, st.title, st.artist,
+                    st.duration_seconds, st.position
+             FROM broadcast_schedule_tracks st
+             JOIN broadcast_schedule_queue_entries sq
+               ON sq.schedule_item_id = st.schedule_item_id AND sq.schedule_track_id = st.id
+             JOIN broadcast_queue_entries q ON q.id = sq.queue_entry_id
+             WHERE st.schedule_item_id = ?1 AND q.status = 'queued'
+             ORDER BY q.position, st.position, st.created_at",
+        )
+        .map_err(|error| format!("No se pudo preparar el contenido activo: {error}"))?;
+    let rows = stmt
+        .query_map(params![item_id], |row| {
+            Ok(BroadcastScheduleTrack {
+                id: row.get(0)?,
+                library_id: row.get(1)?,
+                track_id: row.get(2)?,
+                source_path: row.get(3)?,
+                title: row.get(4)?,
+                artist: row.get(5)?,
+                duration_seconds: row.get(6)?,
+                position: row.get(7)?,
+            })
+        })
+        .map_err(|error| format!("No se pudieron leer las pistas activas: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("No se pudieron mapear las pistas activas: {error}"))
+}
+
+fn editable_schedule_tracks(
+    conn: &Connection,
+    item_id: &str,
+    status: &str,
+) -> Result<Vec<BroadcastScheduleTrack>, String> {
+    if status == "activated" {
+        list_active_schedule_tracks(conn, item_id)
+    } else {
+        list_schedule_tracks(conn, item_id)
+    }
+}
+
+fn reorder_schedule_tracks(
+    conn: &mut Connection,
+    item_id: &str,
+    track_ids: &[String],
+) -> Result<(), String> {
+    ensure_schedule_item_tracks(conn, item_id)?;
+    let item_id = validate_queue_entry_id(item_id)?;
+    let edit_status = require_editable_schedule_item(conn, &item_id)?;
+    let current = editable_schedule_tracks(conn, &item_id, &edit_status)?;
+    if current.len() != track_ids.len() || current.is_empty() {
+        return Err("El orden no incluye todas las pistas del bloque.".to_string());
+    }
+    let mut expected = current
+        .iter()
+        .map(|track| track.id.clone())
+        .collect::<Vec<_>>();
+    let mut requested = track_ids
+        .iter()
+        .map(|id| validate_queue_entry_id(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    expected.sort();
+    requested.sort();
+    if expected != requested {
+        return Err("El orden contiene pistas que no pertenecen al bloque.".to_string());
+    }
+    let transaction = conn
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar el reordenamiento: {error}"))?;
+    if edit_status == "pending" {
+        for (index, track_id) in track_ids.iter().enumerate() {
+            transaction
+                .execute(
+                    "UPDATE broadcast_schedule_tracks SET position = ?3
+                     WHERE id = ?1 AND schedule_item_id = ?2",
+                    params![track_id, &item_id, index as i64 + 1],
+                )
+                .map_err(|error| format!("No se pudo reordenar una pista: {error}"))?;
+        }
+    } else {
+        let queue_slots = {
+            let mut stmt = transaction
+                .prepare(
+                    "SELECT q.position
+                     FROM broadcast_schedule_tracks st
+                     JOIN broadcast_schedule_queue_entries sq ON sq.schedule_track_id = st.id
+                     JOIN broadcast_queue_entries q ON q.id = sq.queue_entry_id
+                     WHERE st.schedule_item_id = ?1 AND q.status = 'queued'
+                     ORDER BY q.position",
+                )
+                .map_err(|error| format!("No se pudo leer el orden activo: {error}"))?;
+            let rows = stmt
+                .query_map(params![&item_id], |row| row.get::<_, i64>(0))
+                .map_err(|error| format!("No se pudo leer la cola activa: {error}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("No se pudo mapear la cola activa: {error}"))?
+        };
+        if queue_slots.len() != track_ids.len() {
+            return Err(
+                "La cola cambió porque una pista ya comenzó; vuelve a intentarlo.".to_string(),
+            );
+        }
+        let schedule_slots = {
+            let mut slots = current
+                .iter()
+                .map(|track| track.position)
+                .collect::<Vec<_>>();
+            slots.sort_unstable();
+            slots
+        };
+        for ((track_id, queue_position), schedule_position) in
+            track_ids.iter().zip(queue_slots).zip(schedule_slots)
+        {
+            let updated = transaction
+                .execute(
+                    "UPDATE broadcast_queue_entries
+                     SET position = ?3, updated_at = ?4
+                     WHERE id = (
+                       SELECT queue_entry_id FROM broadcast_schedule_queue_entries
+                       WHERE schedule_item_id = ?1 AND schedule_track_id = ?2
+                     ) AND status = 'queued'",
+                    params![&item_id, track_id, queue_position, timestamp()],
+                )
+                .map_err(|error| format!("No se pudo reordenar la cola activa: {error}"))?;
+            if updated != 1 {
+                return Err("La pista ya comenzó y no puede reordenarse.".to_string());
+            }
+            transaction
+                .execute(
+                    "UPDATE broadcast_schedule_tracks SET position = ?3
+                     WHERE id = ?1 AND schedule_item_id = ?2",
+                    params![track_id, &item_id, schedule_position],
+                )
+                .map_err(|error| format!("No se pudo actualizar el orden del bloque: {error}"))?;
+        }
+    }
+    transaction
+        .execute(
+            "UPDATE broadcast_schedule_items SET updated_at = ?2 WHERE id = ?1",
+            params![&item_id, timestamp()],
+        )
+        .map_err(|error| format!("No se pudo actualizar el bloque: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("No se pudo confirmar el nuevo orden: {error}"))
+}
+
+fn remove_schedule_track(
+    conn: &mut Connection,
+    item_id: &str,
+    track_id: &str,
+) -> Result<(), String> {
+    ensure_schedule_item_tracks(conn, item_id)?;
+    let item_id = validate_queue_entry_id(item_id)?;
+    let edit_status = require_editable_schedule_item(conn, &item_id)?;
+    let track_id = validate_queue_entry_id(track_id)?;
+    let current = editable_schedule_tracks(conn, &item_id, &edit_status)?;
+    if edit_status == "pending" && current.len() <= 1 {
+        return Err("El bloque debe conservar al menos una pista.".to_string());
+    }
+    if !current.iter().any(|track| track.id == track_id) {
+        return Err("La pista ya no pertenece al bloque.".to_string());
+    }
+    let remaining = current
+        .into_iter()
+        .filter(|track| track.id != track_id)
+        .map(|track| track.id)
+        .collect::<Vec<_>>();
+    let transaction = conn
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar la edición del bloque: {error}"))?;
+    if edit_status == "activated" {
+        let skipped = transaction
+            .execute(
+                "UPDATE broadcast_queue_entries
+                 SET status = 'skipped', updated_at = ?3
+                 WHERE id = (
+                   SELECT queue_entry_id FROM broadcast_schedule_queue_entries
+                   WHERE schedule_item_id = ?1 AND schedule_track_id = ?2
+                 ) AND status = 'queued'",
+                params![&item_id, &track_id, timestamp()],
+            )
+            .map_err(|error| format!("No se pudo quitar la pista de la cola activa: {error}"))?;
+        if skipped != 1 {
+            return Err("La pista ya comenzó y no puede quitarse.".to_string());
+        }
+    }
+    transaction
+        .execute(
+            "DELETE FROM broadcast_schedule_tracks WHERE id = ?1 AND schedule_item_id = ?2",
+            params![track_id, &item_id],
+        )
+        .map_err(|error| format!("No se pudo quitar la pista del bloque: {error}"))?;
+    if edit_status == "pending" {
+        for (index, id) in remaining.iter().enumerate() {
+            transaction
+                .execute(
+                    "UPDATE broadcast_schedule_tracks SET position = ?2 WHERE id = ?1",
+                    params![id, index as i64 + 1],
+                )
+                .map_err(|error| format!("No se pudo normalizar el orden del bloque: {error}"))?;
+        }
+    }
+    sync_schedule_item_summary(&transaction, &item_id)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("No se pudo confirmar la edición del bloque: {error}"))
+}
+
+fn list_schedule_items(conn: &Connection) -> Result<Vec<BroadcastScheduleItem>, String> {
+    let items = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, start_at, policy, source_kind, library_id, source_id, source_name,
+                        track_count, duration_seconds, status, error, activated_at, created_at, updated_at
+                 FROM broadcast_schedule_items
+                 ORDER BY start_at, created_at",
+            )
+            .map_err(|error| format!("No se pudo preparar la parrilla: {error}"))?;
+        let rows = stmt
+            .query_map([], row_to_schedule_item)
+            .map_err(|error| format!("No se pudo leer la parrilla: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudo mapear la parrilla: {error}"))?
+    };
+    Ok(items)
+}
+
+fn get_schedule_item(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<Option<BroadcastScheduleItem>, String> {
+    let mut item = conn
+        .query_row(
+            "SELECT id, start_at, policy, source_kind, library_id, source_id, source_name,
+                track_count, duration_seconds, status, error, activated_at, created_at, updated_at
+         FROM broadcast_schedule_items WHERE id = ?1",
+            params![item_id],
+            row_to_schedule_item,
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo leer el bloque programado: {error}"))?;
+    if let Some(item) = item.as_mut() {
+        item.tracks = editable_schedule_tracks(conn, &item.id, &item.status)?;
+    }
+    Ok(item)
+}
+
+fn row_to_schedule_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<BroadcastScheduleItem> {
+    Ok(BroadcastScheduleItem {
+        id: row.get(0)?,
+        start_at: row.get(1)?,
+        policy: row.get(2)?,
+        source_kind: row.get(3)?,
+        library_id: row.get(4)?,
+        source_id: row.get(5)?,
+        source_name: row.get(6)?,
+        track_count: i64_to_usize(row.get(7)?),
+        duration_seconds: row.get(8)?,
+        status: row.get(9)?,
+        error: row.get(10)?,
+        activated_at: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+        tracks: Vec::new(),
+    })
+}
+
+fn delete_schedule_item(conn: &Connection, item_id: &str) -> Result<String, String> {
+    let item_id = validate_queue_entry_id(item_id)?;
+    let deleted = conn
+        .execute(
+            "DELETE FROM broadcast_schedule_items WHERE id = ?1 AND status = 'pending'",
+            params![item_id],
+        )
+        .map_err(|error| format!("No se pudo eliminar el bloque programado: {error}"))?;
+    if deleted == 0 {
+        return Err("El bloque ya fue ejecutado o no existe.".to_string());
+    }
+    conn.execute(
+        "DELETE FROM broadcast_schedule_tracks WHERE schedule_item_id = ?1",
+        params![item_id],
+    )
+    .map_err(|error| format!("No se pudo limpiar el contenido del bloque: {error}"))?;
+    Ok("Bloque eliminado de la parrilla.".to_string())
+}
+
+fn load_automation_settings(conn: &Connection) -> Result<BroadcastAutomationSettings, String> {
+    conn.query_row(
+        "SELECT mode, bed_enabled, bed_library_id, bed_track_id, bed_source_path,
+                bed_title, bed_artist, bed_gain_percent, bed_ducking, updated_at
+         FROM broadcast_automation_settings WHERE id = ?1",
+        params![PROFILE_ID],
+        |row| {
+            Ok(BroadcastAutomationSettings {
+                mode: row.get(0)?,
+                bed_enabled: row.get(1)?,
+                bed_library_id: row.get(2)?,
+                bed_track_id: row.get(3)?,
+                bed_source_path: row.get(4)?,
+                bed_title: row.get(5)?,
+                bed_artist: row.get(6)?,
+                bed_gain_percent: row.get(7)?,
+                bed_ducking: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| format!("No se pudo leer la automatización: {error}"))
+    .map(|settings| settings.unwrap_or_default())
+}
+
+fn save_automation_settings(
+    conn: &Connection,
+    mut input: BroadcastAutomationSettingsInput,
+) -> Result<BroadcastAutomationSettings, String> {
+    input.mode = input.mode.trim().to_ascii_lowercase();
+    if !matches!(input.mode.as_str(), "immediate" | "scheduled") {
+        return Err("Modo de broadcast inválido.".to_string());
+    }
+    if input.bed_gain_percent > 100 {
+        return Err("El volumen de la cortina debe estar entre 0% y 100%.".to_string());
+    }
+    let library_id = input
+        .bed_library_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let track_id = input
+        .bed_track_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let track = match (library_id.as_deref(), track_id.as_deref()) {
+        (Some(library_id), Some(track_id)) => conn
+            .query_row(
+                "SELECT source_path, COALESCE(NULLIF(TRIM(name), ''), 'Cortina musical'), artist
+                 FROM playlist_index_tracks
+                 WHERE library_id = ?1 AND track_id = ?2 AND source_exists = 1",
+                params![library_id, track_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("No se pudo leer la cortina musical: {error}"))?,
+        _ => None,
+    };
+    if input.bed_enabled && track.as_ref().and_then(|value| value.0.as_ref()).is_none() {
+        return Err("Selecciona una pista local disponible para la cortina.".to_string());
+    }
+    let (source_path, title, artist) = track
+        .map(|(path, title, artist)| (path, Some(title), artist))
+        .unwrap_or((None, None, None));
+    let now = timestamp();
+    conn.execute(
+        "INSERT INTO broadcast_automation_settings (
+           id, mode, bed_enabled, bed_library_id, bed_track_id, bed_source_path,
+           bed_title, bed_artist, bed_gain_percent, bed_ducking, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(id) DO UPDATE SET
+           mode = excluded.mode,
+           bed_enabled = excluded.bed_enabled,
+           bed_library_id = excluded.bed_library_id,
+           bed_track_id = excluded.bed_track_id,
+           bed_source_path = excluded.bed_source_path,
+           bed_title = excluded.bed_title,
+           bed_artist = excluded.bed_artist,
+           bed_gain_percent = excluded.bed_gain_percent,
+           bed_ducking = excluded.bed_ducking,
+           updated_at = excluded.updated_at",
+        params![
+            PROFILE_ID,
+            &input.mode,
+            input.bed_enabled,
+            library_id,
+            track_id,
+            source_path,
+            title,
+            artist,
+            input.bed_gain_percent,
+            input.bed_ducking,
+            &now,
+        ],
+    )
+    .map_err(|error| format!("No se pudo guardar la automatización: {error}"))?;
+    load_automation_settings(conn)
+}
+
+fn activate_due_schedule_items(
+    app: &AppHandle,
+    include_soft: bool,
+) -> Result<Option<String>, String> {
+    let mut conn = open_db(app)?;
+    activate_due_schedule_items_in_connection(&mut conn, include_soft, Utc::now())
+}
+
+fn activate_due_schedule_items_in_connection(
+    conn: &mut Connection,
+    include_soft: bool,
+    now: DateTime<Utc>,
+) -> Result<Option<String>, String> {
+    if load_automation_settings(&conn)?.mode != "scheduled" {
+        return Ok(None);
+    }
+    let oldest = now - ChronoDuration::minutes(SCHEDULE_GRACE_MINUTES);
+    conn.execute(
+        "UPDATE broadcast_schedule_items
+         SET status = 'skipped', error = 'Horario omitido mientras Broadcast no estaba disponible', updated_at = ?2
+         WHERE status = 'pending' AND start_at < ?1",
+        params![oldest.to_rfc3339(), now.to_rfc3339()],
+    )
+    .map_err(|error| format!("No se pudieron cerrar horarios vencidos: {error}"))?;
+    let sql = if include_soft {
+        "SELECT id FROM broadcast_schedule_items
+         WHERE status = 'pending' AND start_at <= ?1 AND start_at >= ?2
+         ORDER BY start_at, created_at"
+    } else {
+        "SELECT id FROM broadcast_schedule_items
+         WHERE status = 'pending' AND policy = 'exact' AND start_at <= ?1 AND start_at >= ?2
+         ORDER BY start_at, created_at"
+    };
+    let item_ids = {
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|error| format!("No se pudo preparar la ejecución de parrilla: {error}"))?;
+        let rows = stmt
+            .query_map(params![now.to_rfc3339(), oldest.to_rfc3339()], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| format!("No se pudieron leer horarios pendientes: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudieron mapear horarios pendientes: {error}"))?
+    };
+    if item_ids.is_empty() {
+        return Ok(None);
+    }
+    let previous_queued = queued_entry_ids(&conn)?;
+    let mut activated_ids = Vec::new();
+    for item_id in item_ids {
+        let Some(item) = get_schedule_item(&conn, &item_id)? else {
+            continue;
+        };
+        match activate_schedule_item(&mut *conn, &item) {
+            Ok(ids) => activated_ids = ids,
+            Err(error) => {
+                conn.execute(
+                    "UPDATE broadcast_schedule_items
+                     SET status = 'failed', error = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![&item.id, &error, timestamp()],
+                )
+                .map_err(|db_error| format!("No se pudo marcar el horario fallido: {db_error}"))?;
+            }
+        }
+    }
+    if activated_ids.is_empty() {
+        return Ok(None);
+    }
+    let mut order = activated_ids.clone();
+    order.extend(previous_queued);
+    reorder_queued_entries(&mut *conn, &order)?;
+    Ok(activated_ids.into_iter().next())
+}
+
+fn activate_schedule_item(
+    conn: &mut Connection,
+    item: &BroadcastScheduleItem,
+) -> Result<Vec<String>, String> {
+    let mut position = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position), 0) FROM broadcast_queue_entries",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("No se pudo preparar la cola programada: {error}"))?;
+    let scheduled_tracks = list_schedule_tracks(conn, &item.id)?;
+    let linked_entries = if scheduled_tracks.is_empty() {
+        let maximum_position = position;
+        match item.source_kind.as_str() {
+            "playlist" => {
+                append_playlist(conn, &item.library_id, &item.source_id)?;
+            }
+            "draft" => {
+                append_draft(conn, &item.source_id)?;
+            }
+            "track" => {
+                append_track(conn, &item.library_id, &item.source_id)?;
+            }
+            _ => return Err("Origen programado inválido.".to_string()),
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM broadcast_queue_entries
+                 WHERE status = 'queued' AND position > ?1 ORDER BY position",
+            )
+            .map_err(|error| format!("No se pudo leer la cola programada: {error}"))?;
+        let rows = stmt
+            .query_map(params![maximum_position], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("No se pudieron leer pistas programadas: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudieron mapear pistas programadas: {error}"))?
+            .into_iter()
+            .map(|queue_entry_id| (queue_entry_id, None))
+            .collect::<Vec<_>>()
+    } else {
+        let now = timestamp();
+        let mut linked_entries = Vec::with_capacity(scheduled_tracks.len());
+        for track in scheduled_tracks {
+            position += 1;
+            let queue_entry_id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO broadcast_queue_entries (
+                   id, library_id, track_id, playlist_path, playlist_name, source_path,
+                   title, artist, duration_seconds, position, status, error, inserted_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'queued', NULL, ?11, ?11)",
+                params![
+                    &queue_entry_id,
+                    track.library_id,
+                    track.track_id,
+                    format!("__scheduled__:{}", item.id),
+                    &item.source_name,
+                    track.source_path,
+                    track.title,
+                    track.artist,
+                    track.duration_seconds,
+                    position,
+                    &now,
+                ],
+            )
+            .map_err(|error| format!("No se pudo cargar una pista programada: {error}"))?;
+            linked_entries.push((queue_entry_id, Some(track.id)));
+        }
+        linked_entries
+    };
+    if linked_entries.is_empty() {
+        return Err("El bloque programado no agregó pistas disponibles.".to_string());
+    }
+    let now = timestamp();
+    for (queue_entry_id, schedule_track_id) in &linked_entries {
+        conn.execute(
+            "INSERT OR IGNORE INTO broadcast_schedule_queue_entries (
+               schedule_item_id, queue_entry_id, schedule_track_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![&item.id, queue_entry_id, schedule_track_id, &now],
+        )
+        .map_err(|error| format!("No se pudo vincular la pista programada: {error}"))?;
+    }
+    discard_previous_schedule_remainder(conn, &item.id)?;
+    conn.execute(
+        "UPDATE broadcast_schedule_items
+         SET status = 'activated', error = NULL, activated_at = ?2, updated_at = ?2
+         WHERE id = ?1 AND status = 'pending'",
+        params![&item.id, &now],
+    )
+    .map_err(|error| format!("No se pudo activar el bloque programado: {error}"))?;
+    Ok(linked_entries
+        .into_iter()
+        .map(|(queue_entry_id, _)| queue_entry_id)
+        .collect())
+}
+
+fn discard_previous_schedule_remainder(
+    conn: &Connection,
+    next_schedule_item_id: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE broadcast_queue_entries
+         SET status = 'skipped', updated_at = ?2
+         WHERE status = 'queued'
+           AND EXISTS (
+             SELECT 1 FROM broadcast_schedule_queue_entries sq
+             WHERE sq.queue_entry_id = broadcast_queue_entries.id
+               AND sq.schedule_item_id != ?1
+           )",
+        params![next_schedule_item_id, timestamp()],
+    )
+    .map_err(|error| format!("No se pudo cerrar el bloque programado anterior: {error}"))
+}
+
+fn queued_entry_ids(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id FROM broadcast_queue_entries WHERE status = 'queued' ORDER BY position")
+        .map_err(|error| format!("No se pudo leer la cola pendiente: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("No se pudo consultar la cola pendiente: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("No se pudo mapear la cola pendiente: {error}"))
+}
+
 fn list_queue(conn: &Connection) -> Result<Vec<BroadcastQueueEntry>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, library_id, track_id, playlist_path, playlist_name, source_path,
-                    title, artist, duration_seconds, position, status, error, inserted_at, updated_at
-             FROM broadcast_queue_entries ORDER BY position",
+            "SELECT q.id, q.library_id, q.track_id, q.playlist_path, q.playlist_name, q.source_path,
+                    q.title, q.artist, q.duration_seconds, q.position, q.status, q.error,
+                    EXISTS(SELECT 1 FROM broadcast_schedule_queue_entries sq WHERE sq.queue_entry_id = q.id),
+                    q.inserted_at, q.updated_at
+             FROM broadcast_queue_entries q ORDER BY q.position",
         )
         .map_err(|error| format!("No se pudo preparar cola de broadcast: {error}"))?;
     let rows = stmt
@@ -6007,9 +7830,11 @@ fn queue_entry_by_id(
     entry_id: &str,
 ) -> Result<Option<BroadcastQueueEntry>, String> {
     conn.query_row(
-        "SELECT id, library_id, track_id, playlist_path, playlist_name, source_path,
-                title, artist, duration_seconds, position, status, error, inserted_at, updated_at
-         FROM broadcast_queue_entries WHERE id = ?1",
+        "SELECT q.id, q.library_id, q.track_id, q.playlist_path, q.playlist_name, q.source_path,
+                q.title, q.artist, q.duration_seconds, q.position, q.status, q.error,
+                EXISTS(SELECT 1 FROM broadcast_schedule_queue_entries sq WHERE sq.queue_entry_id = q.id),
+                q.inserted_at, q.updated_at
+         FROM broadcast_queue_entries q WHERE q.id = ?1",
         params![entry_id],
         row_to_queue_entry,
     )
@@ -6093,10 +7918,22 @@ fn reorder_queued_entries(conn: &mut Connection, entry_ids: &[String]) -> Result
 }
 
 fn next_queue_entry(conn: &Connection) -> Result<Option<BroadcastQueueEntry>, String> {
+    let scheduled_mode = load_automation_settings(conn)?.mode == "scheduled";
+    let scope = if scheduled_mode {
+        "EXISTS(SELECT 1 FROM broadcast_schedule_queue_entries sq WHERE sq.queue_entry_id = q.id)"
+    } else {
+        "NOT EXISTS(SELECT 1 FROM broadcast_schedule_queue_entries sq WHERE sq.queue_entry_id = q.id)"
+    };
     conn.query_row(
-        "SELECT id, library_id, track_id, playlist_path, playlist_name, source_path,
-                title, artist, duration_seconds, position, status, error, inserted_at, updated_at
-         FROM broadcast_queue_entries WHERE status = 'queued' ORDER BY position LIMIT 1",
+        &format!(
+            "SELECT q.id, q.library_id, q.track_id, q.playlist_path, q.playlist_name, q.source_path,
+                    q.title, q.artist, q.duration_seconds, q.position, q.status, q.error,
+                    EXISTS(SELECT 1 FROM broadcast_schedule_queue_entries sq WHERE sq.queue_entry_id = q.id),
+                    q.inserted_at, q.updated_at
+             FROM broadcast_queue_entries q
+             WHERE q.status = 'queued' AND {scope}
+             ORDER BY q.position LIMIT 1"
+        ),
         [],
         row_to_queue_entry,
     )
@@ -6118,8 +7955,9 @@ fn row_to_queue_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<BroadcastQueu
         position: row.get(9)?,
         status: row.get(10)?,
         error: row.get(11)?,
-        inserted_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        scheduled: row.get(12)?,
+        inserted_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -6163,6 +8001,7 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         "
         CREATE TABLE IF NOT EXISTS broadcast_profiles (
           id TEXT PRIMARY KEY,
+          profile_name TEXT NOT NULL DEFAULT 'Destino principal',
           output_kind TEXT NOT NULL DEFAULT 'icecast',
           host TEXT NOT NULL,
           port INTEGER NOT NULL,
@@ -6191,6 +8030,27 @@ fn init_db(conn: &Connection) -> Result<(), String> {
           updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS broadcast_active_profile (
+          singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+          profile_id TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS broadcast_control_settings (
+          id TEXT PRIMARY KEY,
+          microphone_enabled INTEGER NOT NULL DEFAULT 0,
+          microphone_device TEXT NOT NULL DEFAULT 'default',
+          microphone_gain_percent INTEGER NOT NULL DEFAULT 100,
+          line_input_enabled INTEGER NOT NULL DEFAULT 0,
+          line_input_device TEXT NOT NULL DEFAULT 'default',
+          line_input_channel INTEGER NOT NULL DEFAULT 1,
+          line_input_stereo INTEGER NOT NULL DEFAULT 1,
+          line_input_gain_percent INTEGER NOT NULL DEFAULT 100,
+          application_audio_enabled INTEGER NOT NULL DEFAULT 0,
+          application_audio_bundle_id TEXT NOT NULL DEFAULT '',
+          application_audio_gain_percent INTEGER NOT NULL DEFAULT 100,
+          updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS broadcast_queue_entries (
           id TEXT PRIMARY KEY,
           library_id TEXT NOT NULL,
@@ -6211,6 +8071,71 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_broadcast_queue_status_position
           ON broadcast_queue_entries(status, position);
 
+        CREATE TABLE IF NOT EXISTS broadcast_schedule_items (
+          id TEXT PRIMARY KEY,
+          start_at TEXT NOT NULL,
+          policy TEXT NOT NULL,
+          source_kind TEXT NOT NULL,
+          library_id TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          source_name TEXT NOT NULL,
+          track_count INTEGER NOT NULL DEFAULT 0,
+          duration_seconds INTEGER,
+          status TEXT NOT NULL DEFAULT 'pending',
+          error TEXT,
+          activated_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK(policy IN ('soft', 'exact')),
+          CHECK(source_kind IN ('playlist', 'draft', 'track')),
+          CHECK(status IN ('pending', 'activated', 'skipped', 'failed'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_broadcast_schedule_due
+          ON broadcast_schedule_items(status, start_at);
+
+        CREATE TABLE IF NOT EXISTS broadcast_schedule_tracks (
+          id TEXT PRIMARY KEY,
+          schedule_item_id TEXT NOT NULL,
+          library_id TEXT NOT NULL,
+          track_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          title TEXT NOT NULL,
+          artist TEXT,
+          duration_seconds INTEGER,
+          position INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(schedule_item_id) REFERENCES broadcast_schedule_items(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_broadcast_schedule_tracks_item_position
+          ON broadcast_schedule_tracks(schedule_item_id, position);
+
+        CREATE TABLE IF NOT EXISTS broadcast_schedule_queue_entries (
+          schedule_item_id TEXT NOT NULL,
+          queue_entry_id TEXT NOT NULL UNIQUE,
+          schedule_track_id TEXT,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(schedule_item_id, queue_entry_id),
+          FOREIGN KEY(schedule_item_id) REFERENCES broadcast_schedule_items(id) ON DELETE CASCADE,
+          FOREIGN KEY(queue_entry_id) REFERENCES broadcast_queue_entries(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_broadcast_schedule_queue_item
+          ON broadcast_schedule_queue_entries(schedule_item_id);
+
+        CREATE TABLE IF NOT EXISTS broadcast_automation_settings (
+          id TEXT PRIMARY KEY,
+          mode TEXT NOT NULL DEFAULT 'immediate',
+          bed_enabled INTEGER NOT NULL DEFAULT 0,
+          bed_library_id TEXT,
+          bed_track_id TEXT,
+          bed_source_path TEXT,
+          bed_title TEXT,
+          bed_artist TEXT,
+          bed_gain_percent INTEGER NOT NULL DEFAULT 25,
+          bed_ducking INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT NOT NULL,
+          CHECK(mode IN ('immediate', 'scheduled'))
+        );
+
         CREATE TABLE IF NOT EXISTS broadcast_video_compositor (
           id TEXT PRIMARY KEY,
           config_json TEXT NOT NULL DEFAULT '{}',
@@ -6220,6 +8145,11 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         ",
     )
     .map_err(|error| format!("No se pudo inicializar SQLite broadcast: {error}"))?;
+    ensure_broadcast_profile_column(
+        conn,
+        "profile_name",
+        "TEXT NOT NULL DEFAULT 'Destino principal'",
+    )?;
     ensure_broadcast_profile_column(conn, "output_kind", "TEXT NOT NULL DEFAULT 'icecast'")?;
     ensure_broadcast_profile_column(conn, "microphone_enabled", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_broadcast_profile_column(conn, "microphone_device", "TEXT NOT NULL DEFAULT 'default'")?;
@@ -6264,6 +8194,70 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         "rtmp_audio_bitrate_kbps",
         "INTEGER NOT NULL DEFAULT 128",
     )?;
+    ensure_broadcast_schedule_queue_track_column(conn)?;
+    backfill_broadcast_schedule_queue_tracks(conn)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO broadcast_profiles (
+           id, profile_name, host, port, mount, username, station_name, description, updated_at
+         ) VALUES (?1, 'Destino principal', '127.0.0.1', 8000, '/live.mp3', 'source',
+                   'Rau Studio Radio', 'Broadcast local desde Rau Studio', ?2)",
+        params![PROFILE_ID, timestamp()],
+    )
+    .map_err(|error| format!("No se pudo crear el destino inicial: {error}"))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO broadcast_active_profile (singleton_id, profile_id) VALUES (1, ?1)",
+        params![PROFILE_ID],
+    )
+    .map_err(|error| format!("No se pudo seleccionar el destino inicial: {error}"))?;
+    conn.execute(
+        "UPDATE broadcast_active_profile
+         SET profile_id = ?1
+         WHERE singleton_id = 1
+           AND NOT EXISTS (
+             SELECT 1 FROM broadcast_profiles WHERE id = broadcast_active_profile.profile_id
+           )",
+        params![PROFILE_ID],
+    )
+    .map_err(|error| format!("No se pudo reparar el destino activo: {error}"))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO broadcast_control_settings (
+           id, microphone_enabled, microphone_device, microphone_gain_percent,
+           line_input_enabled, line_input_device, line_input_channel, line_input_stereo,
+           line_input_gain_percent, application_audio_enabled, application_audio_bundle_id,
+           application_audio_gain_percent, updated_at
+         )
+         SELECT ?1, p.microphone_enabled, p.microphone_device, p.microphone_gain_percent,
+                p.line_input_enabled, p.line_input_device, p.line_input_channel,
+                p.line_input_stereo, p.line_input_gain_percent,
+                p.application_audio_enabled, p.application_audio_bundle_id,
+                p.application_audio_gain_percent, ?2
+         FROM broadcast_profiles p
+         JOIN broadcast_active_profile a ON a.profile_id = p.id
+         WHERE a.singleton_id = 1",
+        params![PROFILE_ID, timestamp()],
+    )
+    .map_err(|error| format!("No se pudo migrar la configuración de Control: {error}"))?;
+    Ok(())
+}
+
+fn active_profile_id(conn: &Connection) -> Result<String, String> {
+    conn.query_row(
+        "SELECT profile_id FROM broadcast_active_profile WHERE singleton_id = 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| format!("No se pudo leer el destino activo: {error}"))
+    .map(|profile_id| profile_id.unwrap_or_else(|| PROFILE_ID.to_string()))
+}
+
+fn set_active_profile_id(conn: &Connection, profile_id: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO broadcast_active_profile (singleton_id, profile_id) VALUES (1, ?1)
+         ON CONFLICT(singleton_id) DO UPDATE SET profile_id = excluded.profile_id",
+        params![profile_id],
+    )
+    .map_err(|error| format!("No se pudo activar el destino: {error}"))?;
     Ok(())
 }
 
@@ -6291,6 +8285,52 @@ fn ensure_broadcast_profile_column(
     Ok(())
 }
 
+fn ensure_broadcast_schedule_queue_track_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(broadcast_schedule_queue_entries)")
+        .map_err(|error| format!("No se pudo revisar la cola programada: {error}"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("No se pudieron leer columnas de la cola programada: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!("No se pudieron mapear columnas de la cola programada: {error}")
+        })?;
+    if columns
+        .iter()
+        .any(|existing| existing == "schedule_track_id")
+    {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE broadcast_schedule_queue_entries ADD COLUMN schedule_track_id TEXT",
+        [],
+    )
+    .map_err(|error| format!("No se pudo vincular la parrilla con su cola: {error}"))?;
+    Ok(())
+}
+
+fn backfill_broadcast_schedule_queue_tracks(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "UPDATE broadcast_schedule_queue_entries
+         SET schedule_track_id = (
+           SELECT st.id
+           FROM broadcast_schedule_tracks st
+           JOIN broadcast_queue_entries q
+             ON q.id = broadcast_schedule_queue_entries.queue_entry_id
+           WHERE st.schedule_item_id = broadcast_schedule_queue_entries.schedule_item_id
+             AND st.library_id = q.library_id
+             AND st.track_id = q.track_id
+           ORDER BY st.position, st.created_at
+           LIMIT 1
+         )
+         WHERE schedule_track_id IS NULL",
+        [],
+    )
+    .map_err(|error| format!("No se pudieron vincular pistas activas existentes: {error}"))?;
+    Ok(())
+}
+
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -6301,12 +8341,113 @@ fn timestamp() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn i64_to_usize(value: i64) -> usize {
+    usize::try_from(value.max(0)).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn initializes_and_switches_the_active_destination_registry() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        init_db(&conn).expect("broadcast schema");
+
+        assert_eq!(
+            active_profile_id(&conn).expect("active destination"),
+            PROFILE_ID
+        );
+        let initial: (String, String) = conn
+            .query_row(
+                "SELECT id, profile_name FROM broadcast_profiles WHERE id = ?1",
+                params![PROFILE_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("initial destination");
+        assert_eq!(
+            initial,
+            (PROFILE_ID.to_string(), "Destino principal".to_string())
+        );
+
+        conn.execute(
+            "INSERT INTO broadcast_profiles (
+               id, profile_name, host, port, mount, username, station_name, description, updated_at
+             ) VALUES ('backup', 'Radio respaldo', 'backup.example.com', 8000, '/live',
+                       'source', 'Backup', '', ?1)",
+            params![timestamp()],
+        )
+        .expect("second destination");
+        set_active_profile_id(&conn, "backup").expect("switch destination");
+        assert_eq!(
+            active_profile_id(&conn).expect("switched destination"),
+            "backup"
+        );
+        conn.execute("DELETE FROM broadcast_profiles WHERE id = 'backup'", [])
+            .expect("remove active destination");
+        init_db(&conn).expect("repair active destination");
+        assert_eq!(
+            active_profile_id(&conn).expect("repaired destination"),
+            PROFILE_ID
+        );
+    }
+
+    #[test]
+    fn control_sources_are_global_when_switching_destinations() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        init_db(&conn).expect("broadcast schema");
+        let saved = save_control_settings(
+            &conn,
+            BroadcastControlSettingsInput {
+                microphone_enabled: true,
+                microphone_device: "studio-mic".to_string(),
+                microphone_gain_percent: 135,
+                line_input_enabled: true,
+                line_input_device: "interface".to_string(),
+                line_input_channel: 3,
+                line_input_stereo: false,
+                line_input_gain_percent: 90,
+                application_audio_enabled: true,
+                application_audio_bundle_id: "__system_audio__".to_string(),
+                application_audio_gain_percent: 80,
+            },
+        )
+        .expect("save global sources");
+
+        conn.execute(
+            "INSERT INTO broadcast_profiles (
+               id, profile_name, host, port, mount, username, station_name, description,
+               microphone_enabled, microphone_device, line_input_enabled, line_input_device,
+               application_audio_enabled, updated_at
+             ) VALUES ('backup', 'Radio respaldo', 'backup.example.com', 8000, '/live',
+                       'source', 'Backup', '', 0, 'other-mic', 0, 'other-line', 0, ?1)",
+            params![timestamp()],
+        )
+        .expect("second destination");
+        set_active_profile_id(&conn, "backup").expect("switch destination");
+        init_db(&conn).expect("reopen broadcast schema");
+
+        assert_eq!(load_control_settings(&conn).expect("global sources"), saved);
+    }
+
+    #[test]
+    fn validates_destination_names_and_ids() {
+        assert_eq!(
+            validate_profile_name("  Radio Norte  ").unwrap(),
+            "Radio Norte"
+        );
+        assert!(validate_profile_name("  ").is_err());
+        assert!(validate_profile_name(&"x".repeat(81)).is_err());
+        assert_eq!(
+            validate_profile_id("station-2_backup").unwrap(),
+            "station-2_backup"
+        );
+        assert!(validate_profile_id("station/2").is_err());
+    }
+
     fn profile_input() -> BroadcastProfileInput {
         BroadcastProfileInput {
+            name: "Destino test".to_string(),
             output_kind: OUTPUT_KIND_ICECAST.to_string(),
             host: "radio.example.com".to_string(),
             port: 8443,
@@ -6317,17 +8458,6 @@ mod tests {
             bitrate_kbps: 128,
             tls: true,
             public: false,
-            microphone_enabled: true,
-            microphone_device: "default".to_string(),
-            microphone_gain_percent: 100,
-            line_input_enabled: true,
-            line_input_device: "default".to_string(),
-            line_input_channel: 1,
-            line_input_stereo: true,
-            line_input_gain_percent: 100,
-            application_audio_enabled: true,
-            application_audio_bundle_id: application_audio::SYSTEM_AUDIO_TARGET_ID.to_string(),
-            application_audio_gain_percent: 100,
             rtmp_platform: RTMP_PLATFORM_INSTAGRAM.to_string(),
             rtmp_server_url: "rtmps://live-upload.instagram.com:443/rtmp/".to_string(),
             rtmp_video_bitrate_kbps: 3_500,
@@ -6341,6 +8471,8 @@ mod tests {
     fn profile() -> BroadcastProfile {
         BroadcastProfile {
             id: PROFILE_ID.to_string(),
+            name: "Destino test".to_string(),
+            active: true,
             output_kind: OUTPUT_KIND_ICECAST.to_string(),
             host: "radio.example.com".to_string(),
             port: 8443,
@@ -6382,18 +8514,36 @@ mod tests {
         let mut invalid = profile_input();
         invalid.bitrate_kbps = 32;
         assert!(validate_profile(invalid).is_err());
-        let mut invalid = profile_input();
+    }
+
+    #[test]
+    fn validates_global_control_source_boundaries() {
+        let valid = BroadcastControlSettingsInput {
+            microphone_enabled: true,
+            microphone_device: "default".to_string(),
+            microphone_gain_percent: 100,
+            line_input_enabled: true,
+            line_input_device: "default".to_string(),
+            line_input_channel: 1,
+            line_input_stereo: true,
+            line_input_gain_percent: 100,
+            application_audio_enabled: true,
+            application_audio_bundle_id: application_audio::SYSTEM_AUDIO_TARGET_ID.to_string(),
+            application_audio_gain_percent: 100,
+        };
+        assert!(validate_control_settings(valid.clone()).is_ok());
+        let mut invalid = valid.clone();
         invalid.line_input_channel = 0;
-        assert!(validate_profile(invalid).is_err());
-        let mut invalid = profile_input();
+        assert!(validate_control_settings(invalid).is_err());
+        let mut invalid = valid.clone();
         invalid.line_input_gain_percent = 201;
-        assert!(validate_profile(invalid).is_err());
-        let mut invalid = profile_input();
+        assert!(validate_control_settings(invalid).is_err());
+        let mut invalid = valid.clone();
         invalid.application_audio_bundle_id.clear();
-        assert!(validate_profile(invalid).is_err());
-        let mut invalid = profile_input();
+        assert!(validate_control_settings(invalid).is_err());
+        let mut invalid = valid;
         invalid.application_audio_gain_percent = 201;
-        assert!(validate_profile(invalid).is_err());
+        assert!(validate_control_settings(invalid).is_err());
     }
 
     #[test]
@@ -7094,6 +9244,495 @@ mod tests {
         assert_eq!(second.position, 2);
         assert_eq!(list_queue(&conn).unwrap().len(), 2);
         assert!(append_track(&mut conn, "lib", "3").is_err());
+    }
+
+    #[test]
+    fn scheduled_exact_track_is_activated_ahead_of_the_immediate_queue() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE playlist_index_tracks (
+              library_id TEXT NOT NULL, track_id TEXT NOT NULL, source_path TEXT,
+              name TEXT, artist TEXT, total_time INTEGER, source_exists INTEGER NOT NULL,
+              PRIMARY KEY(library_id, track_id)
+            );
+            INSERT INTO playlist_index_tracks VALUES
+              ('lib', 'scheduled', '/music/scheduled.wav', 'Scheduled', 'Artist', 180, 1);
+            INSERT INTO broadcast_queue_entries VALUES
+              ('immediate', 'lib', 'old', '/set', 'Immediate', '/music/old.wav',
+               'Old', NULL, 120, 1, 'queued', NULL, 'now', 'now');
+            ",
+        )
+        .unwrap();
+        save_automation_settings(
+            &conn,
+            BroadcastAutomationSettingsInput {
+                mode: "scheduled".to_string(),
+                bed_enabled: false,
+                bed_library_id: None,
+                bed_track_id: None,
+                bed_gain_percent: 25,
+                bed_ducking: true,
+            },
+        )
+        .unwrap();
+        let now = Utc::now();
+        conn.execute(
+            "INSERT INTO broadcast_schedule_items (
+               id, start_at, policy, source_kind, library_id, source_id, source_name,
+               track_count, duration_seconds, status, created_at, updated_at
+             ) VALUES ('schedule', ?1, 'exact', 'track', 'lib', 'scheduled',
+                       'Scheduled', 1, 180, 'pending', ?2, ?2)",
+            params![
+                (now - ChronoDuration::minutes(1)).to_rfc3339(),
+                now.to_rfc3339()
+            ],
+        )
+        .unwrap();
+
+        ensure_schedule_item_tracks(&conn, "schedule").unwrap();
+        assert_eq!(list_schedule_tracks(&conn, "schedule").unwrap().len(), 1);
+
+        let selected = activate_due_schedule_items_in_connection(&mut conn, false, now).unwrap();
+        let queue = list_queue(&conn).unwrap();
+
+        assert_eq!(selected.as_deref(), Some(queue[0].id.as_str()));
+        assert_eq!(queue[0].track_id, "scheduled");
+        assert!(queue[0].scheduled);
+        assert!(!queue[1].scheduled);
+        assert_eq!(queue[1].id, "immediate");
+        assert_eq!(
+            get_schedule_item(&conn, "schedule")
+                .unwrap()
+                .unwrap()
+                .status,
+            "activated"
+        );
+        conn.execute(
+            "UPDATE broadcast_queue_entries SET status = 'played' WHERE id = ?1",
+            params![&queue[0].id],
+        )
+        .unwrap();
+        assert!(next_queue_entry(&conn).unwrap().is_none());
+
+        save_automation_settings(
+            &conn,
+            BroadcastAutomationSettingsInput {
+                mode: "immediate".to_string(),
+                bed_enabled: false,
+                bed_library_id: None,
+                bed_track_id: None,
+                bed_gain_percent: 25,
+                bed_ducking: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(next_queue_entry(&conn).unwrap().unwrap().id, "immediate");
+    }
+
+    #[test]
+    fn next_scheduled_block_discards_the_previous_remainder_but_keeps_immediate_tracks() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE playlist_index_tracks (
+              library_id TEXT NOT NULL, track_id TEXT NOT NULL, source_path TEXT,
+              name TEXT, artist TEXT, total_time INTEGER, source_exists INTEGER NOT NULL,
+              PRIMARY KEY(library_id, track_id)
+            );
+            INSERT INTO playlist_index_tracks VALUES
+              ('lib', 'first', '/music/first.wav', 'First block', 'Artist', 180, 1),
+              ('lib', 'second', '/music/second.wav', 'Second block', 'Artist', 180, 1);
+            INSERT INTO broadcast_queue_entries VALUES
+              ('immediate', 'lib', 'manual', '/set', 'Immediate', '/music/manual.wav',
+               'Manual', NULL, 120, 1, 'queued', NULL, 'now', 'now');
+            ",
+        )
+        .unwrap();
+        save_automation_settings(
+            &conn,
+            BroadcastAutomationSettingsInput {
+                mode: "scheduled".to_string(),
+                bed_enabled: false,
+                bed_library_id: None,
+                bed_track_id: None,
+                bed_gain_percent: 25,
+                bed_ducking: true,
+            },
+        )
+        .unwrap();
+        let now = Utc::now();
+        conn.execute(
+            "INSERT INTO broadcast_schedule_items (
+               id, start_at, policy, source_kind, library_id, source_id, source_name,
+               track_count, duration_seconds, status, created_at, updated_at
+             ) VALUES
+               ('first-block', ?1, 'exact', 'track', 'lib', 'first', 'First block',
+                1, 180, 'pending', ?2, ?2),
+               ('second-block', ?3, 'exact', 'track', 'lib', 'second', 'Second block',
+                1, 180, 'pending', ?2, ?2)",
+            params![
+                (now - ChronoDuration::minutes(1)).to_rfc3339(),
+                now.to_rfc3339(),
+                (now + ChronoDuration::hours(1)).to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        ensure_schedule_item_tracks(&conn, "first-block").unwrap();
+        ensure_schedule_item_tracks(&conn, "second-block").unwrap();
+
+        let first_entry_id = activate_due_schedule_items_in_connection(&mut conn, false, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            queue_entry_status(&conn, &first_entry_id)
+                .unwrap()
+                .as_deref(),
+            Some("queued")
+        );
+
+        conn.execute(
+            "UPDATE broadcast_schedule_items SET start_at = ?2 WHERE id = ?1",
+            params![
+                "second-block",
+                (now - ChronoDuration::seconds(30)).to_rfc3339()
+            ],
+        )
+        .unwrap();
+        let second_entry_id = activate_due_schedule_items_in_connection(&mut conn, false, now)
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(second_entry_id, first_entry_id);
+        assert_eq!(
+            queue_entry_status(&conn, &first_entry_id)
+                .unwrap()
+                .as_deref(),
+            Some("skipped")
+        );
+        assert_eq!(
+            queue_entry_status(&conn, &second_entry_id)
+                .unwrap()
+                .as_deref(),
+            Some("queued")
+        );
+        assert_eq!(
+            queue_entry_status(&conn, "immediate").unwrap().as_deref(),
+            Some("queued")
+        );
+        assert_eq!(
+            next_queue_entry(&conn).unwrap().unwrap().id,
+            second_entry_id
+        );
+    }
+
+    #[test]
+    fn scheduled_blocks_support_time_content_order_and_track_edits() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE playlist_index_playlists (
+              library_id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+              PRIMARY KEY(library_id, path)
+            );
+            CREATE TABLE playlist_index_tracks (
+              library_id TEXT NOT NULL, track_id TEXT NOT NULL, source_path TEXT,
+              name TEXT, artist TEXT, total_time INTEGER, source_exists INTEGER NOT NULL,
+              PRIMARY KEY(library_id, track_id)
+            );
+            CREATE TABLE playlist_index_memberships (
+              library_id TEXT NOT NULL, playlist_path TEXT NOT NULL,
+              track_id TEXT NOT NULL, position INTEGER NOT NULL
+            );
+            INSERT INTO playlist_index_playlists VALUES ('lib', '/set', 'Set editable');
+            INSERT INTO playlist_index_tracks VALUES
+              ('lib', 'one', '/music/one.wav', 'One', 'Artist', 60, 1),
+              ('lib', 'two', '/music/two.wav', 'Two', 'Artist', 70, 1),
+              ('lib', 'extra', '/music/extra.wav', 'Extra', 'Guest', 80, 1);
+            INSERT INTO playlist_index_memberships VALUES
+              ('lib', '/set', 'one', 0),
+              ('lib', '/set', 'two', 1);
+            ",
+        )
+        .unwrap();
+
+        let future = Utc::now() + ChronoDuration::hours(2);
+        let item = create_schedule_item(
+            &conn,
+            BroadcastScheduleItemInput {
+                start_at: future.to_rfc3339(),
+                policy: "soft".to_string(),
+                source_kind: "playlist".to_string(),
+                library_id: "lib".to_string(),
+                source_id: "/set".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            item.tracks
+                .iter()
+                .map(|track| track.track_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
+
+        append_schedule_content(
+            &conn,
+            &item.id,
+            BroadcastScheduleContentInput {
+                source_kind: "track".to_string(),
+                library_id: "lib".to_string(),
+                source_id: "extra".to_string(),
+            },
+            true,
+        )
+        .unwrap();
+        assert!(append_schedule_content(
+            &conn,
+            &item.id,
+            BroadcastScheduleContentInput {
+                source_kind: "track".to_string(),
+                library_id: "lib".to_string(),
+                source_id: "extra".to_string(),
+            },
+            true,
+        )
+        .is_err());
+
+        let expanded = get_schedule_item(&conn, &item.id).unwrap().unwrap();
+        let reversed_ids = expanded
+            .tracks
+            .iter()
+            .rev()
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>();
+        reorder_schedule_tracks(&mut conn, &item.id, &reversed_ids).unwrap();
+        let reordered = get_schedule_item(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(reordered.tracks[0].track_id, "extra");
+        assert_eq!(reordered.tracks[1].track_id, "two");
+        assert_eq!(reordered.tracks[2].track_id, "one");
+
+        let removed_id = reordered.tracks[1].id.clone();
+        remove_schedule_track(&mut conn, &item.id, &removed_id).unwrap();
+        let edited = update_schedule_item(
+            &conn,
+            &item.id,
+            BroadcastScheduleItemUpdateInput {
+                start_at: (future + ChronoDuration::hours(1)).to_rfc3339(),
+                policy: "exact".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.policy, "exact");
+        assert_eq!(edited.track_count, 2);
+        assert_eq!(edited.duration_seconds, Some(140));
+
+        save_automation_settings(
+            &conn,
+            BroadcastAutomationSettingsInput {
+                mode: "scheduled".to_string(),
+                bed_enabled: false,
+                bed_library_id: None,
+                bed_track_id: None,
+                bed_gain_percent: 25,
+                bed_ducking: true,
+            },
+        )
+        .unwrap();
+        let now = Utc::now();
+        conn.execute(
+            "UPDATE broadcast_schedule_items SET start_at = ?2 WHERE id = ?1",
+            params![&item.id, (now - ChronoDuration::minutes(1)).to_rfc3339()],
+        )
+        .unwrap();
+        activate_due_schedule_items_in_connection(&mut conn, false, now).unwrap();
+        let queue = list_queue(&conn).unwrap();
+        assert_eq!(
+            queue
+                .iter()
+                .map(|entry| entry.track_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["extra", "one"]
+        );
+        assert!(queue.iter().all(|entry| entry.scheduled));
+    }
+
+    #[test]
+    fn activated_block_can_edit_its_pending_queue_while_off_air() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE playlist_index_playlists (
+              library_id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+              PRIMARY KEY(library_id, path)
+            );
+            CREATE TABLE playlist_index_tracks (
+              library_id TEXT NOT NULL, track_id TEXT NOT NULL, source_path TEXT,
+              name TEXT, artist TEXT, total_time INTEGER, source_exists INTEGER NOT NULL,
+              PRIMARY KEY(library_id, track_id)
+            );
+            CREATE TABLE playlist_index_memberships (
+              library_id TEXT NOT NULL, playlist_path TEXT NOT NULL,
+              track_id TEXT NOT NULL, position INTEGER NOT NULL
+            );
+            INSERT INTO playlist_index_playlists VALUES ('lib', '/live', 'Live block');
+            INSERT INTO playlist_index_tracks VALUES
+              ('lib', 'one', '/music/one.wav', 'One', 'Artist', 60, 1),
+              ('lib', 'two', '/music/two.wav', 'Two', 'Artist', 70, 1),
+              ('lib', 'extra', '/music/extra.wav', 'Extra', 'Artist', 80, 1);
+            INSERT INTO playlist_index_memberships VALUES
+              ('lib', '/live', 'one', 0),
+              ('lib', '/live', 'two', 1);
+            ",
+        )
+        .unwrap();
+        save_automation_settings(
+            &conn,
+            BroadcastAutomationSettingsInput {
+                mode: "scheduled".to_string(),
+                bed_enabled: false,
+                bed_library_id: None,
+                bed_track_id: None,
+                bed_gain_percent: 25,
+                bed_ducking: true,
+            },
+        )
+        .unwrap();
+        let future = Utc::now() + ChronoDuration::hours(1);
+        let item = create_schedule_item(
+            &conn,
+            BroadcastScheduleItemInput {
+                start_at: future.to_rfc3339(),
+                policy: "exact".to_string(),
+                source_kind: "playlist".to_string(),
+                library_id: "lib".to_string(),
+                source_id: "/live".to_string(),
+            },
+        )
+        .unwrap();
+        let first_schedule_track_id = item.tracks[0].id.clone();
+        let now = Utc::now();
+        conn.execute(
+            "UPDATE broadcast_schedule_items SET start_at = ?2 WHERE id = ?1",
+            params![&item.id, (now - ChronoDuration::seconds(10)).to_rfc3339()],
+        )
+        .unwrap();
+        activate_due_schedule_items_in_connection(&mut conn, false, now).unwrap();
+        let first_queue_entry = list_queue(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.track_id == "one")
+            .unwrap();
+        conn.execute(
+            "UPDATE broadcast_queue_entries SET status = 'playing' WHERE id = ?1",
+            params![&first_queue_entry.id],
+        )
+        .unwrap();
+
+        let active = get_schedule_item(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(active.status, "activated");
+        assert_eq!(
+            active
+                .tracks
+                .iter()
+                .map(|track| track.track_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two"]
+        );
+        assert!(remove_schedule_track(&mut conn, &item.id, &first_schedule_track_id).is_err());
+
+        append_schedule_content(
+            &conn,
+            &item.id,
+            BroadcastScheduleContentInput {
+                source_kind: "track".to_string(),
+                library_id: "lib".to_string(),
+                source_id: "extra".to_string(),
+            },
+            true,
+        )
+        .unwrap();
+        let expanded = get_schedule_item(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(
+            expanded
+                .tracks
+                .iter()
+                .map(|track| track.track_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two", "extra"]
+        );
+        let reversed = expanded
+            .tracks
+            .iter()
+            .rev()
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>();
+        reorder_schedule_tracks(&mut conn, &item.id, &reversed).unwrap();
+        assert_eq!(next_queue_entry(&conn).unwrap().unwrap().track_id, "extra");
+
+        let reordered = get_schedule_item(&conn, &item.id).unwrap().unwrap();
+        let two_id = reordered
+            .tracks
+            .iter()
+            .find(|track| track.track_id == "two")
+            .unwrap()
+            .id
+            .clone();
+        remove_schedule_track(&mut conn, &item.id, &two_id).unwrap();
+        let remaining = get_schedule_item(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(remaining.tracks.len(), 1);
+        assert_eq!(remaining.tracks[0].track_id, "extra");
+        assert!(update_schedule_item(
+            &conn,
+            &item.id,
+            BroadcastScheduleItemUpdateInput {
+                start_at: (now + ChronoDuration::hours(2)).to_rfc3339(),
+                policy: "soft".to_string(),
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn music_bed_settings_resolve_a_local_track_and_scale_pcm() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE playlist_index_tracks (
+              library_id TEXT NOT NULL, track_id TEXT NOT NULL, source_path TEXT,
+              name TEXT, artist TEXT, total_time INTEGER, source_exists INTEGER NOT NULL,
+              PRIMARY KEY(library_id, track_id)
+            );
+            INSERT INTO playlist_index_tracks VALUES
+              ('lib', 'bed', '/music/bed.wav', 'Bed', 'Artist', 90, 1);
+            ",
+        )
+        .unwrap();
+        let settings = save_automation_settings(
+            &conn,
+            BroadcastAutomationSettingsInput {
+                mode: "scheduled".to_string(),
+                bed_enabled: true,
+                bed_library_id: Some("lib".to_string()),
+                bed_track_id: Some("bed".to_string()),
+                bed_gain_percent: 25,
+                bed_ducking: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(settings.bed_source_path.as_deref(), Some("/music/bed.wav"));
+        assert!(bed_decoder_args("/music/bed.wav")
+            .windows(2)
+            .any(|values| values == ["-stream_loop", "-1"]));
+
+        let mut audio = 4_000_i16.to_le_bytes().to_vec();
+        scale_pcm_chunk(&mut audio, 25);
+        assert_eq!(i16::from_le_bytes([audio[0], audio[1]]), 1_000);
     }
 
     #[test]

@@ -5,15 +5,18 @@ import {
   ArrowDown,
   ArrowUp,
   AudioLines,
+  Calendar,
   Camera,
   Check,
   ChevronsUpDown,
   GripVertical,
+  Info,
   Library,
   LoaderCircle,
   Mic,
   MicOff,
   Monitor,
+  Music2,
   Play,
   Plus,
   Radio,
@@ -25,8 +28,8 @@ import {
   Trash2,
   Wifi
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Button } from "./components/ui/button";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Button, type ButtonProps } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import {
   Command,
@@ -45,6 +48,8 @@ const SYSTEM_AUDIO_TARGET_ID = "__system_audio__";
 
 type BroadcastProfile = {
   id: string;
+  name: string;
+  active: boolean;
   output_kind: "icecast" | "rtmp" | string;
   host: string;
   port: number;
@@ -73,6 +78,21 @@ type BroadcastProfile = {
   video_compositor: BroadcastVideoCompositor;
   password_configured: boolean;
   listener_url: string;
+  updated_at: string;
+};
+
+type BroadcastControlSettings = {
+  microphone_enabled: boolean;
+  microphone_device: string;
+  microphone_gain_percent: number;
+  line_input_enabled: boolean;
+  line_input_device: string;
+  line_input_channel: number;
+  line_input_stereo: boolean;
+  line_input_gain_percent: number;
+  application_audio_enabled: boolean;
+  application_audio_bundle_id: string;
+  application_audio_gain_percent: number;
   updated_at: string;
 };
 
@@ -207,6 +227,7 @@ type BroadcastQueueEntry = {
   position: number;
   status: "queued" | "playing" | "played" | "skipped" | "failed" | string;
   error?: string | null;
+  scheduled: boolean;
   inserted_at: string;
   updated_at: string;
 };
@@ -280,10 +301,63 @@ type QueueAppendResult = {
   queue: BroadcastQueueEntry[];
 };
 
+type BroadcastScheduleItem = {
+  id: string;
+  start_at: string;
+  policy: "soft" | "exact" | string;
+  source_kind: "playlist" | "draft" | "track" | string;
+  library_id: string;
+  source_id: string;
+  source_name: string;
+  track_count: number;
+  duration_seconds?: number | null;
+  status: "pending" | "activated" | "skipped" | "failed" | string;
+  error?: string | null;
+  activated_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  tracks: BroadcastScheduleTrack[];
+};
+
+type BroadcastScheduleTrack = {
+  id: string;
+  library_id: string;
+  track_id: string;
+  source_path: string;
+  title: string;
+  artist?: string | null;
+  duration_seconds?: number | null;
+  position: number;
+};
+
+type BroadcastAutomationSettings = {
+  mode: "immediate" | "scheduled" | string;
+  bed_enabled: boolean;
+  bed_library_id?: string | null;
+  bed_track_id?: string | null;
+  bed_source_path?: string | null;
+  bed_title?: string | null;
+  bed_artist?: string | null;
+  bed_gain_percent: number;
+  bed_ducking: boolean;
+  updated_at: string;
+};
+
+type BroadcastSourceTrack = {
+  library_id: string;
+  track_id: string;
+  name?: string | null;
+  artist?: string | null;
+  source_path?: string | null;
+  source_exists: boolean;
+  total_time?: number | null;
+};
+
 type BusyAction = "loading" | "saving" | "starting" | "stopping" | "skipping" | "appending" | "clearing" | string | null;
 type BroadcastSourceTab = "microphone" | "line_input" | "system_audio";
 type BroadcastOutputKind = "icecast" | "rtmp";
 type RtmpPlatform = "instagram" | "custom";
+type BroadcastWorkspaceTab = "destinations" | "control" | "schedule";
 
 const defaultVideoCompositor: BroadcastVideoCompositor = {
   enabled: false,
@@ -320,6 +394,19 @@ const defaultVideoCompositor: BroadcastVideoCompositor = {
   screenZIndex: 1,
   screenOpacityPercent: 100,
   transitionMillis: 800
+};
+
+const defaultAutomationSettings: BroadcastAutomationSettings = {
+  mode: "immediate",
+  bed_enabled: false,
+  bed_library_id: null,
+  bed_track_id: null,
+  bed_source_path: null,
+  bed_title: null,
+  bed_artist: null,
+  bed_gain_percent: 25,
+  bed_ducking: true,
+  updated_at: ""
 };
 
 const broadcastGraphicTemplates = [
@@ -385,9 +472,16 @@ async function loadBroadcastPlaylistSources(): Promise<BroadcastPlaylistSource[]
 export function BroadcastPage() {
   const { locale, t } = useI18n();
   const [profile, setProfile] = useState<BroadcastProfile | null>(null);
+  const [profiles, setProfiles] = useState<BroadcastProfile[]>([]);
+  const [workspaceTab, setWorkspaceTab] = useState<BroadcastWorkspaceTab>("control");
+  const [profileName, setProfileName] = useState("Destino principal");
+  const [creatingDestination, setCreatingDestination] = useState(false);
+  const [newDestinationName, setNewDestinationName] = useState("");
   const [preflight, setPreflight] = useState<BroadcastPreflight | null>(null);
   const [status, setStatus] = useState<BroadcastStatus | null>(null);
   const [queue, setQueue] = useState<BroadcastQueueEntry[]>([]);
+  const [scheduleItems, setScheduleItems] = useState<BroadcastScheduleItem[]>([]);
+  const [automation, setAutomation] = useState<BroadcastAutomationSettings>(defaultAutomationSettings);
   const [playlistSources, setPlaylistSources] = useState<BroadcastPlaylistSource[]>([]);
   const [microphoneDevices, setMicrophoneDevices] = useState<BroadcastMicrophoneDevice[]>([]);
   const [applicationAudioDevices, setApplicationAudioDevices] = useState<BroadcastApplicationAudioDevice[]>([]);
@@ -435,6 +529,9 @@ export function BroadcastPage() {
   const [cameraMix, setCameraMix] = useState(0);
   const [sourceTab, setSourceTab] = useState<BroadcastSourceTab>("microphone");
   const terminalElement = useRef<HTMLDivElement | null>(null);
+  const queueScrollElement = useRef<HTMLDivElement | null>(null);
+  const playingQueueEntryElement = useRef<HTMLDivElement | null>(null);
+  const lastAutoScrolledQueueEntryId = useRef<string | null>(null);
   const nextTerminalLogId = useRef(1);
 
   const running = status ? ["connecting", "live", "reconnecting", "stopping"].includes(status.status) : false;
@@ -443,7 +540,21 @@ export function BroadcastPage() {
   const compositorSaveRevision = useRef(0);
   runningRef.current = running;
   const destinationNeedsSave = !profile
+    || profileName.trim() !== profile.name
     || outputKind !== (profile.output_kind === "rtmp" ? "rtmp" : "icecast")
+    || stationName.trim() !== profile.station_name
+    || description.trim() !== profile.description
+    || Boolean(password)
+    || clearPassword
+    || (outputKind === "icecast" && (
+      host.trim() !== profile.host
+      || Number(port) !== profile.port
+      || mount.trim() !== profile.mount
+      || username.trim() !== profile.username
+      || Number(bitrate) !== profile.bitrate_kbps
+      || tls !== profile.tls
+      || isPublic !== profile.public
+    ))
     || (outputKind === "rtmp" && (
       rtmpPlatform !== (profile.rtmp_platform === "custom" ? "custom" : "instagram")
       || rtmpServerUrl.trim() !== profile.rtmp_server_url
@@ -451,10 +562,29 @@ export function BroadcastPage() {
       || Number(rtmpAudioBitrate) !== profile.rtmp_audio_bitrate_kbps
       || JSON.stringify(videoCompositor) !== JSON.stringify(profile.video_compositor)
     ));
-  const queuedEntries = queue.filter((entry) => entry.status === "queued");
+  const controlNeedsSave = !profile
+    || microphoneEnabled !== profile.microphone_enabled
+    || microphoneDevice !== (profile.microphone_device || "default")
+    || Number(microphoneGain) !== profile.microphone_gain_percent
+    || lineInputEnabled !== profile.line_input_enabled
+    || lineInputDevice !== (profile.line_input_device || "default")
+    || Number(lineInputChannel) !== profile.line_input_channel
+    || lineInputStereo !== profile.line_input_stereo
+    || Number(lineInputGain) !== profile.line_input_gain_percent
+    || applicationAudioEnabled !== profile.application_audio_enabled
+    || applicationAudioBundleId !== (profile.application_audio_bundle_id || SYSTEM_AUDIO_TARGET_ID)
+    || Number(applicationAudioGain) !== profile.application_audio_gain_percent;
+  const modeQueue = queue.filter((entry) => automation.mode === "scheduled" ? entry.scheduled : !entry.scheduled);
+  const queuedEntries = modeQueue.filter((entry) => entry.status === "queued");
+  const playingQueueEntryId = status?.now_playing?.id
+    ?? modeQueue.find((entry) => entry.status === "playing")?.id
+    ?? null;
+  const playingQueueEntryVisible = Boolean(
+    playingQueueEntryId && modeQueue.some((entry) => entry.id === playingQueueEntryId)
+  );
   const queuedTotal = queuedEntries.length;
-  const completedTotal = queue.filter((entry) => entry.status === "played").length;
-  const failedTotal = queue.filter((entry) => entry.status === "failed").length;
+  const completedTotal = modeQueue.filter((entry) => entry.status === "played").length;
+  const failedTotal = modeQueue.filter((entry) => entry.status === "failed").length;
   const applicationAudioSupported = applicationAudioSupport?.supported ?? false;
   const applicationAudioDetail = translateBackendMessage(
     locale,
@@ -470,8 +600,30 @@ export function BroadcastPage() {
     status?.application_audio?.message ?? ""
   );
 
-  const hydrateProfile = useCallback((next: BroadcastProfile) => {
+  useEffect(() => {
+    if (workspaceTab !== "control" || !playingQueueEntryId || !playingQueueEntryVisible) return;
+    const frame = window.requestAnimationFrame(() => {
+      const container = queueScrollElement.current;
+      const entry = playingQueueEntryElement.current;
+      if (!container || !entry) return;
+      const containerRect = container.getBoundingClientRect();
+      const entryRect = entry.getBoundingClientRect();
+      const centeredTop = container.scrollTop
+        + entryRect.top
+        - containerRect.top
+        - (container.clientHeight - entryRect.height) / 2;
+      container.scrollTo({
+        top: Math.max(0, centeredTop),
+        behavior: lastAutoScrolledQueueEntryId.current ? "smooth" : "auto"
+      });
+      lastAutoScrolledQueueEntryId.current = playingQueueEntryId;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [automation.mode, playingQueueEntryId, playingQueueEntryVisible, workspaceTab]);
+
+  const hydrateProfile = useCallback((next: BroadcastProfile, hydrateControl = true) => {
     setProfile(next);
+    setProfileName(next.name);
     setOutputKind(next.output_kind === "rtmp" ? "rtmp" : "icecast");
     setHost(next.host);
     setPort(String(next.port));
@@ -482,23 +634,25 @@ export function BroadcastPage() {
     setBitrate(String(next.bitrate_kbps));
     setTls(next.tls);
     setIsPublic(next.public);
-    setMicrophoneEnabled(next.microphone_enabled);
-    setMicrophoneDevice(next.microphone_device || "default");
-    setMicrophoneGain(String(next.microphone_gain_percent));
-    setLineInputEnabled(next.line_input_enabled);
-    setLineInputDevice(next.line_input_device || "default");
-    setLineInputChannel(String(next.line_input_channel || 1));
-    setLineInputStereo(next.line_input_stereo);
-    setLineInputGain(String(next.line_input_gain_percent));
-    setApplicationAudioEnabled(next.application_audio_enabled);
-    setApplicationAudioBundleId(next.application_audio_bundle_id || SYSTEM_AUDIO_TARGET_ID);
-    setApplicationAudioGain(String(next.application_audio_gain_percent));
+    if (hydrateControl) {
+      setMicrophoneEnabled(next.microphone_enabled);
+      setMicrophoneDevice(next.microphone_device || "default");
+      setMicrophoneGain(String(next.microphone_gain_percent));
+      setLineInputEnabled(next.line_input_enabled);
+      setLineInputDevice(next.line_input_device || "default");
+      setLineInputChannel(String(next.line_input_channel || 1));
+      setLineInputStereo(next.line_input_stereo);
+      setLineInputGain(String(next.line_input_gain_percent));
+      setApplicationAudioEnabled(next.application_audio_enabled);
+      setApplicationAudioBundleId(next.application_audio_bundle_id || SYSTEM_AUDIO_TARGET_ID);
+      setApplicationAudioGain(String(next.application_audio_gain_percent));
+      setSourceTab(next.application_audio_enabled ? "system_audio" : next.line_input_enabled ? "line_input" : "microphone");
+    }
     setRtmpPlatform(next.rtmp_platform === "custom" ? "custom" : "instagram");
     setRtmpServerUrl(next.rtmp_server_url);
     setRtmpVideoBitrate(String(next.rtmp_video_bitrate_kbps));
     setRtmpAudioBitrate(String(next.rtmp_audio_bitrate_kbps));
     setVideoCompositor(next.video_compositor ?? defaultVideoCompositor);
-    setSourceTab(next.application_audio_enabled ? "system_audio" : next.line_input_enabled ? "line_input" : "microphone");
     setPassword("");
     setClearPassword(false);
   }, []);
@@ -526,19 +680,25 @@ export function BroadcastPage() {
     };
     void Promise.all([
       invoke<BroadcastProfile>("broadcast_profile"),
+      invoke<BroadcastProfile[]>("broadcast_profiles"),
       invoke<BroadcastStatus>("broadcast_status"),
       invoke<BroadcastQueueEntry[]>("broadcast_queue"),
+      invoke<BroadcastScheduleItem[]>("broadcast_schedule_items"),
+      invoke<BroadcastAutomationSettings>("broadcast_automation_settings"),
       invoke<BroadcastPreflight>("broadcast_preflight"),
       invoke<BroadcastApplicationAudioSupport>("broadcast_application_audio_support"),
       loadBroadcastPlaylistSources(),
       invoke<BroadcastMicrophoneDevice[]>("broadcast_microphone_devices"),
       invoke<BroadcastCameraDevice[]>("broadcast_camera_devices").catch(() => [])
     ])
-      .then(([nextProfile, nextStatus, nextQueue, nextPreflight, nextApplicationAudioSupport, nextPlaylistSources, nextMicrophones, nextCameras]) => {
+      .then(([nextProfile, nextProfiles, nextStatus, nextQueue, nextScheduleItems, nextAutomation, nextPreflight, nextApplicationAudioSupport, nextPlaylistSources, nextMicrophones, nextCameras]) => {
         if (disposed) return;
         hydrateProfile(nextProfile);
+        setProfiles(nextProfiles);
         setStatus(nextStatus);
         setQueue(nextQueue);
+        setScheduleItems(nextScheduleItems);
+        setAutomation(nextAutomation);
         setPreflight(nextPreflight);
         setApplicationAudioSupport(nextApplicationAudioSupport);
         setPlaylistSources(nextPlaylistSources);
@@ -591,7 +751,8 @@ export function BroadcastPage() {
           setStatus(nextStatus);
           setCameraMix(nextStatus.camera?.mix_percent ?? 0);
         }),
-        invoke<BroadcastQueueEntry[]>("broadcast_queue").then(setQueue)
+        invoke<BroadcastQueueEntry[]>("broadcast_queue").then(setQueue),
+        invoke<BroadcastScheduleItem[]>("broadcast_schedule_items").then(setScheduleItems)
       ]).catch(() => undefined);
     }, 2500);
 
@@ -648,6 +809,7 @@ export function BroadcastPage() {
     try {
       const saved = await invoke<BroadcastProfile>("broadcast_save_profile", {
         profile: {
+          name: profileName,
           outputKind,
           host,
           port: Number(port),
@@ -658,6 +820,36 @@ export function BroadcastPage() {
           bitrateKbps: Number(bitrate),
           tls,
           public: isPublic,
+          rtmpPlatform,
+          rtmpServerUrl,
+          rtmpVideoBitrateKbps: Number(rtmpVideoBitrate),
+          rtmpAudioBitrateKbps: Number(rtmpAudioBitrate),
+          videoCompositor,
+          password: password || null,
+          clearPassword
+        }
+      });
+      hydrateProfile(saved, false);
+      const [nextPreflight, nextProfiles] = await Promise.all([
+        invoke<BroadcastPreflight>("broadcast_preflight"),
+        invoke<BroadcastProfile[]>("broadcast_profiles")
+      ]);
+      setPreflight(nextPreflight);
+      setProfiles(nextProfiles);
+      setNotice(t("Destino de salida guardado."));
+      return true;
+    } catch (cause) {
+      setError(errorMessage(cause, locale));
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveControlSettings() {
+    await runAction("control-settings", async () => {
+      const saved = await invoke<BroadcastControlSettings>("broadcast_save_control_settings", {
+        settings: {
           microphoneEnabled,
           microphoneDevice,
           microphoneGainPercent: Number(microphoneGain),
@@ -668,27 +860,87 @@ export function BroadcastPage() {
           lineInputGainPercent: Number(lineInputGain),
           applicationAudioEnabled,
           applicationAudioBundleId,
-          applicationAudioGainPercent: Number(applicationAudioGain),
-          rtmpPlatform,
-          rtmpServerUrl,
-          rtmpVideoBitrateKbps: Number(rtmpVideoBitrate),
-          rtmpAudioBitrateKbps: Number(rtmpAudioBitrate),
-          videoCompositor,
-          password: password || null,
-          clearPassword
+          applicationAudioGainPercent: Number(applicationAudioGain)
         }
       });
-      hydrateProfile(saved);
-      const nextPreflight = await invoke<BroadcastPreflight>("broadcast_preflight");
+      const controlPatch = {
+        microphone_enabled: saved.microphone_enabled,
+        microphone_device: saved.microphone_device,
+        microphone_gain_percent: saved.microphone_gain_percent,
+        line_input_enabled: saved.line_input_enabled,
+        line_input_device: saved.line_input_device,
+        line_input_channel: saved.line_input_channel,
+        line_input_stereo: saved.line_input_stereo,
+        line_input_gain_percent: saved.line_input_gain_percent,
+        application_audio_enabled: saved.application_audio_enabled,
+        application_audio_bundle_id: saved.application_audio_bundle_id,
+        application_audio_gain_percent: saved.application_audio_gain_percent
+      };
+      setMicrophoneEnabled(saved.microphone_enabled);
+      setMicrophoneDevice(saved.microphone_device || "default");
+      setMicrophoneGain(String(saved.microphone_gain_percent));
+      setLineInputEnabled(saved.line_input_enabled);
+      setLineInputDevice(saved.line_input_device || "default");
+      setLineInputChannel(String(saved.line_input_channel));
+      setLineInputStereo(saved.line_input_stereo);
+      setLineInputGain(String(saved.line_input_gain_percent));
+      setApplicationAudioEnabled(saved.application_audio_enabled);
+      setApplicationAudioBundleId(saved.application_audio_bundle_id || SYSTEM_AUDIO_TARGET_ID);
+      setApplicationAudioGain(String(saved.application_audio_gain_percent));
+      setProfile((current) => current ? { ...current, ...controlPatch } : current);
+      setProfiles((current) => current.map((item) => ({ ...item, ...controlPatch })));
+      setPreflight(await invoke<BroadcastPreflight>("broadcast_preflight"));
+      setNotice(t("Fuentes de entrada guardadas."));
+    });
+  }
+
+  async function createDestination(event: FormEvent) {
+    event.preventDefault();
+    const name = newDestinationName.trim();
+    if (!name) return;
+    await runAction("destination-create", async () => {
+      const created = await invoke<BroadcastProfile>("broadcast_create_profile", { name });
+      const [nextProfiles, nextPreflight] = await Promise.all([
+        invoke<BroadcastProfile[]>("broadcast_profiles"),
+        invoke<BroadcastPreflight>("broadcast_preflight")
+      ]);
+      hydrateProfile(created, false);
+      setProfiles(nextProfiles);
       setPreflight(nextPreflight);
-      setNotice(t("Perfil de broadcast guardado."));
-      return true;
-    } catch (cause) {
-      setError(errorMessage(cause, locale));
-      return false;
-    } finally {
-      setBusy(null);
-    }
+      setCreatingDestination(false);
+      setNewDestinationName("");
+      setNotice(t("Destino creado y activado. Ajusta sus datos y guárdalo."));
+    });
+  }
+
+  async function activateDestination(profileId: string) {
+    if (profile?.id === profileId) return;
+    await runAction(`destination-activate:${profileId}`, async () => {
+      const activated = await invoke<BroadcastProfile>("broadcast_activate_profile", { profileId });
+      const [nextProfiles, nextPreflight] = await Promise.all([
+        invoke<BroadcastProfile[]>("broadcast_profiles"),
+        invoke<BroadcastPreflight>("broadcast_preflight")
+      ]);
+      hydrateProfile(activated, false);
+      setProfiles(nextProfiles);
+      setPreflight(nextPreflight);
+      setNotice(t("Destino {name} activado.", { name: activated.name }));
+    });
+  }
+
+  async function deleteDestination(destination: BroadcastProfile) {
+    if (!window.confirm(t("¿Eliminar el destino {name}?", { name: destination.name }))) return;
+    await runAction(`destination-delete:${destination.id}`, async () => {
+      const active = await invoke<BroadcastProfile>("broadcast_delete_profile", { profileId: destination.id });
+      const [nextProfiles, nextPreflight] = await Promise.all([
+        invoke<BroadcastProfile[]>("broadcast_profiles"),
+        invoke<BroadcastPreflight>("broadcast_preflight")
+      ]);
+      hydrateProfile(active, false);
+      setProfiles(nextProfiles);
+      setPreflight(nextPreflight);
+      setNotice(t("Destino eliminado."));
+    });
   }
 
   async function appendPlaylist() {
@@ -710,6 +962,30 @@ export function BroadcastPage() {
         count: result.appended_total,
         skipped: result.skipped_missing_total
       }));
+    } catch (cause) {
+      setError(errorMessage(cause, locale));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function changeBroadcastMode(mode: "immediate" | "scheduled") {
+    if (automation.mode === mode) return;
+    setBusy("automation-mode");
+    setError(null);
+    try {
+      const saved = await invoke<BroadcastAutomationSettings>("broadcast_save_automation_settings", {
+        settings: {
+          mode,
+          bedEnabled: automation.bed_enabled,
+          bedLibraryId: automation.bed_library_id ?? null,
+          bedTrackId: automation.bed_track_id ?? null,
+          bedGainPercent: automation.bed_gain_percent,
+          bedDucking: automation.bed_ducking
+        }
+      });
+      setAutomation(saved);
+      setNotice(mode === "scheduled" ? t("Modo programado activado.") : t("Modo inmediato activado."));
     } catch (cause) {
       setError(errorMessage(cause, locale));
     } finally {
@@ -976,193 +1252,8 @@ export function BroadcastPage() {
     setTerminalLogs([]);
   }
 
-  if (busy === "loading" && !profile) {
+  function renderControlSettingsEditor() {
     return (
-      <main className="grid min-h-screen place-items-center p-6">
-        <LoaderCircle className="h-7 w-7 animate-spin text-muted-foreground" aria-label={t("Cargando")} />
-      </main>
-    );
-  }
-
-  return (
-    <main
-      className={cn(
-        "overflow-y-auto bg-background p-4 text-foreground lg:p-6",
-        terminalExpanded ? "h-[calc(100vh-17.25rem)]" : "h-[calc(100vh-4.75rem)]"
-      )}
-    >
-      <div className="mx-auto grid w-full max-w-[1480px] gap-4">
-        <header className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Radio className="h-4 w-4" />
-              <span className="text-xs font-semibold uppercase tracking-[0.18em]">{t("Broadcast")}</span>
-            </div>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight">{t("Broadcast desde casa")}</h1>
-            <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              {t("Rau Studio mezcla tu cola y entradas locales para transmitir por Icecast o RTMP.")}
-            </p>
-          </div>
-          <StatusBadge status={status?.status ?? "idle"} label={status?.message ?? t("Radio detenida.")} />
-        </header>
-
-        {error ? (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-            {error}
-          </div>
-        ) : null}
-        {notice ? (
-          <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200">
-            {notice}
-          </div>
-        ) : null}
-
-        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Metric label={t("Estado")} value={statusLabel(status?.status ?? "idle", t)} icon={<Wifi className="h-4 w-4" />} />
-          <Metric label={t("En cola")} value={String(queuedTotal)} icon={<Library className="h-4 w-4" />} />
-          <Metric label={t("Reproducidas")} value={String(completedTotal)} icon={<Play className="h-4 w-4" />} />
-          <Metric label={t("Fallidas")} value={String(failedTotal)} icon={<RefreshCcw className="h-4 w-4" />} danger={failedTotal > 0} />
-        </section>
-
-        <section className="grid gap-4 xl:grid-cols-[minmax(360px,0.8fr)_minmax(520px,1.2fr)]">
-          <Card>
-            <CardHeader>
-              <CardTitle>{t("Destino de salida")}</CardTitle>
-              <span className={cn(
-                "rounded-full px-2 py-1 text-[11px] font-semibold",
-                preflight?.ready
-                  ? "bg-emerald-500/10 text-emerald-800 dark:text-emerald-200"
-                  : "bg-amber-500/10 text-amber-800 dark:text-amber-200"
-              )}>
-                {preflight?.ready ? t("FFmpeg listo") : t("Revisar FFmpeg")}
-              </span>
-            </CardHeader>
-            <CardContent className="p-3">
-              <form className="grid gap-3" onSubmit={saveProfile}>
-                <Field label={t("Tipo de destino")}>
-                  <select className={fieldClass} value={outputKind} disabled={running} onChange={(event) => setOutputKind(event.target.value as BroadcastOutputKind)}>
-                    <option value="icecast">Icecast · MP3</option>
-                    <option value="rtmp">RTMP / RTMPS · {t("Video en vivo")}</option>
-                  </select>
-                </Field>
-                {outputKind === "icecast" ? (
-                  <>
-                    <div className="grid gap-3 sm:grid-cols-[1fr_110px]">
-                      <Field label={t("Host")}>
-                        <input className={fieldClass} value={host} required disabled={running} onChange={(event) => setHost(event.target.value)} />
-                      </Field>
-                      <Field label={t("Puerto")}>
-                        <input className={fieldClass} type="number" min={1} max={65535} value={port} required disabled={running} onChange={(event) => setPort(event.target.value)} />
-                      </Field>
-                    </div>
-                    <Field label={t("Mountpoint MP3")}>
-                      <input className={fieldClass} value={mount} required disabled={running} placeholder="/live.mp3" onChange={(event) => setMount(event.target.value)} />
-                    </Field>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <Field label={t("Usuario source")}>
-                        <input className={fieldClass} value={username} required disabled={running} onChange={(event) => setUsername(event.target.value)} />
-                      </Field>
-                      <Field label={t("Bitrate MP3")}>
-                        <select className={fieldClass} value={bitrate} disabled={running} onChange={(event) => setBitrate(event.target.value)}>
-                          {[96, 128, 160, 192, 256, 320].map((value) => <option key={value} value={value}>{value} kbps</option>)}
-                        </select>
-                      </Field>
-                    </div>
-                    <Field label={profile?.password_configured ? t("Nueva contraseña source (opcional)") : t("Contraseña source")}>
-                      <input
-                        className={fieldClass}
-                        type="password"
-                        value={password}
-                        required={!profile?.password_configured && !clearPassword}
-                        disabled={running || clearPassword}
-                        autoComplete="new-password"
-                        onChange={(event) => setPassword(event.target.value)}
-                      />
-                    </Field>
-                    <div className="grid gap-2 text-sm sm:grid-cols-2">
-                      <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2">
-                        <input type="checkbox" checked={tls} disabled={running} onChange={(event) => setTls(event.target.checked)} />
-                        {t("Usar TLS")}
-                      </label>
-                      <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2">
-                        <input type="checkbox" checked={isPublic} disabled={running} onChange={(event) => setIsPublic(event.target.checked)} />
-                        {t("Listar públicamente")}
-                      </label>
-                      {profile?.password_configured ? (
-                        <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 sm:col-span-2">
-                          <input type="checkbox" checked={clearPassword} disabled={running} onChange={(event) => setClearPassword(event.target.checked)} />
-                          {t("Eliminar contraseña guardada")}
-                        </label>
-                      ) : null}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <Field label={t("Plataforma")}>
-                      <select className={fieldClass} value={rtmpPlatform} disabled={running} onChange={(event) => setRtmpPlatform(event.target.value as RtmpPlatform)}>
-                        <option value="instagram">Instagram Live</option>
-                        <option value="custom">{t("RTMP personalizado")}</option>
-                      </select>
-                    </Field>
-                    <Field label={t("URL del servidor RTMP")}>
-                      <input
-                        className={fieldClass}
-                        type="url"
-                        value={rtmpServerUrl}
-                        required
-                        disabled={running}
-                        placeholder="rtmps://live-upload.instagram.com:443/rtmp/"
-                        onChange={(event) => setRtmpServerUrl(event.target.value)}
-                      />
-                    </Field>
-                    <Field label={t("Clave de transmisión · solo esta sesión")}>
-                      <input
-                        className={fieldClass}
-                        type="password"
-                        value={streamKey}
-                        disabled={running}
-                        autoComplete="off"
-                        placeholder={t("Pégala antes de enviar la señal")}
-                        onChange={(event) => setStreamKey(event.target.value)}
-                      />
-                    </Field>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <Field label={t("Bitrate de video")}>
-                        <select className={fieldClass} value={rtmpVideoBitrate} disabled={running} onChange={(event) => setRtmpVideoBitrate(event.target.value)}>
-                          {[2250, 3000, 3500, 4500, 6000].map((value) => <option key={value} value={value}>{value} kbps</option>)}
-                        </select>
-                      </Field>
-                      <Field label={t("Bitrate AAC")}>
-                        <select className={fieldClass} value={rtmpAudioBitrate} disabled={running} onChange={(event) => setRtmpAudioBitrate(event.target.value)}>
-                          {[96, 128, 160, 192, 256].map((value) => <option key={value} value={value}>{value} kbps</option>)}
-                        </select>
-                      </Field>
-                    </div>
-                    <div className="rounded-md border border-violet-500/25 bg-violet-500/5 px-3 py-2 text-xs text-muted-foreground">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <strong className="block text-foreground">720 × 1280 · 30 fps · H.264/AAC</strong>
-                          <span>{t("Rau genera una señal visual monocroma con identidad de la radio y la pista actual, actualizada sin cortar el Live.")}</span>
-                        </div>
-                        <Button type="button" size="sm" variant="secondary" onClick={() => setVideoStudioOpen(true)}>
-                          <SlidersHorizontal className="h-4 w-4" />
-                          {t("Video Studio")}
-                        </Button>
-                      </div>
-                    </div>
-                    {rtmpPlatform === "instagram" ? (
-                      <div className="rounded-md border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-xs text-amber-900 dark:text-amber-100">
-                        {t("Crea el Live en Instagram.com, copia su URL y clave, envía la señal desde Rau y confirma la vista previa en Live Producer. Para terminar, finaliza primero en Instagram.")}
-                      </div>
-                    ) : null}
-                  </>
-                )}
-                <Field label={t("Nombre de estación")}>
-                  <input className={fieldClass} value={stationName} required maxLength={120} disabled={running} onChange={(event) => setStationName(event.target.value)} />
-                </Field>
-                <Field label={t("Descripción")}>
-                  <input className={fieldClass} value={description} maxLength={240} disabled={running} onChange={(event) => setDescription(event.target.value)} />
-                </Field>
                 <div className="overflow-hidden rounded-lg border border-border bg-muted/15">
                   <div className="grid grid-cols-3 gap-1 border-b border-border bg-secondary/70 p-1" role="tablist" aria-label={t("Fuentes de audio")}>
                     <SourceTabButton
@@ -1421,6 +1512,259 @@ export function BroadcastPage() {
                 </div>
                   </div>
                 </div>
+    );
+  }
+
+  if (busy === "loading" && !profile) {
+    return (
+      <main className="grid min-h-screen place-items-center p-6">
+        <LoaderCircle className="h-7 w-7 animate-spin text-muted-foreground" aria-label={t("Cargando")} />
+      </main>
+    );
+  }
+
+  return (
+    <main
+      className={cn(
+        "overflow-y-auto bg-background p-4 text-foreground lg:p-6",
+        terminalExpanded ? "h-[calc(100dvh-17.25rem)]" : "h-[calc(100dvh-4.75rem)]"
+      )}
+    >
+      <div className="mx-auto grid w-full max-w-[1480px] gap-4">
+        <header className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Radio className="h-4 w-4" />
+              <span className="text-xs font-semibold uppercase tracking-[0.18em]">{t("Broadcast")}</span>
+            </div>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight">{t("Broadcast desde casa")}</h1>
+            <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
+              {t("Rau Studio mezcla tu cola y entradas locales para transmitir por Icecast o RTMP.")}
+            </p>
+          </div>
+          <StatusBadge status={status?.status ?? "idle"} label={status?.message ?? t("Radio detenida.")} />
+        </header>
+
+        {error ? (
+          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        ) : null}
+        {notice ? (
+          <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200">
+            {notice}
+          </div>
+        ) : null}
+
+        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <Metric label={t("Estado")} value={statusLabel(status?.status ?? "idle", t)} icon={<Wifi className="h-4 w-4" />} />
+          <Metric label={t("En cola")} value={String(queuedTotal)} icon={<Library className="h-4 w-4" />} />
+          <Metric label={t("Reproducidas")} value={String(completedTotal)} icon={<Play className="h-4 w-4" />} />
+          <Metric label={t("Fallidas")} value={String(failedTotal)} icon={<RefreshCcw className="h-4 w-4" />} danger={failedTotal > 0} />
+        </section>
+
+        <nav className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-secondary/60 p-1" role="tablist" aria-label={t("Secciones de broadcast")}>
+          {([
+            { id: "destinations", label: t("Destinos de salida"), icon: <Wifi className="h-4 w-4" /> },
+            { id: "control", label: t("Control"), icon: <SlidersHorizontal className="h-4 w-4" /> },
+            { id: "schedule", label: t("Parrilla"), icon: <Calendar className="h-4 w-4" /> }
+          ] as const).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={workspaceTab === tab.id}
+              className={cn(
+                "flex min-w-0 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors",
+                workspaceTab === tab.id
+                  ? "bg-background text-foreground shadow-sm ring-1 ring-border"
+                  : "text-muted-foreground hover:bg-background/60 hover:text-foreground"
+              )}
+              onClick={() => setWorkspaceTab(tab.id)}
+            >
+              {tab.icon}
+              <span className="truncate">{tab.label}</span>
+              {tab.id === "destinations" ? (
+                <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] tabular-nums">{profiles.length}</span>
+              ) : tab.id === "schedule" && automation.mode === "scheduled" ? (
+                <span className="h-2 w-2 rounded-full bg-emerald-500" aria-label={t("Parrilla activa")} />
+              ) : null}
+            </button>
+          ))}
+        </nav>
+
+        <section className={cn(
+          "grid gap-4",
+          workspaceTab === "destinations" && "xl:grid-cols-[minmax(280px,0.55fr)_minmax(600px,1.45fr)]"
+        )}>
+          {workspaceTab === "destinations" ? (
+            <DestinationProfilesCard
+              profiles={profiles}
+              activeId={profile?.id ?? null}
+              running={running}
+              busy={busy}
+              creating={creatingDestination}
+              newName={newDestinationName}
+              onCreatingChange={setCreatingDestination}
+              onNewNameChange={setNewDestinationName}
+              onCreate={createDestination}
+              onActivate={activateDestination}
+              onDelete={deleteDestination}
+              t={t}
+            />
+          ) : null}
+          {workspaceTab === "destinations" ? <Card>
+            <CardHeader>
+              <div className="min-w-0">
+                <CardTitle>{t("Configurar destino")}</CardTitle>
+                <p className="mt-1 truncate text-xs text-muted-foreground">{profile?.name ?? t("Destino de salida")}</p>
+              </div>
+              <span className={cn(
+                "rounded-full px-2 py-1 text-[11px] font-semibold",
+                preflight?.ready
+                  ? "bg-emerald-500/10 text-emerald-800 dark:text-emerald-200"
+                  : "bg-amber-500/10 text-amber-800 dark:text-amber-200"
+              )}>
+                {preflight?.ready ? t("FFmpeg listo") : t("Revisar FFmpeg")}
+              </span>
+            </CardHeader>
+            <CardContent className="p-3">
+              <form className="grid gap-3" onSubmit={saveProfile}>
+                <Field label={t("Nombre del destino") }>
+                  <input
+                    className={fieldClass}
+                    value={profileName}
+                    required
+                    maxLength={80}
+                    disabled={running}
+                    placeholder={t("Ej. Radio principal")}
+                    onChange={(event) => setProfileName(event.target.value)}
+                  />
+                </Field>
+                <Field label={t("Tipo de destino")}>
+                  <select className={fieldClass} value={outputKind} disabled={running} onChange={(event) => setOutputKind(event.target.value as BroadcastOutputKind)}>
+                    <option value="icecast">Icecast · MP3</option>
+                    <option value="rtmp">RTMP / RTMPS · {t("Video en vivo")}</option>
+                  </select>
+                </Field>
+                {outputKind === "icecast" ? (
+                  <>
+                    <div className="grid gap-3 sm:grid-cols-[1fr_110px]">
+                      <Field label={t("Host")}>
+                        <input className={fieldClass} value={host} required disabled={running} onChange={(event) => setHost(event.target.value)} />
+                      </Field>
+                      <Field label={t("Puerto")}>
+                        <input className={fieldClass} type="number" min={1} max={65535} value={port} required disabled={running} onChange={(event) => setPort(event.target.value)} />
+                      </Field>
+                    </div>
+                    <Field label={t("Mountpoint MP3")}>
+                      <input className={fieldClass} value={mount} required disabled={running} placeholder="/live.mp3" onChange={(event) => setMount(event.target.value)} />
+                    </Field>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Field label={t("Usuario source")}>
+                        <input className={fieldClass} value={username} required disabled={running} onChange={(event) => setUsername(event.target.value)} />
+                      </Field>
+                      <Field label={t("Bitrate MP3")}>
+                        <select className={fieldClass} value={bitrate} disabled={running} onChange={(event) => setBitrate(event.target.value)}>
+                          {[96, 128, 160, 192, 256, 320].map((value) => <option key={value} value={value}>{value} kbps</option>)}
+                        </select>
+                      </Field>
+                    </div>
+                    <Field label={profile?.password_configured ? t("Nueva contraseña source (opcional)") : t("Contraseña source")}>
+                      <input
+                        className={fieldClass}
+                        type="password"
+                        value={password}
+                        required={!profile?.password_configured && !clearPassword}
+                        disabled={running || clearPassword}
+                        autoComplete="new-password"
+                        onChange={(event) => setPassword(event.target.value)}
+                      />
+                    </Field>
+                    <div className="grid gap-2 text-sm sm:grid-cols-2">
+                      <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+                        <input type="checkbox" checked={tls} disabled={running} onChange={(event) => setTls(event.target.checked)} />
+                        {t("Usar TLS")}
+                      </label>
+                      <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2">
+                        <input type="checkbox" checked={isPublic} disabled={running} onChange={(event) => setIsPublic(event.target.checked)} />
+                        {t("Listar públicamente")}
+                      </label>
+                      {profile?.password_configured ? (
+                        <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 sm:col-span-2">
+                          <input type="checkbox" checked={clearPassword} disabled={running} onChange={(event) => setClearPassword(event.target.checked)} />
+                          {t("Eliminar contraseña guardada")}
+                        </label>
+                      ) : null}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <Field label={t("Plataforma")}>
+                      <select className={fieldClass} value={rtmpPlatform} disabled={running} onChange={(event) => setRtmpPlatform(event.target.value as RtmpPlatform)}>
+                        <option value="instagram">Instagram Live</option>
+                        <option value="custom">{t("RTMP personalizado")}</option>
+                      </select>
+                    </Field>
+                    <Field label={t("URL del servidor RTMP")}>
+                      <input
+                        className={fieldClass}
+                        type="url"
+                        value={rtmpServerUrl}
+                        required
+                        disabled={running}
+                        placeholder="rtmps://live-upload.instagram.com:443/rtmp/"
+                        onChange={(event) => setRtmpServerUrl(event.target.value)}
+                      />
+                    </Field>
+                    <Field label={t("Clave de transmisión · solo esta sesión")}>
+                      <input
+                        className={fieldClass}
+                        type="password"
+                        value={streamKey}
+                        disabled={running}
+                        autoComplete="off"
+                        placeholder={t("Pégala antes de enviar la señal")}
+                        onChange={(event) => setStreamKey(event.target.value)}
+                      />
+                    </Field>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Field label={t("Bitrate de video")}>
+                        <select className={fieldClass} value={rtmpVideoBitrate} disabled={running} onChange={(event) => setRtmpVideoBitrate(event.target.value)}>
+                          {[2250, 3000, 3500, 4500, 6000].map((value) => <option key={value} value={value}>{value} kbps</option>)}
+                        </select>
+                      </Field>
+                      <Field label={t("Bitrate AAC")}>
+                        <select className={fieldClass} value={rtmpAudioBitrate} disabled={running} onChange={(event) => setRtmpAudioBitrate(event.target.value)}>
+                          {[96, 128, 160, 192, 256].map((value) => <option key={value} value={value}>{value} kbps</option>)}
+                        </select>
+                      </Field>
+                    </div>
+                    <div className="rounded-md border border-violet-500/25 bg-violet-500/5 px-3 py-2 text-xs text-muted-foreground">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <strong className="block text-foreground">720 × 1280 · 30 fps · H.264/AAC</strong>
+                          <span>{t("Rau genera una señal visual monocroma con identidad de la radio y la pista actual, actualizada sin cortar el Live.")}</span>
+                        </div>
+                        <Button type="button" size="sm" variant="secondary" onClick={() => setVideoStudioOpen(true)}>
+                          <SlidersHorizontal className="h-4 w-4" />
+                          {t("Video Studio")}
+                        </Button>
+                      </div>
+                    </div>
+                    {rtmpPlatform === "instagram" ? (
+                      <div className="rounded-md border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-xs text-amber-900 dark:text-amber-100">
+                        {t("Crea el Live en Instagram.com, copia su URL y clave, envía la señal desde Rau y confirma la vista previa en Live Producer. Para terminar, finaliza primero en Instagram.")}
+                      </div>
+                    ) : null}
+                  </>
+                )}
+                <Field label={t("Nombre de estación")}>
+                  <input className={fieldClass} value={stationName} required maxLength={120} disabled={running} onChange={(event) => setStationName(event.target.value)} />
+                </Field>
+                <Field label={t("Descripción")}>
+                  <input className={fieldClass} value={description} maxLength={240} disabled={running} onChange={(event) => setDescription(event.target.value)} />
+                </Field>
                 <div className="rounded-md bg-secondary/60 px-3 py-2 text-xs text-muted-foreground">
                   <strong className="block break-all text-foreground">
                     {outputKind === "rtmp" ? (rtmpServerUrl || t("Configura la URL RTMP")) : (profile?.listener_url ?? "—")}
@@ -1432,78 +1776,98 @@ export function BroadcastPage() {
                 </div>
                 <Button type="submit" disabled={busy === "saving" || running}>
                   {busy === "saving" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                  {t("Guardar perfil")}
+                  {t("Guardar destino")}
                 </Button>
               </form>
             </CardContent>
-          </Card>
+          </Card> : null}
 
-          <div className="grid min-h-0 gap-4">
+          {workspaceTab !== "destinations" ? <div className={cn(
+            "grid min-h-0 gap-4",
+            workspaceTab === "control" && "xl:grid-cols-[minmax(340px,0.72fr)_minmax(520px,1.28fr)]"
+          )}>
+            {workspaceTab === "control" ? <div className="grid content-start gap-4 self-start">
             <Card>
-              <CardHeader>
-                <CardTitle>{t("Control de transmisión")}</CardTitle>
-                <div className="flex flex-wrap gap-2">
+              <CardHeader className="flex-col items-stretch gap-2 py-3">
+                <div className="min-w-0">
+                  <CardTitle>{t("Control de transmisión")}</CardTitle>
+                  <p className="mt-1 text-xs text-muted-foreground">{t("Acciones rápidas de la señal y sus fuentes.")}</p>
+                </div>
+                <div className="flex w-fit max-w-full flex-nowrap items-center gap-1 rounded-md border border-border bg-secondary/40 p-1">
                   {!running ? (
-                    <Button size="sm" disabled={destinationNeedsSave || !preflight?.ready || (outputKind === "rtmp" && !streamKey.trim()) || ((microphoneEnabled || lineInputEnabled) && !preflight?.microphone_input_available) || busy !== null} onClick={() => void startBroadcast()}>
-                      {busy === "starting" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                      {t("Salir al aire")}
-                    </Button>
+                    <BroadcastControlAction
+                      label={t("Salir al aire")}
+                      description={t("Inicia la transmisión usando el destino de salida seleccionado.")}
+                      disabled={destinationNeedsSave || controlNeedsSave || !preflight?.ready || (outputKind === "rtmp" && !streamKey.trim()) || ((microphoneEnabled || lineInputEnabled) && !preflight?.microphone_input_available) || busy !== null}
+                      icon={busy === "starting" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                      onClick={() => void startBroadcast()}
+                    />
                   ) : (
-                    <Button size="sm" variant="destructive" disabled={busy === "stopping" || status?.status === "stopping"} onClick={() => void stopBroadcast()}>
-                      {busy === "stopping" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
-                      {t("Detener")}
-                    </Button>
+                    <BroadcastControlAction
+                      label={t("Detener")}
+                      description={t("Finaliza la transmisión y cierra la conexión con el destino actual.")}
+                      variant="destructive"
+                      disabled={busy === "stopping" || status?.status === "stopping"}
+                      icon={busy === "stopping" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+                      onClick={() => void stopBroadcast()}
+                    />
                   )}
-                  <Button size="sm" variant="secondary" disabled={!status?.now_playing || busy === "skipping"} onClick={() => void skipTrack()}>
-                    <SkipForward className="h-4 w-4" />
-                    {t("Saltar")}
-                  </Button>
+                  <BroadcastControlAction
+                    label={t("Saltar")}
+                    description={t("Finaliza la pista actual y reproduce inmediatamente la siguiente.")}
+                    disabled={!status?.now_playing || busy === "skipping"}
+                    icon={busy === "skipping" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <SkipForward className="h-4 w-4" />}
+                    onClick={() => void skipTrack()}
+                  />
+                  {(outputKind === "rtmp" || (running && (profile?.microphone_enabled || profile?.line_input_enabled || profile?.application_audio_enabled))) ? (
+                    <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />
+                  ) : null}
                   {outputKind === "rtmp" ? (
-                    <Button
-                      size="sm"
+                    <BroadcastControlAction
+                      label={t(status?.camera?.live ? "Fuentes en Program" : "Video Studio")}
+                      description={t("Abre Preview / Program para organizar las fuentes visuales del RTMP.")}
                       variant={status?.camera?.live ? "default" : "secondary"}
-                      onClick={() => setVideoStudioOpen(true)}
-                    >
-                      {videoCompositor.screenEnabled
+                      icon={videoCompositor.screenEnabled
                         ? <Monitor className={cn("h-4 w-4", status?.camera?.live && "animate-pulse")} />
                         : <Camera className={cn("h-4 w-4", status?.camera?.live && "animate-pulse")} />}
-                      {status?.camera?.live
-                        ? t("Fuentes en Program")
-                        : t("Video Studio")}
-                    </Button>
+                      onClick={() => setVideoStudioOpen(true)}
+                    />
                   ) : null}
                   {running && profile?.microphone_enabled ? (
-                    <Button
-                      size="sm"
+                    <BroadcastControlAction
+                      label={t(status?.microphone?.live ? "Silenciar micrófono" : "Micrófono al aire")}
+                      description={t(status?.microphone?.live
+                        ? "Silencia el micrófono y devuelve el protagonismo a la fuente principal."
+                        : "Mezcla el micrófono sobre la fuente principal usando la ganancia configurada.")}
                       variant={status?.microphone?.live ? "destructive" : "secondary"}
                       disabled={!status?.microphone?.ready || ["line_input", "application_audio"].includes(status?.source_mode ?? "") || busy === "microphone"}
+                      icon={status?.microphone?.live ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
                       onClick={() => void toggleMicrophone()}
-                    >
-                      {status?.microphone?.live ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                      {status?.microphone?.live ? t("Silenciar micrófono") : t("Micrófono al aire")}
-                    </Button>
+                    />
                   ) : null}
                   {running && profile?.line_input_enabled ? (
-                    <Button
-                      size="sm"
+                    <BroadcastControlAction
+                      label={t(status?.source_mode === "line_input" ? "Volver a Playlist" : "Línea directa al aire")}
+                      description={t(status?.source_mode === "line_input"
+                        ? "Cierra la entrada directa y retoma la playlist."
+                        : "Reemplaza temporalmente la playlist por la entrada de línea configurada.")}
                       variant={status?.source_mode === "line_input" ? "default" : "secondary"}
                       disabled={!status?.line_input?.ready || status?.source_mode === "application_audio" || busy === "line-input"}
+                      icon={<Radio className={cn("h-4 w-4", status?.source_mode === "line_input" && "animate-pulse")} />}
                       onClick={() => void toggleLineInput()}
-                    >
-                      <Radio className={cn("h-4 w-4", status?.source_mode === "line_input" && "animate-pulse")} />
-                      {status?.source_mode === "line_input" ? t("Volver a Playlist") : t("Línea directa al aire")}
-                    </Button>
+                    />
                   ) : null}
                   {running && profile?.application_audio_enabled ? (
-                    <Button
-                      size="sm"
+                    <BroadcastControlAction
+                      label={t(status?.source_mode === "application_audio" ? "Volver a Playlist" : "Salida del Mac al aire")}
+                      description={t(status?.source_mode === "application_audio"
+                        ? "Cierra la captura del Mac y retoma la playlist."
+                        : "Reemplaza temporalmente la playlist por el audio del Mac.")}
                       variant={status?.source_mode === "application_audio" ? "default" : "secondary"}
                       disabled={!status?.application_audio?.ready || status?.source_mode === "line_input" || busy === "application-audio"}
+                      icon={<AudioLines className={cn("h-4 w-4", status?.source_mode === "application_audio" && "animate-pulse")} />}
                       onClick={() => void toggleApplicationAudio()}
-                    >
-                      <AudioLines className={cn("h-4 w-4", status?.source_mode === "application_audio" && "animate-pulse")} />
-                      {status?.source_mode === "application_audio" ? t("Volver a Playlist") : t("Salida del Mac al aire")}
-                    </Button>
+                    />
                   ) : null}
                 </div>
               </CardHeader>
@@ -1663,12 +2027,71 @@ export function BroadcastPage() {
                 ) : null}
               </CardContent>
             </Card>
+            <Card className="overflow-hidden">
+              <CardHeader className="py-3">
+                <div className="min-w-0">
+                  <CardTitle>{t("Fuentes de entrada")}</CardTitle>
+                  <p className="mt-1 text-xs text-muted-foreground">{t("Esta configuración es global y se aplica a todos los destinos de salida.")}</p>
+                </div>
+              </CardHeader>
+              <CardContent className="grid gap-3 p-3 pt-0">
+                {renderControlSettingsEditor()}
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-muted-foreground">
+                    {controlNeedsSave ? t("Hay cambios sin guardar.") : t("Fuentes actualizadas.")}
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={running || !controlNeedsSave || busy === "control-settings"}
+                    onClick={() => void saveControlSettings()}
+                  >
+                    {busy === "control-settings" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                    {t("Guardar fuentes")}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+            </div> : null}
 
-            <Card className="flex h-[calc(100vh-3rem)] min-h-[420px] max-h-[860px] flex-col overflow-hidden">
+            <Card className={cn(
+              "flex min-h-0 max-h-[860px] flex-col overflow-hidden",
+              workspaceTab === "control"
+                ? terminalExpanded
+                  ? "h-[calc(100dvh-24.5rem)]"
+                  : "h-[calc(100dvh-12rem)]"
+                : terminalExpanded
+                  ? "h-[calc(100dvh-17.25rem)]"
+                  : "h-[calc(100dvh-4.75rem)]"
+            )}>
               <CardHeader className="flex-wrap py-2">
-                <CardTitle>{t("Cola de broadcast")}</CardTitle>
-                <div className="ml-auto flex items-center gap-2">
-                  <select
+                <div className="min-w-0">
+                  <CardTitle>{t(workspaceTab === "schedule" ? "Parrilla musical" : "Cola al aire")}</CardTitle>
+                  {workspaceTab === "control" && automation.mode === "scheduled" ? (
+                    <p className="mt-1 text-xs text-muted-foreground">{t("La parrilla está activa; esta cola refleja los bloques programados.")}</p>
+                  ) : null}
+                </div>
+                <div className="ml-auto flex flex-wrap items-center gap-2">
+                  {workspaceTab === "schedule" ? <div className="flex rounded-md border border-border bg-secondary p-0.5">
+                    <Button
+                      size="sm"
+                      variant={automation.mode === "immediate" ? "default" : "ghost"}
+                      disabled={busy === "automation-mode"}
+                      onClick={() => void changeBroadcastMode("immediate")}
+                    >
+                      {t("Inmediato")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={automation.mode === "scheduled" ? "default" : "ghost"}
+                      disabled={busy === "automation-mode"}
+                      onClick={() => void changeBroadcastMode("scheduled")}
+                    >
+                      <Calendar className="h-3.5 w-3.5" />
+                      {t("Programado")}
+                    </Button>
+                  </div> : null}
+                  {workspaceTab === "control" ? <><select
                     aria-label={t("Ordenar pistas")}
                     className="h-8 max-w-36 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none disabled:opacity-50"
                     value=""
@@ -1680,14 +2103,15 @@ export function BroadcastPage() {
                     <option value="artist">{t("Artista A–Z")}</option>
                     <option value="duration">{t("Duración menor primero")}</option>
                   </select>
-                  <Button size="sm" variant="ghost" disabled={queue.every((entry) => entry.status === "playing") || busy === "clearing"} onClick={() => void clearQueue()}>
+                  <Button size="sm" variant="ghost" disabled={queuedTotal === 0 || busy === "clearing"} onClick={() => void clearQueue()}>
                     <Trash2 className="h-4 w-4" />
                     {t("Limpiar")}
                   </Button>
+                  </> : null}
                 </div>
               </CardHeader>
-              <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                <div className="grid shrink-0 gap-2 border-b border-border p-3 md:grid-cols-[minmax(260px,1fr)_auto]">
+              {workspaceTab === "control" ? <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                {automation.mode === "immediate" ? <div className="grid shrink-0 gap-2 border-b border-border p-3 md:grid-cols-[minmax(260px,1fr)_auto]">
                   <Popover open={playlistComboboxOpen} onOpenChange={setPlaylistComboboxOpen}>
                     <PopoverTrigger asChild>
                       <Button
@@ -1758,23 +2182,35 @@ export function BroadcastPage() {
                     {busy === "appending" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                     {t("Agregar")}
                   </Button>
-                </div>
-                {queue.length === 0 ? (
+                </div> : (
+                  <button
+                    type="button"
+                    className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-emerald-500/5 p-3 text-left text-xs text-muted-foreground hover:bg-emerald-500/10"
+                    onClick={() => setWorkspaceTab("schedule")}
+                  >
+                    <span><strong className="text-foreground">{t("Parrilla activa")}</strong> · {t("Los bloques se cargan automáticamente según su horario.")}</span>
+                    <span className="shrink-0 font-semibold text-foreground">{t("Abrir parrilla")}</span>
+                  </button>
+                )}
+                {modeQueue.length === 0 ? (
                   <div className="grid min-h-0 flex-1 place-items-center p-6 text-sm text-muted-foreground">{t("La cola está vacía.")}</div>
                 ) : (
-                  <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain">
-                    {queue.map((entry) => {
+                  <div ref={queueScrollElement} className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
+                    {modeQueue.map((entry) => {
                       const queuedIndex = queuedEntries.findIndex((queuedEntry) => queuedEntry.id === entry.id);
                       const canSelectTrack = running
                         && status?.status !== "stopping"
                         && status?.source_mode === "playlist"
-                        && entry.status !== "playing";
+                        && entry.status === "queued";
                       return (
                       <div
                         key={entry.id}
+                        ref={entry.id === playingQueueEntryId ? playingQueueEntryElement : undefined}
                         className={cn(
                           "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-2.5 transition-colors",
                           entry.status === "playing" && "bg-emerald-500/5",
+                          ["played", "skipped"].includes(entry.status) && "bg-muted/10 text-muted-foreground",
+                          entry.status === "failed" && "bg-destructive/5",
                           draggedQueueEntryId && entry.status === "queued" && entry.id !== draggedQueueEntryId && "hover:bg-accent/60"
                         )}
                         onDragOver={(event) => {
@@ -1851,7 +2287,7 @@ export function BroadcastPage() {
                             size="icon"
                             variant="ghost"
                             aria-label={t("Quitar de la cola")}
-                            disabled={entry.status === "playing" || busy === `remove:${entry.id}`}
+                            disabled={entry.status !== "queued" || busy === `remove:${entry.id}`}
                             onClick={() => void removeEntry(entry.id)}
                           >
                             {busy === `remove:${entry.id}` ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
@@ -1861,9 +2297,20 @@ export function BroadcastPage() {
                     )})}
                   </div>
                 )}
-              </CardContent>
+              </CardContent> : (
+                <ScheduledBroadcastPanel
+                  sources={playlistSources}
+                  items={scheduleItems}
+                  automation={automation}
+                  running={running}
+                  onItemsChange={setScheduleItems}
+                  onAutomationChange={setAutomation}
+                  onError={setError}
+                  onNotice={setNotice}
+                />
+              )}
             </Card>
-          </div>
+          </div> : null}
         </section>
 
       </div>
@@ -1894,6 +2341,1112 @@ export function BroadcastPage() {
         onClear={clearTerminal}
       />
     </main>
+  );
+}
+
+function DestinationProfilesCard({
+  profiles,
+  activeId,
+  running,
+  busy,
+  creating,
+  newName,
+  onCreatingChange,
+  onNewNameChange,
+  onCreate,
+  onActivate,
+  onDelete,
+  t
+}: {
+  profiles: BroadcastProfile[];
+  activeId: string | null;
+  running: boolean;
+  busy: BusyAction;
+  creating: boolean;
+  newName: string;
+  onCreatingChange: (value: boolean) => void;
+  onNewNameChange: (value: string) => void;
+  onCreate: (event: FormEvent) => void;
+  onActivate: (profileId: string) => void;
+  onDelete: (profile: BroadcastProfile) => void;
+  t: (key: string, values?: Record<string, string | number | null | undefined>) => string;
+}) {
+  return (
+    <Card className="self-start overflow-hidden xl:sticky xl:top-0">
+      <CardHeader>
+        <div>
+          <CardTitle>{t("Destinos guardados")}</CardTitle>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t("Selecciona qué servidor recibirá la próxima transmisión.")}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={running || busy !== null}
+          onClick={() => onCreatingChange(true)}
+        >
+          <Plus className="h-4 w-4" />
+          {t("Nuevo")}
+        </Button>
+      </CardHeader>
+      <CardContent className="p-3">
+        {creating ? (
+          <form className="mb-3 grid gap-2 rounded-lg border border-border bg-secondary/40 p-3" onSubmit={onCreate}>
+            <label className="text-xs font-semibold" htmlFor="new-broadcast-destination">{t("Nombre del nuevo destino")}</label>
+            <input
+              id="new-broadcast-destination"
+              className={fieldClass}
+              value={newName}
+              maxLength={80}
+              autoFocus
+              placeholder={t("Ej. Radio secundaria")}
+              onChange={(event) => onNewNameChange(event.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  onCreatingChange(false);
+                  onNewNameChange("");
+                }}
+              >
+                {t("Cancelar")}
+              </Button>
+              <Button type="submit" size="sm" disabled={!newName.trim() || busy === "destination-create"}>
+                {busy === "destination-create" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                {t("Crear y activar")}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+        <div className="max-h-[min(620px,calc(100vh-19rem))] space-y-2 overflow-y-auto overscroll-contain pr-1">
+          {profiles.map((destination) => {
+            const active = destination.id === activeId;
+            const endpoint = destination.output_kind === "rtmp"
+              ? destination.rtmp_server_url || t("RTMP sin configurar")
+              : destination.listener_url;
+            return (
+              <div
+                key={destination.id}
+                className={cn(
+                  "rounded-lg border p-3 transition-colors",
+                  active ? "border-emerald-500/35 bg-emerald-500/5" : "border-border bg-background"
+                )}
+              >
+                <div className="flex items-start gap-3">
+                  <span className={cn(
+                    "grid h-9 w-9 shrink-0 place-items-center rounded-md",
+                    active ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-secondary text-muted-foreground"
+                  )}>
+                    {destination.output_kind === "rtmp" ? <Monitor className="h-4 w-4" /> : <Radio className="h-4 w-4" />}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <strong className="truncate text-sm">{destination.name}</strong>
+                      {active ? (
+                        <span className="shrink-0 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                          {t("Activo")}
+                        </span>
+                      ) : null}
+                    </div>
+                    <span className="mt-1 block truncate text-xs text-muted-foreground">{endpoint}</span>
+                    <span className="mt-1 block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {destination.output_kind === "rtmp" ? "RTMP" : "Icecast"}
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-3 flex justify-end gap-1 border-t border-border/70 pt-2">
+                  <Button
+                    size="sm"
+                    variant={active ? "secondary" : "default"}
+                    disabled={active || running || busy !== null}
+                    onClick={() => onActivate(destination.id)}
+                  >
+                    {busy === `destination-activate:${destination.id}` ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                    {active ? t("Seleccionado") : t("Activar")}
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={t("Eliminar destino")}
+                    title={t("Eliminar destino")}
+                    disabled={profiles.length <= 1 || running || busy !== null}
+                    onClick={() => onDelete(destination)}
+                  >
+                    {busy === `destination-delete:${destination.id}` ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {running ? (
+          <p className="mt-3 rounded-md border border-amber-500/25 bg-amber-500/5 p-2 text-xs text-muted-foreground">
+            {t("Detén la transmisión para cambiar o crear destinos.")}
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ScheduledBroadcastPanel({
+  sources,
+  items,
+  automation,
+  running,
+  onItemsChange,
+  onAutomationChange,
+  onError,
+  onNotice
+}: {
+  sources: BroadcastPlaylistSource[];
+  items: BroadcastScheduleItem[];
+  automation: BroadcastAutomationSettings;
+  running: boolean;
+  onItemsChange: (items: BroadcastScheduleItem[]) => void;
+  onAutomationChange: (settings: BroadcastAutomationSettings) => void;
+  onError: (message: string | null) => void;
+  onNotice: (message: string | null) => void;
+}) {
+  const { locale, t } = useI18n();
+  const [date, setDate] = useState(() => localDateInputValue(new Date()));
+  const [time, setTime] = useState(() => nextScheduleTime());
+  const [policy, setPolicy] = useState<"soft" | "exact">("soft");
+  const [sourceKey, setSourceKey] = useState("");
+  const [sourceTracks, setSourceTracks] = useState<BroadcastSourceTrack[]>([]);
+  const [trackId, setTrackId] = useState("");
+  const [loadingTracks, setLoadingTracks] = useState(false);
+  const [savingItem, setSavingItem] = useState(false);
+  const [deletingItemId, setDeletingItemId] = useState("");
+  const [editingItem, setEditingItem] = useState<BroadcastScheduleItem | null>(null);
+  const [loadingEditorId, setLoadingEditorId] = useState("");
+  const [bedEnabled, setBedEnabled] = useState(automation.bed_enabled);
+  const [bedSourceKey, setBedSourceKey] = useState("");
+  const [bedTracks, setBedTracks] = useState<BroadcastSourceTrack[]>([]);
+  const [bedTrackId, setBedTrackId] = useState(automation.bed_track_id ?? "");
+  const [bedGain, setBedGain] = useState(String(automation.bed_gain_percent));
+  const [bedDucking, setBedDucking] = useState(automation.bed_ducking);
+  const [savingBed, setSavingBed] = useState(false);
+  const selectedSource = sources.find((source) => source.key === sourceKey) ?? null;
+  const selectedBedSource = sources.find((source) => source.key === bedSourceKey) ?? null;
+  const dayItems = useMemo(
+    () => items.filter((item) => localDateInputValue(new Date(item.start_at)) === date),
+    [date, items]
+  );
+  const overlapById = useMemo(() => scheduleOverlapInfo(items), [items]);
+  const editableActivatedItemId = useMemo(
+    () => items
+      .filter((item) => item.status === "activated")
+      .sort((left, right) => {
+        const leftKey = left.activated_at ?? left.updated_at;
+        const rightKey = right.activated_at ?? right.updated_at;
+        return rightKey.localeCompare(leftKey) || right.start_at.localeCompare(left.start_at);
+      })[0]?.id ?? "",
+    [items]
+  );
+
+  useEffect(() => {
+    setBedEnabled(automation.bed_enabled);
+    setBedTrackId(automation.bed_track_id ?? "");
+    setBedGain(String(automation.bed_gain_percent));
+    setBedDucking(automation.bed_ducking);
+  }, [automation]);
+
+  useEffect(() => {
+    if (!selectedSource) {
+      setSourceTracks([]);
+      setTrackId("");
+      return;
+    }
+    let disposed = false;
+    setLoadingTracks(true);
+    void loadBroadcastSourceTracks(selectedSource)
+      .then((tracks) => {
+        if (!disposed) setSourceTracks(tracks.filter((track) => track.source_exists && track.source_path));
+      })
+      .catch((cause) => !disposed && onError(errorMessage(cause, locale)))
+      .finally(() => !disposed && setLoadingTracks(false));
+    return () => { disposed = true; };
+  }, [locale, selectedSource?.key]);
+
+  useEffect(() => {
+    if (!selectedBedSource) {
+      setBedTracks([]);
+      return;
+    }
+    let disposed = false;
+    void loadBroadcastSourceTracks(selectedBedSource)
+      .then((tracks) => {
+        if (!disposed) setBedTracks(tracks.filter((track) => track.source_exists && track.source_path));
+      })
+      .catch((cause) => !disposed && onError(errorMessage(cause, locale)));
+    return () => { disposed = true; };
+  }, [locale, selectedBedSource?.key]);
+
+  async function refreshItems() {
+    onItemsChange(await invoke<BroadcastScheduleItem[]>("broadcast_schedule_items"));
+  }
+
+  async function createItem() {
+    if (!selectedSource || !date || !time) return;
+    const startsAt = new Date(`${date}T${time}:00`);
+    if (Number.isNaN(startsAt.getTime())) {
+      onError(t("La fecha y hora programadas no son válidas."));
+      return;
+    }
+    setSavingItem(true);
+    onError(null);
+    onNotice(null);
+    try {
+      await invoke<BroadcastScheduleItem>("broadcast_create_schedule_item", {
+        item: {
+          startAt: startsAt.toISOString(),
+          policy,
+          sourceKind: trackId ? "track" : selectedSource.kind === "local" ? "draft" : "playlist",
+          libraryId: selectedSource.library_id,
+          sourceId: trackId || selectedSource.id
+        }
+      });
+      await refreshItems();
+      setTrackId("");
+      onNotice(t("Bloque agregado a la parrilla."));
+    } catch (cause) {
+      onError(errorMessage(cause, locale));
+    } finally {
+      setSavingItem(false);
+    }
+  }
+
+  async function deleteItem(itemId: string) {
+    setDeletingItemId(itemId);
+    onError(null);
+    try {
+      await invoke("broadcast_delete_schedule_item", { itemId });
+      await refreshItems();
+    } catch (cause) {
+      onError(errorMessage(cause, locale));
+    } finally {
+      setDeletingItemId("");
+    }
+  }
+
+  async function openItemEditor(itemId: string) {
+    setLoadingEditorId(itemId);
+    onError(null);
+    try {
+      setEditingItem(await invoke<BroadcastScheduleItem>("broadcast_schedule_item", { itemId }));
+    } catch (cause) {
+      onError(errorMessage(cause, locale));
+    } finally {
+      setLoadingEditorId("");
+    }
+  }
+
+  async function handleEditedItem(next: BroadcastScheduleItem, notice?: string) {
+    setEditingItem(next);
+    await refreshItems();
+    if (notice) onNotice(notice);
+  }
+
+  async function saveBed() {
+    const libraryId = selectedBedSource?.library_id ?? automation.bed_library_id ?? null;
+    const selectedTrackId = bedTrackId || automation.bed_track_id || null;
+    setSavingBed(true);
+    onError(null);
+    onNotice(null);
+    try {
+      const saved = await invoke<BroadcastAutomationSettings>("broadcast_save_automation_settings", {
+        settings: {
+          mode: "scheduled",
+          bedEnabled,
+          bedLibraryId: libraryId,
+          bedTrackId: selectedTrackId,
+          bedGainPercent: Number(bedGain),
+          bedDucking
+        }
+      });
+      onAutomationChange(saved);
+      onNotice(t("Cortina musical guardada."));
+    } catch (cause) {
+      onError(errorMessage(cause, locale));
+    } finally {
+      setSavingBed(false);
+    }
+  }
+
+  return (
+    <CardContent className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div className="grid gap-3">
+        <section className="rounded-md border border-border bg-secondary/30 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">{t("Agregar bloque horario")}</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {t("Programa una playlist completa o una pista individual para este día.")}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input className={cn(fieldClass, "h-9 w-auto")} type="date" value={date} onChange={(event) => setDate(event.currentTarget.value)} />
+              <input className={cn(fieldClass, "h-9 w-auto")} type="time" value={time} onChange={(event) => setTime(event.currentTarget.value)} />
+            </div>
+          </div>
+          <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(180px,1fr)_minmax(180px,1fr)_220px_auto]">
+            <BroadcastCombobox
+              value={sourceKey}
+              placeholder={t("Selecciona una playlist")}
+              searchPlaceholder={t("Buscar por nombre, biblioteca u origen...")}
+              options={sources.map((source) => ({
+                value: source.key,
+                label: source.name,
+                detail: `${source.library_name} · ${source.track_count} ${t("tracks")}`,
+                keywords: `${source.kind} ${source.library_name}`
+              }))}
+              onChange={(value) => {
+                setSourceKey(value);
+                setTrackId("");
+              }}
+            />
+            <BroadcastCombobox
+              value={trackId}
+              disabled={!selectedSource || loadingTracks}
+              placeholder={loadingTracks ? t("Cargando tracks...") : t("Playlist completa")}
+              searchPlaceholder={t("Buscar un track...")}
+              emptyLabel={t("No se encontraron tracks.")}
+              options={[
+                { value: "", label: t("Playlist completa"), detail: selectedSource ? `${selectedSource.track_count} ${t("tracks")}` : undefined },
+                ...sourceTracks.map((track) => ({
+                  value: track.track_id,
+                  label: track.name?.trim() || t("Sin titulo"),
+                  detail: track.artist?.trim() || formatDuration(track.total_time),
+                  keywords: track.artist ?? ""
+                }))
+              ]}
+              onChange={setTrackId}
+            />
+            <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-secondary p-1">
+              <Button size="sm" variant={policy === "soft" ? "default" : "ghost"} onClick={() => setPolicy("soft")}>{t("Al terminar")}</Button>
+              <Button size="sm" variant={policy === "exact" ? "default" : "ghost"} onClick={() => setPolicy("exact")}>{t("Hora exacta")}</Button>
+            </div>
+            <Button disabled={!selectedSource || savingItem} onClick={() => void createItem()}>
+              {savingItem ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              {t("Programar")}
+            </Button>
+          </div>
+        </section>
+
+        <section className="overflow-hidden rounded-md border border-border">
+          <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-secondary/60 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <Calendar className="h-4 w-4" />
+              <strong className="text-sm">{formatScheduleDay(date, locale)}</strong>
+              <span className="text-xs text-muted-foreground">{dayItems.length} {t("bloques")}</span>
+            </div>
+            <span className="text-xs text-muted-foreground">{t("Zona horaria local")}</span>
+          </header>
+          {dayItems.length === 0 ? (
+            <div className="grid min-h-40 place-items-center p-6 text-sm text-muted-foreground">
+              {t("No hay bloques programados para este día.")}
+            </div>
+          ) : (
+            <div className="divide-y divide-border">
+              {dayItems.map((item) => {
+                const overlap = overlapById.get(item.id);
+                const editable = item.status === "pending" || item.id === editableActivatedItemId;
+                return (
+                  <div key={item.id} className="grid grid-cols-[64px_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3">
+                  <time className="font-mono text-sm font-semibold">{formatScheduleClock(item.start_at)}</time>
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <strong className="truncate text-sm">{item.source_name}</strong>
+                      <ScheduleStatus status={item.status} />
+                      <span className={cn(
+                        "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
+                        item.policy === "exact" ? "bg-amber-500/10 text-amber-700 dark:text-amber-300" : "bg-blue-500/10 text-blue-700 dark:text-blue-300"
+                      )}>
+                        {t(item.policy === "exact" ? "Hora exacta" : "Al terminar")}
+                      </span>
+                      {overlap ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600">
+                          {t("Se cruza con el siguiente bloque")}
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button
+                                type="button"
+                                className="grid h-6 w-6 place-items-center rounded-full text-amber-600 transition-colors hover:bg-amber-500/10 hover:text-amber-700"
+                                aria-label={t("Explicar cruce de bloques")}
+                              >
+                                <Info className="h-4 w-4" />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent align="start" className="w-80 max-w-[calc(100vw-2rem)] p-3">
+                              <div className="flex items-start gap-2.5">
+                                <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                                <div className="min-w-0">
+                                  <h4 className="text-sm font-semibold text-foreground">{t("Este bloque excede su ventana")}</h4>
+                                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                                    {overlap.next.policy === "exact"
+                                      ? t("A las {time}, {name} comenzará inmediatamente y cortará la pista que esté sonando.", {
+                                          time: formatScheduleClock(overlap.next.start_at),
+                                          name: overlap.next.source_name
+                                        })
+                                      : t("A las {time}, {name} esperará el final de la pista que esté sonando y luego comenzará.", {
+                                          time: formatScheduleClock(overlap.next.start_at),
+                                          name: overlap.next.source_name
+                                        })}
+                                  </p>
+                                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                                    {t("Las pistas pendientes de este bloque se omitirán y no se retomarán después.")}
+                                  </p>
+                                  <dl className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3 text-center">
+                                    <div>
+                                      <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{t("Ventana")}</dt>
+                                      <dd className="mt-0.5 text-xs font-semibold text-foreground">{formatDuration(overlap.windowSeconds)}</dd>
+                                    </div>
+                                    <div>
+                                      <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{t("Contenido")}</dt>
+                                      <dd className="mt-0.5 text-xs font-semibold text-foreground">{formatDuration(item.duration_seconds)}</dd>
+                                    </div>
+                                    <div>
+                                      <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">{t("Exceso estimado")}</dt>
+                                      <dd className="mt-0.5 text-xs font-semibold text-amber-600">{formatDuration(overlap.overflowSeconds)}</dd>
+                                    </div>
+                                  </dl>
+                                </div>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        </span>
+                      ) : null}
+                    </div>
+                    <span className="mt-1 block truncate text-xs text-muted-foreground">
+                      {item.track_count} {t("tracks")} · {formatDuration(item.duration_seconds)}
+                    </span>
+                    {item.error ? <span className="mt-1 block text-xs text-destructive">{t(item.error)}</span> : null}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={!editable || loadingEditorId === item.id}
+                      title={editable ? t("Editar") : t("Sólo se puede editar el bloque activo actual.")}
+                      onClick={() => void openItemEditor(item.id)}
+                    >
+                      {loadingEditorId === item.id ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <SlidersHorizontal className="h-4 w-4" />}
+                      {t("Editar")}
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      disabled={item.status !== "pending" || deletingItemId === item.id}
+                      aria-label={t("Eliminar")}
+                      onClick={() => void deleteItem(item.id)}
+                    >
+                      {deletingItemId === item.id ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <section className="rounded-md border border-border bg-card p-3">
+          <div className="flex items-start gap-3">
+            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-violet-500/10 text-violet-700 dark:text-violet-300">
+              <Music2 className="h-4 w-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold">{t("Cortina musical")}</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t("Se reproduce en loop cuando la cola queda vacía y baja al abrir el micrófono.")}
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-xs font-medium">
+                  <input type="checkbox" checked={bedEnabled} disabled={running} onChange={(event) => setBedEnabled(event.currentTarget.checked)} />
+                  {t("Activar cortina")}
+                </label>
+              </div>
+              <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(180px,1fr)_minmax(180px,1fr)_130px_auto]">
+                <BroadcastCombobox
+                  value={bedSourceKey}
+                  disabled={running}
+                  placeholder={automation.bed_title ? `${t("Actual")}: ${automation.bed_title}` : t("Selecciona una playlist")}
+                  searchPlaceholder={t("Buscar por nombre, biblioteca u origen...")}
+                  options={sources.map((source) => ({
+                    value: source.key,
+                    label: source.name,
+                    detail: `${source.library_name} · ${source.track_count} ${t("tracks")}`,
+                    keywords: `${source.kind} ${source.library_name}`
+                  }))}
+                  onChange={(value) => {
+                    setBedSourceKey(value);
+                    setBedTrackId("");
+                  }}
+                />
+                <BroadcastCombobox
+                  value={bedTrackId}
+                  disabled={running || (!selectedBedSource && !automation.bed_track_id)}
+                  placeholder={automation.bed_title ?? t("Selecciona un track")}
+                  searchPlaceholder={t("Buscar un track...")}
+                  emptyLabel={t("No se encontraron tracks.")}
+                  options={[
+                    ...(automation.bed_track_id && !bedTracks.some((track) => track.track_id === automation.bed_track_id)
+                      ? [{ value: automation.bed_track_id, label: automation.bed_title ?? t("Cortina actual"), detail: automation.bed_artist ?? undefined }]
+                      : []),
+                    ...bedTracks.map((track) => ({
+                      value: track.track_id,
+                      label: track.name?.trim() || t("Sin titulo"),
+                      detail: track.artist?.trim() || formatDuration(track.total_time),
+                      keywords: track.artist ?? ""
+                    }))
+                  ]}
+                  onChange={setBedTrackId}
+                />
+                <label className="grid gap-1 text-xs font-medium">
+                  {t("Volumen")} · {bedGain}%
+                  <input type="range" min={0} max={100} step={1} value={bedGain} disabled={running} onChange={(event) => setBedGain(event.currentTarget.value)} />
+                </label>
+                <Button variant="secondary" disabled={running || savingBed || (bedEnabled && !bedTrackId && !automation.bed_track_id)} onClick={() => void saveBed()}>
+                  {savingBed ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  {t("Guardar")}
+                </Button>
+              </div>
+              <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                <input type="checkbox" checked={bedDucking} disabled={running} onChange={(event) => setBedDucking(event.currentTarget.checked)} />
+                {t("Bajar automáticamente la cortina cuando el micrófono detecta voz")}
+              </label>
+              {running ? <p className="mt-2 text-xs text-amber-600">{t("Detén el broadcast para cambiar la cortina; el modo programado puede cambiarse al aire.")}</p> : null}
+            </div>
+          </div>
+        </section>
+      </div>
+      {editingItem ? (
+        <ScheduleBlockEditorModal
+          item={editingItem}
+          sources={sources}
+          onClose={() => setEditingItem(null)}
+          onSaved={handleEditedItem}
+          onError={onError}
+        />
+      ) : null}
+    </CardContent>
+  );
+}
+
+function ScheduleBlockEditorModal({
+  item,
+  sources,
+  onClose,
+  onSaved,
+  onError
+}: {
+  item: BroadcastScheduleItem;
+  sources: BroadcastPlaylistSource[];
+  onClose: () => void;
+  onSaved: (item: BroadcastScheduleItem, notice?: string) => void;
+  onError: (message: string | null) => void;
+}) {
+  const { locale, t } = useI18n();
+  const initialStart = new Date(item.start_at);
+  const [date, setDate] = useState(() => localDateInputValue(initialStart));
+  const [time, setTime] = useState(() => localTimeInputValue(initialStart));
+  const [policy, setPolicy] = useState<"soft" | "exact">(item.policy === "exact" ? "exact" : "soft");
+  const [tracks, setTracks] = useState(item.tracks);
+  const [sourceKey, setSourceKey] = useState("");
+  const [sourceTracks, setSourceTracks] = useState<BroadcastSourceTrack[]>([]);
+  const [trackId, setTrackId] = useState("");
+  const [loadingTracks, setLoadingTracks] = useState(false);
+  const [busy, setBusy] = useState("");
+  const [draggedTrackId, setDraggedTrackId] = useState("");
+  const [modalError, setModalError] = useState<string | null>(null);
+  const liveEditing = item.status === "activated";
+  const selectedSource = sources.find((source) => source.key === sourceKey) ?? null;
+  const totalDuration = tracks.reduce((total, track) => total + (track.duration_seconds ?? 0), 0);
+
+  function reportError(message: string | null) {
+    setModalError(message);
+    onError(message);
+  }
+
+  useEffect(() => {
+    if (!selectedSource) {
+      setSourceTracks([]);
+      setTrackId("");
+      return;
+    }
+    let disposed = false;
+    setLoadingTracks(true);
+    void loadBroadcastSourceTracks(selectedSource)
+      .then((nextTracks) => {
+        if (!disposed) setSourceTracks(nextTracks.filter((track) => track.source_exists && track.source_path));
+      })
+      .catch((cause) => !disposed && reportError(errorMessage(cause, locale)))
+      .finally(() => !disposed && setLoadingTracks(false));
+    return () => { disposed = true; };
+  }, [locale, selectedSource?.key]);
+
+  useEffect(() => {
+    if (!liveEditing) return;
+    let disposed = false;
+    const refreshPendingTracks = () => {
+      void invoke<BroadcastScheduleItem>("broadcast_schedule_item", { itemId: item.id })
+        .then((saved) => {
+          if (!disposed) setTracks(saved.tracks);
+        })
+        .catch(() => undefined);
+    };
+    const timer = window.setInterval(refreshPendingTracks, 2000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [item.id, liveEditing]);
+
+  async function saveSchedule() {
+    const startsAt = new Date(`${date}T${time}:00`);
+    if (Number.isNaN(startsAt.getTime())) {
+      reportError(t("La fecha y hora programadas no son válidas."));
+      return;
+    }
+    setBusy("schedule");
+    reportError(null);
+    try {
+      const saved = await invoke<BroadcastScheduleItem>("broadcast_update_schedule_item", {
+        itemId: item.id,
+        schedule: { startAt: startsAt.toISOString(), policy }
+      });
+      setTracks(saved.tracks);
+      await onSaved(saved, t("Horario del bloque actualizado."));
+    } catch (cause) {
+      reportError(errorMessage(cause, locale));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function appendContent() {
+    if (!selectedSource) return;
+    setBusy("append");
+    reportError(null);
+    try {
+      const saved = await invoke<BroadcastScheduleItem>("broadcast_append_schedule_content", {
+        itemId: item.id,
+        content: {
+          sourceKind: trackId ? "track" : selectedSource.kind === "local" ? "draft" : "playlist",
+          libraryId: selectedSource.library_id,
+          sourceId: trackId || selectedSource.id
+        }
+      });
+      setTracks(saved.tracks);
+      setTrackId("");
+      await onSaved(saved, t("Contenido agregado al bloque."));
+    } catch (cause) {
+      reportError(errorMessage(cause, locale));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function persistTrackOrder(nextTracks: BroadcastScheduleTrack[]) {
+    setTracks(nextTracks);
+    setBusy("order");
+    reportError(null);
+    try {
+      const saved = await invoke<BroadcastScheduleItem>("broadcast_reorder_schedule_tracks", {
+        itemId: item.id,
+        trackIds: nextTracks.map((track) => track.id)
+      });
+      setTracks(saved.tracks);
+      await onSaved(saved, t("Orden de pistas actualizado."));
+    } catch (cause) {
+      setTracks(tracks);
+      reportError(errorMessage(cause, locale));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function moveTrack(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= tracks.length) return;
+    const nextTracks = [...tracks];
+    [nextTracks[index], nextTracks[target]] = [nextTracks[target], nextTracks[index]];
+    await persistTrackOrder(nextTracks);
+  }
+
+  async function dropTrack(targetId: string) {
+    if (!draggedTrackId || draggedTrackId === targetId) return;
+    const nextTracks = [...tracks];
+    const sourceIndex = nextTracks.findIndex((track) => track.id === draggedTrackId);
+    const targetIndex = nextTracks.findIndex((track) => track.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const [moved] = nextTracks.splice(sourceIndex, 1);
+    const adjustedTargetIndex = nextTracks.findIndex((track) => track.id === targetId);
+    nextTracks.splice(adjustedTargetIndex, 0, moved);
+    setDraggedTrackId("");
+    await persistTrackOrder(nextTracks);
+  }
+
+  async function removeTrack(track: BroadcastScheduleTrack) {
+    setBusy(`remove:${track.id}`);
+    reportError(null);
+    try {
+      const saved = await invoke<BroadcastScheduleItem>("broadcast_remove_schedule_track", {
+        itemId: item.id,
+        trackId: track.id
+      });
+      setTracks(saved.tracks);
+      await onSaved(saved, t("Pista quitada del bloque."));
+    } catch (cause) {
+      reportError(errorMessage(cause, locale));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] grid place-items-center bg-black/70 p-3 backdrop-blur-sm"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="schedule-block-editor-title"
+        className="flex max-h-[min(860px,calc(100vh-1.5rem))] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
+      >
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h2 id="schedule-block-editor-title" className="truncate text-base font-semibold">
+              {t(liveEditing ? "Editar bloque en vivo" : "Editar bloque de parrilla")}
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {tracks.length} {t(liveEditing ? "tracks pendientes" : "tracks")} · {formatDuration(totalDuration)} · {item.source_name}
+            </p>
+          </div>
+          <Button size="sm" variant="ghost" onClick={onClose}>{t("Cerrar")}</Button>
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
+          <div className="grid gap-4">
+            {modalError ? (
+              <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {modalError}
+              </div>
+            ) : null}
+            {liveEditing ? (
+              <div className="flex items-start gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm">
+                <Radio className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                <div>
+                  <strong className="text-foreground">{t("Edición en vivo")}</strong>
+                  <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                    {t("Sólo se muestran las pistas que aún no comenzaron. Puedes reordenarlas, quitarlas o agregar más contenido; la pista al aire no será interrumpida.")}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+            <section className="rounded-lg border border-border bg-secondary/30 p-3">
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="grid gap-1 text-xs font-semibold">
+                  {t("Fecha")}
+                  <input className={cn(fieldClass, "h-9 w-auto")} type="date" value={date} disabled={liveEditing} onChange={(event) => setDate(event.currentTarget.value)} />
+                </label>
+                <label className="grid gap-1 text-xs font-semibold">
+                  {t("Hora")}
+                  <input className={cn(fieldClass, "h-9 w-auto")} type="time" value={time} disabled={liveEditing} onChange={(event) => setTime(event.currentTarget.value)} />
+                </label>
+                <div className="grid h-9 grid-cols-2 gap-1 rounded-md border border-border bg-secondary p-1">
+                  <Button size="sm" disabled={liveEditing} variant={policy === "soft" ? "default" : "ghost"} onClick={() => setPolicy("soft")}>{t("Al terminar")}</Button>
+                  <Button size="sm" disabled={liveEditing} variant={policy === "exact" ? "default" : "ghost"} onClick={() => setPolicy("exact")}>{t("Hora exacta")}</Button>
+                </div>
+                {liveEditing ? (
+                  <span className="ml-auto rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-muted-foreground">
+                    {t("El horario ya comenzó")}
+                  </span>
+                ) : (
+                  <Button className="ml-auto" disabled={Boolean(busy)} onClick={() => void saveSchedule()}>
+                    {busy === "schedule" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                    {t("Guardar horario")}
+                  </Button>
+                )}
+              </div>
+            </section>
+
+            <section className="overflow-hidden rounded-lg border border-border">
+              <header className="flex items-center justify-between gap-3 border-b border-border bg-secondary/60 px-3 py-2">
+                <div>
+                  <h3 className="text-sm font-semibold">{t(liveEditing ? "Próximas pistas" : "Orden de pistas")}</h3>
+                  <p className="text-xs text-muted-foreground">
+                    {t(liveEditing ? "Los cambios se aplican directamente a la cola al aire." : "Las pistas se emitirán de arriba hacia abajo.")}
+                  </p>
+                </div>
+                {busy === "order" ? <LoaderCircle className="h-4 w-4 animate-spin text-muted-foreground" /> : null}
+              </header>
+              <div className="max-h-[360px] divide-y divide-border overflow-y-auto overscroll-contain">
+                {tracks.length === 0 ? (
+                  <div className="grid min-h-24 place-items-center px-4 py-6 text-center text-sm text-muted-foreground">
+                    {t(liveEditing ? "No quedan pistas pendientes. Puedes agregar más contenido abajo." : "El bloque no tiene pistas.")}
+                  </div>
+                ) : tracks.map((track, index) => (
+                  <div
+                    key={track.id}
+                    className={cn(
+                      "grid grid-cols-[48px_minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 transition-colors",
+                      draggedTrackId && draggedTrackId !== track.id && "hover:bg-accent/60"
+                    )}
+                    onDragOver={(event) => {
+                      if (!draggedTrackId || busy) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      void dropTrack(track.id);
+                    }}
+                  >
+                    <button
+                      type="button"
+                      draggable={!busy}
+                      className="flex cursor-grab items-center gap-1 rounded px-1 py-2 font-mono text-xs text-muted-foreground hover:bg-accent hover:text-foreground active:cursor-grabbing"
+                      aria-label={t("Arrastrar para reordenar")}
+                      onDragStart={(event) => {
+                        setDraggedTrackId(track.id);
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", track.id);
+                      }}
+                      onDragEnd={() => setDraggedTrackId("")}
+                    >
+                      <GripVertical className="h-3.5 w-3.5" />
+                      {String(index + 1).padStart(2, "0")}
+                    </button>
+                    <div className="min-w-0">
+                      <strong className="block truncate text-sm">{track.title}</strong>
+                      <span className="block truncate text-xs text-muted-foreground">
+                        {track.artist?.trim() || t("Sin artista")} · {formatDuration(track.duration_seconds)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-0.5">
+                      <Button size="icon" variant="ghost" disabled={Boolean(busy) || index === 0} aria-label={t("Mover hacia arriba")} onClick={() => void moveTrack(index, -1)}>
+                        <ArrowUp className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button size="icon" variant="ghost" disabled={Boolean(busy) || index === tracks.length - 1} aria-label={t("Mover hacia abajo")} onClick={() => void moveTrack(index, 1)}>
+                        <ArrowDown className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button size="icon" variant="ghost" disabled={Boolean(busy) || (!liveEditing && tracks.length <= 1)} aria-label={t("Quitar del bloque")} onClick={() => void removeTrack(track)}>
+                        {busy === `remove:${track.id}` ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-secondary/30 p-3">
+              <div>
+                <h3 className="text-sm font-semibold">{t("Agregar contenido")}</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t(liveEditing ? "Lo nuevo se agregará al final de la cola activa." : "Anexa una playlist completa o una pista al final del bloque.")}
+                </p>
+              </div>
+              <div className="mt-3 grid gap-2 md:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto]">
+                <BroadcastCombobox
+                  value={sourceKey}
+                  placeholder={t("Selecciona una playlist")}
+                  searchPlaceholder={t("Buscar por nombre, biblioteca u origen...")}
+                  options={sources.map((source) => ({
+                    value: source.key,
+                    label: source.name,
+                    detail: `${source.library_name} · ${source.track_count} ${t("tracks")}`,
+                    keywords: `${source.kind} ${source.library_name}`
+                  }))}
+                  onChange={(value) => {
+                    setSourceKey(value);
+                    setTrackId("");
+                  }}
+                />
+                <BroadcastCombobox
+                  value={trackId}
+                  disabled={!selectedSource || loadingTracks}
+                  placeholder={loadingTracks ? t("Cargando tracks...") : t("Playlist completa")}
+                  searchPlaceholder={t("Buscar un track...")}
+                  emptyLabel={t("No se encontraron tracks.")}
+                  options={[
+                    { value: "", label: t("Playlist completa"), detail: selectedSource ? `${selectedSource.track_count} ${t("tracks")}` : undefined },
+                    ...sourceTracks.map((track) => ({
+                      value: track.track_id,
+                      label: track.name?.trim() || t("Sin titulo"),
+                      detail: track.artist?.trim() || formatDuration(track.total_time),
+                      keywords: track.artist ?? ""
+                    }))
+                  ]}
+                  onChange={setTrackId}
+                />
+                <Button disabled={!selectedSource || Boolean(busy)} onClick={() => void appendContent()}>
+                  {busy === "append" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                  {trackId ? t("Agregar pista") : t("Agregar playlist")}
+                </Button>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+async function loadBroadcastSourceTracks(source: BroadcastPlaylistSource): Promise<BroadcastSourceTrack[]> {
+  return source.kind === "local"
+    ? invoke<BroadcastSourceTrack[]>("playlist_index_draft_tracks", { draftId: source.id })
+    : invoke<BroadcastSourceTrack[]>("playlist_index_playlist_tracks", {
+        libraryId: source.library_id,
+        playlistPath: source.id
+      });
+}
+
+function localDateInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function localTimeInputValue(date: Date) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function nextScheduleTime() {
+  const date = new Date(Date.now() + 15 * 60 * 1000);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function formatScheduleClock(startAt: string) {
+  return new Date(startAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatScheduleDay(value: string, locale: string) {
+  const date = new Date(`${value}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(locale === "en" ? "en-US" : "es-CL", {
+    weekday: "long",
+    day: "numeric",
+    month: "long"
+  });
+}
+
+type ScheduleOverlap = {
+  next: BroadcastScheduleItem;
+  windowSeconds: number;
+  overflowSeconds: number;
+};
+
+function scheduleOverlapInfo(items: BroadcastScheduleItem[]) {
+  const pending = items.filter((item) => item.status === "pending").sort((left, right) => left.start_at.localeCompare(right.start_at));
+  const overlaps = new Map<string, ScheduleOverlap>();
+  for (let index = 0; index < pending.length - 1; index += 1) {
+    const item = pending[index];
+    const next = pending[index + 1];
+    if (!item.duration_seconds) continue;
+    const windowSeconds = Math.max(
+      0,
+      Math.floor((new Date(next.start_at).getTime() - new Date(item.start_at).getTime()) / 1000)
+    );
+    const overflowSeconds = item.duration_seconds - windowSeconds;
+    if (overflowSeconds > 0) {
+      overlaps.set(item.id, { next, windowSeconds, overflowSeconds });
+    }
+  }
+  return overlaps;
+}
+
+function ScheduleStatus({ status }: { status: string }) {
+  const { t } = useI18n();
+  const style = status === "pending"
+    ? "bg-blue-500/10 text-blue-700 dark:text-blue-300"
+    : status === "activated"
+      ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      : status === "failed"
+        ? "bg-red-500/10 text-red-700 dark:text-red-300"
+        : "bg-muted text-muted-foreground";
+  const label = status === "pending" ? "Pendiente" : status === "activated" ? "Activado" : status === "failed" ? "Fallido" : "Omitido";
+  return <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase", style)}>{t(label)}</span>;
+}
+
+function BroadcastCombobox({
+  value,
+  options,
+  placeholder,
+  searchPlaceholder,
+  emptyLabel,
+  disabled = false,
+  onChange
+}: {
+  value: string;
+  options: Array<{ value: string; label: string; detail?: string; keywords?: string }>;
+  placeholder: string;
+  searchPlaceholder: string;
+  emptyLabel?: string;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const selected = options.find((option) => option.value === value) ?? null;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="secondary"
+          role="combobox"
+          aria-expanded={open}
+          disabled={disabled}
+          className="h-10 w-full min-w-0 justify-between overflow-hidden border border-input bg-background px-3 font-normal hover:bg-accent"
+        >
+          {selected ? (
+            <span className="min-w-0 flex-1 truncate text-left">
+              <span className="font-medium">{selected.label}</span>
+              {selected.detail ? <span className="text-muted-foreground"> · {selected.detail}</span> : null}
+            </span>
+          ) : <span className="truncate text-muted-foreground">{placeholder}</span>}
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 text-muted-foreground" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="z-[120] w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-2rem)] p-0">
+        <Command>
+          <CommandInput placeholder={searchPlaceholder} />
+          <CommandList className="max-h-64 overscroll-contain">
+            <CommandEmpty>{emptyLabel ?? t("No se encontraron opciones.")}</CommandEmpty>
+            {options.map((option) => (
+              <CommandItem
+                key={`${option.value}:${option.label}`}
+                value={`${option.value || "all"} ${option.label} ${option.detail ?? ""} ${option.keywords ?? ""}`}
+                onSelect={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+              >
+                <Check className={cn("mr-2 h-4 w-4 shrink-0", option.value === value ? "opacity-100" : "opacity-0")} />
+                <span className="min-w-0 flex-1">
+                  <strong className="block truncate font-medium">{option.label}</strong>
+                  {option.detail ? <span className="block truncate text-xs text-muted-foreground">{option.detail}</span> : null}
+                </span>
+              </CommandItem>
+            ))}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -2937,6 +4490,67 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return <label className="grid gap-1.5 text-xs font-medium text-muted-foreground"><span>{label}</span>{children}</label>;
 }
 
+function BroadcastControlAction({
+  label,
+  description,
+  icon,
+  variant = "secondary",
+  disabled = false,
+  onClick
+}: {
+  label: string;
+  description: string;
+  icon: ReactNode;
+  variant?: ButtonProps["variant"];
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover open={open}>
+      <PopoverTrigger asChild>
+        <span
+          className="inline-flex"
+          onMouseEnter={() => setOpen(true)}
+          onMouseLeave={() => setOpen(false)}
+          onFocusCapture={() => setOpen(true)}
+          onBlurCapture={() => setOpen(false)}
+        >
+          <Button
+            type="button"
+            size="icon"
+            variant={variant}
+            disabled={disabled}
+            aria-label={label}
+            className="h-9 w-9"
+            onClick={() => {
+              setOpen(false);
+              onClick();
+            }}
+          >
+            {icon}
+          </Button>
+        </span>
+      </PopoverTrigger>
+      <PopoverContent
+        side="bottom"
+        align="center"
+        sideOffset={7}
+        className="w-64 p-3"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
+        <div className="flex items-start gap-2.5">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0">
+            <strong className="block text-sm">{label}</strong>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function Metric({ label, value, icon, danger = false }: { label: string; value: string; icon: React.ReactNode; danger?: boolean }) {
   return (
     <Card className={cn("p-3", danger && "border-destructive/35")}>
@@ -2963,7 +4577,7 @@ function StatusBadge({ status, label }: { status: string; label: string }) {
 }
 
 function QueueStatus({ status }: { status: string }) {
-  const labels: Record<string, string> = { queued: "cola", playing: "aire", played: "lista", skipped: "saltada", failed: "falló" };
+  const labels: Record<string, string> = { queued: "cola", playing: "aire", played: "reproducida", skipped: "saltada", failed: "falló" };
   return (
     <span className={cn(
       "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",

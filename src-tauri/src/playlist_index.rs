@@ -34,6 +34,8 @@ const TRACK_COVER_CACHE_VERSION: &str = "v2";
 const TRACK_COVER_FILTER: &str =
     "scale=256:256:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear";
 const LOCAL_CONVERSION_LIBRARY_ID: &str = "rau-studio-file-conversion";
+const UNIFIED_REKORDBOX_LIBRARY_ID: &str = "rau-studio-rekordbox-library";
+const UNIFIED_REKORDBOX_SOURCE_PATH: &str = "rau-studio://rekordbox-library";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaylistIndexLibrary {
@@ -282,11 +284,23 @@ pub struct TaxonomyGraphEdge {
 pub struct PlaylistDraft {
     id: String,
     library_id: String,
+    library_name: String,
     name: String,
     description: Option<String>,
     track_count: usize,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistTarget {
+    id: String,
+    target_kind: String,
+    library_id: String,
+    library_name: String,
+    playlist_path: Option<String>,
+    name: String,
+    track_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -698,21 +712,17 @@ pub fn playlist_index_import_xml(
     let playlist_paths_by_track = playlist_paths_by_track(&all_playlists);
     let now = timestamp();
     let mut conn = open_db(&app)?;
-    let existing_id = conn
-        .query_row(
-            "SELECT id FROM playlist_index_libraries WHERE source_path = ?1",
-            params![source_path.to_string_lossy().as_ref()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| format!("No se pudo leer libreria indexada: {error}"))?;
-    let library_id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let library_id = UNIFIED_REKORDBOX_LIBRARY_ID.to_string();
+    let source_key = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.clone())
+        .to_string_lossy()
+        .into_owned();
     let source_name = source_path
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("rekordbox.xml")
         .to_string();
-    let playlist_count = playlists.len();
     let product_name = rekordbox_library
         .product
         .as_ref()
@@ -747,66 +757,101 @@ pub fn playlist_index_import_xml(
             "INSERT INTO playlist_index_libraries (
                 id, source_path, source_name, product_name, product_version,
                 track_count, playlist_count, indexed_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-             ON CONFLICT(source_path) DO UPDATE SET
+             ) VALUES (?1, ?2, 'Colección unificada', ?3, ?4, 0, 0, ?5, ?5)
+             ON CONFLICT(id) DO UPDATE SET
                 source_name = excluded.source_name,
                 product_name = excluded.product_name,
                 product_version = excluded.product_version,
-                track_count = excluded.track_count,
-                playlist_count = excluded.playlist_count,
                 updated_at = excluded.updated_at",
             params![
                 &library_id,
-                source_path.to_string_lossy().as_ref(),
-                &source_name,
+                UNIFIED_REKORDBOX_SOURCE_PATH,
                 &product_name,
                 &product_version,
-                indexed_track_ids.len() as i64,
-                playlist_count as i64,
                 &now
             ],
         )
         .map_err(|error| format!("No se pudo guardar libreria indexada: {error}"))?;
+        tx.execute(
+            "INSERT INTO playlist_index_sources (
+                library_id, source_path, source_name, product_name, product_version,
+                indexed_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(library_id, source_path) DO UPDATE SET
+                source_name = excluded.source_name,
+                product_name = excluded.product_name,
+                product_version = excluded.product_version,
+                updated_at = excluded.updated_at",
+            params![
+                &library_id,
+                &source_key,
+                &source_name,
+                &product_name,
+                &product_version,
+                &now
+            ],
+        )
+        .map_err(|error| format!("No se pudo guardar la fuente XML: {error}"))?;
+
         if selected_mode {
             for playlist in &playlists {
                 tx.execute(
-                    "DELETE FROM playlist_index_memberships WHERE library_id = ?1 AND playlist_path = ?2",
-                    params![&library_id, &playlist.path],
-                )
-                .map_err(|error| format!("No se pudieron limpiar memberships de {}: {error}", playlist.path))?;
-                tx.execute(
-                    "DELETE FROM playlist_index_playlists WHERE library_id = ?1 AND path = ?2",
-                    params![&library_id, &playlist.path],
+                    "DELETE FROM playlist_index_source_playlists
+                     WHERE library_id = ?1 AND source_path = ?2 AND path = ?3",
+                    params![&library_id, &source_key, &playlist.path],
                 )
                 .map_err(|error| {
-                    format!("No se pudo limpiar playlist {}: {error}", playlist.path)
+                    format!("No se pudo actualizar playlist {}: {error}", playlist.path)
                 })?;
             }
         } else {
             tx.execute(
-                "DELETE FROM playlist_index_memberships WHERE library_id = ?1",
-                params![&library_id],
+                "DELETE FROM playlist_index_source_playlists
+                 WHERE library_id = ?1 AND source_path = ?2",
+                params![&library_id, &source_key],
             )
-            .map_err(|error| format!("No se pudieron limpiar memberships: {error}"))?;
+            .map_err(|error| {
+                format!("No se pudieron actualizar playlists de la fuente: {error}")
+            })?;
             tx.execute(
-                "DELETE FROM playlist_index_playlists WHERE library_id = ?1",
-                params![&library_id],
+                "DELETE FROM playlist_index_source_tracks
+                 WHERE library_id = ?1 AND source_path = ?2",
+                params![&library_id, &source_key],
             )
-            .map_err(|error| format!("No se pudieron limpiar playlists indexadas: {error}"))?;
-            tx.execute(
-                "DELETE FROM playlist_track_embeddings WHERE library_id = ?1",
-                params![&library_id],
-            )
-            .map_err(|error| format!("No se pudieron limpiar embeddings de tracks: {error}"))?;
-            tx.execute(
-                "DELETE FROM playlist_index_tracks WHERE library_id = ?1",
-                params![&library_id],
-            )
-            .map_err(|error| format!("No se pudieron limpiar tracks indexados: {error}"))?;
+            .map_err(|error| format!("No se pudieron actualizar tracks de la fuente: {error}"))?;
         }
 
+        let mut unified_track_ids = HashMap::new();
+        let mut unified_playlist_paths_by_track = playlist_paths_by_track.clone();
         for (index, track) in indexed_tracks.iter().enumerate() {
-            insert_track(&tx, &library_id, track, &playlist_paths_by_track, &now)?;
+            let unified_track_id = unified_track_id(track);
+            if let Some(paths) = playlist_paths_by_track.get(&track.track_id) {
+                unified_playlist_paths_by_track.insert(unified_track_id.clone(), paths.clone());
+            }
+            let mut unified_track = (*track).clone();
+            unified_track.track_id = unified_track_id.clone();
+            insert_track(
+                &tx,
+                &library_id,
+                &unified_track,
+                &unified_playlist_paths_by_track,
+                &now,
+            )?;
+            tx.execute(
+                "INSERT INTO playlist_index_source_tracks (
+                    library_id, source_path, source_track_id, track_id
+                 ) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(library_id, source_path, source_track_id) DO UPDATE SET
+                    track_id = excluded.track_id",
+                params![&library_id, &source_key, &track.track_id, &unified_track_id],
+            )
+            .map_err(|error| {
+                format!(
+                    "No se pudo vincular track {} con su fuente: {error}",
+                    track.track_id
+                )
+            })?;
+            unified_track_ids.insert(track.track_id.clone(), unified_track_id);
             processed_work += 1;
 
             if should_emit_index_progress(index + 1, indexed_tracks.len()) {
@@ -831,31 +876,42 @@ pub fn playlist_index_import_xml(
                 total_work,
             );
             tx.execute(
-                "INSERT INTO playlist_index_playlists (
-                    library_id, path, name, node_type, track_count, position, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                "INSERT INTO playlist_index_source_playlists (
+                    library_id, source_path, path, name, node_type, position
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(library_id, source_path, path) DO UPDATE SET
+                    name = excluded.name,
+                    node_type = excluded.node_type,
+                    position = excluded.position",
                 params![
                     &library_id,
+                    &source_key,
                     &playlist.path,
                     &playlist.name,
                     &playlist.node_type,
-                    playlist.track_count as i64,
                     position as i64,
-                    &now
                 ],
             )
             .map_err(|error| format!("No se pudo guardar playlist {}: {error}", playlist.path))?;
 
-            for (track_position, track_id) in playlist.track_keys.iter().enumerate() {
-                if !indexed_track_ids.contains(track_id) {
+            for (track_position, source_track_id) in playlist.track_keys.iter().enumerate() {
+                let Some(track_id) = unified_track_ids.get(source_track_id) else {
                     continue;
-                }
+                };
 
                 tx.execute(
-                    "INSERT INTO playlist_index_memberships (
-                        library_id, playlist_path, track_id, position
-                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![&library_id, &playlist.path, track_id, track_position as i64],
+                    "INSERT INTO playlist_index_source_memberships (
+                        library_id, source_path, playlist_path, track_id, position
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(library_id, source_path, playlist_path, track_id) DO UPDATE SET
+                        position = MIN(position, excluded.position)",
+                    params![
+                        &library_id,
+                        &source_key,
+                        &playlist.path,
+                        track_id,
+                        track_position as i64
+                    ],
                 )
                 .map_err(|error| {
                     format!(
@@ -886,19 +942,7 @@ pub fn playlist_index_import_xml(
             }
         }
 
-        tx.execute(
-            "UPDATE playlist_index_libraries
-             SET track_count = (
-                   SELECT COUNT(*) FROM playlist_index_tracks WHERE library_id = ?1
-                 ),
-                 playlist_count = (
-                   SELECT COUNT(*) FROM playlist_index_playlists WHERE library_id = ?1 AND node_type = '1'
-                 ),
-                 updated_at = ?2
-             WHERE id = ?1",
-            params![&library_id, &now],
-        )
-        .map_err(|error| format!("No se pudieron actualizar contadores de libreria: {error}"))?;
+        rebuild_unified_playlist_index(&tx, &now)?;
 
         tx.commit()
             .map_err(|error| format!("No se pudo confirmar indice SQLite: {error}"))?;
@@ -993,6 +1037,24 @@ pub fn playlist_index_delete_playlists(
         let mut affected_track_ids = BTreeSet::new();
 
         for playlist_path in &paths {
+            tx.execute(
+                "DELETE FROM playlist_index_playlist_additions
+                 WHERE library_id = ?1 AND playlist_path = ?2",
+                params![&library_id, playlist_path],
+            )
+            .map_err(|error| {
+                format!("No se pudieron limpiar adiciones de {playlist_path}: {error}")
+            })?;
+            if library_id == UNIFIED_REKORDBOX_LIBRARY_ID {
+                tx.execute(
+                    "DELETE FROM playlist_index_source_playlists
+                     WHERE library_id = ?1 AND path = ?2",
+                    params![&library_id, playlist_path],
+                )
+                .map_err(|error| {
+                    format!("No se pudo quitar {playlist_path} de las fuentes XML: {error}")
+                })?;
+            }
             {
                 let mut stmt = tx
                     .prepare(
@@ -1570,6 +1632,12 @@ pub fn playlist_index_drafts(
 }
 
 #[tauri::command]
+pub fn playlist_index_playlist_targets(app: AppHandle) -> Result<Vec<PlaylistTarget>, String> {
+    let conn = open_db(&app)?;
+    list_playlist_targets(&conn)
+}
+
+#[tauri::command]
 pub fn playlist_index_create_draft(
     app: AppHandle,
     library_id: String,
@@ -1601,11 +1669,18 @@ pub fn playlist_index_create_draft(
 pub fn playlist_index_add_tracks_to_draft(
     app: AppHandle,
     draft_id: String,
+    source_library_id: Option<String>,
     track_ids: Vec<String>,
 ) -> Result<Vec<PlaylistIndexTrack>, String> {
     let mut conn = open_db(&app)?;
     let draft = get_draft(&conn, &draft_id)?
         .ok_or_else(|| format!("Playlist draft no encontrada: {draft_id}"))?;
+    let source_library_id = source_library_id.unwrap_or_else(|| draft.library_id.clone());
+    if get_library(&conn, &source_library_id)?.is_none() {
+        return Err(format!(
+            "Libreria de origen no encontrada: {source_library_id}"
+        ));
+    }
     let mut seen = BTreeSet::new();
     let unique_track_ids = track_ids
         .into_iter()
@@ -1625,19 +1700,17 @@ pub fn playlist_index_add_tracks_to_draft(
             )
             .map_err(|error| format!("No se pudo leer posicion de draft: {error}"))?;
 
-        for track_id in unique_track_ids {
-            let exists = tx
-                .query_row(
-                    "SELECT 1 FROM playlist_index_tracks WHERE library_id = ?1 AND track_id = ?2",
-                    params![&draft.library_id, &track_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(|error| format!("No se pudo validar track {track_id}: {error}"))?
-                .is_some();
-            if !exists {
+        for source_track_id in unique_track_ids {
+            let Some(track_id) = copy_track_to_library(
+                &tx,
+                &source_library_id,
+                &source_track_id,
+                &draft.library_id,
+                &now,
+            )?
+            else {
                 continue;
-            }
+            };
 
             let already_added = tx
                 .query_row(
@@ -1671,7 +1744,40 @@ pub fn playlist_index_add_tracks_to_draft(
             .map_err(|error| format!("No se pudo confirmar playlist draft: {error}"))?;
     }
 
+    rebuild_fts(&conn)?;
     draft_tracks(&conn, &draft_id)
+}
+
+#[tauri::command]
+pub fn playlist_index_add_tracks_to_target(
+    app: AppHandle,
+    target_id: String,
+    source_library_id: String,
+    track_ids: Vec<String>,
+) -> Result<Vec<PlaylistIndexTrack>, String> {
+    let conn = open_db(&app)?;
+    if get_draft(&conn, &target_id)?.is_some() {
+        drop(conn);
+        return playlist_index_add_tracks_to_draft(
+            app,
+            target_id,
+            Some(source_library_id),
+            track_ids,
+        );
+    }
+    let target = find_indexed_playlist_target(&conn, &target_id)?
+        .ok_or_else(|| format!("Playlist destino no encontrada: {target_id}"))?;
+    drop(conn);
+    add_tracks_to_indexed_playlist(
+        &app,
+        &target.library_id,
+        target
+            .playlist_path
+            .as_deref()
+            .ok_or_else(|| "Playlist indexada sin ruta.".to_string())?,
+        &source_library_id,
+        track_ids,
+    )
 }
 
 #[tauri::command]
@@ -1730,13 +1836,32 @@ pub fn playlist_index_export_draft_xml(
         return Err("La playlist draft no tiene tracks para exportar.".to_string());
     }
 
-    let xml = if library.id == LOCAL_CONVERSION_LIBRARY_ID {
+    let mut generated_library = matches!(
+        library.id.as_str(),
+        LOCAL_CONVERSION_LIBRARY_ID | UNIFIED_REKORDBOX_LIBRARY_ID
+    );
+    if !generated_library {
+        generated_library = match parse_rekordbox_xml_file(&library.source_path) {
+            Ok(source_library) => {
+                let source_track_ids = source_library
+                    .tracks
+                    .into_iter()
+                    .map(|track| track.track_id)
+                    .collect::<BTreeSet<_>>();
+                tracks
+                    .iter()
+                    .any(|track| !source_track_ids.contains(&track.track_id))
+            }
+            Err(_) => true,
+        };
+    }
+    let xml = if generated_library {
         local_library_rekordbox_xml(&conn, &library.id)?
     } else {
         fs::read_to_string(&library.source_path)
             .map_err(|error| format!("No se pudo leer XML original: {error}"))?
     };
-    let local_rekordbox_ids = if library.id == LOCAL_CONVERSION_LIBRARY_ID {
+    let local_rekordbox_ids = if generated_library {
         Some(local_rekordbox_track_ids(&conn, &library.id)?)
     } else {
         None
@@ -2119,6 +2244,72 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_playlist_index_memberships_track
           ON playlist_index_memberships(library_id, track_id);
 
+        CREATE TABLE IF NOT EXISTS playlist_index_playlist_additions (
+          library_id TEXT NOT NULL,
+          playlist_path TEXT NOT NULL,
+          track_id TEXT NOT NULL,
+          position INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(library_id, playlist_path, track_id),
+          FOREIGN KEY(library_id, track_id)
+            REFERENCES playlist_index_tracks(library_id, track_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_index_playlist_additions_playlist
+          ON playlist_index_playlist_additions(library_id, playlist_path, position);
+
+        CREATE TABLE IF NOT EXISTS playlist_index_sources (
+          library_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          source_name TEXT NOT NULL,
+          product_name TEXT,
+          product_version TEXT,
+          indexed_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(library_id, source_path),
+          FOREIGN KEY(library_id) REFERENCES playlist_index_libraries(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS playlist_index_source_tracks (
+          library_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          source_track_id TEXT NOT NULL,
+          track_id TEXT NOT NULL,
+          PRIMARY KEY(library_id, source_path, source_track_id),
+          FOREIGN KEY(library_id, source_path)
+            REFERENCES playlist_index_sources(library_id, source_path) ON DELETE CASCADE,
+          FOREIGN KEY(library_id, track_id)
+            REFERENCES playlist_index_tracks(library_id, track_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_index_source_tracks_track
+          ON playlist_index_source_tracks(library_id, track_id);
+
+        CREATE TABLE IF NOT EXISTS playlist_index_source_playlists (
+          library_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          path TEXT NOT NULL,
+          name TEXT NOT NULL,
+          node_type TEXT,
+          position INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(library_id, source_path, path),
+          FOREIGN KEY(library_id, source_path)
+            REFERENCES playlist_index_sources(library_id, source_path) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS playlist_index_source_memberships (
+          library_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          playlist_path TEXT NOT NULL,
+          track_id TEXT NOT NULL,
+          position INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(library_id, source_path, playlist_path, track_id),
+          FOREIGN KEY(library_id, source_path, playlist_path)
+            REFERENCES playlist_index_source_playlists(library_id, source_path, path) ON DELETE CASCADE,
+          FOREIGN KEY(library_id, track_id)
+            REFERENCES playlist_index_tracks(library_id, track_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_index_source_memberships_track
+          ON playlist_index_source_memberships(library_id, track_id);
+
         CREATE TABLE IF NOT EXISTS playlist_track_embeddings (
           library_id TEXT NOT NULL,
           track_id TEXT NOT NULL,
@@ -2468,6 +2659,378 @@ fn insert_track(
         ],
     )
     .map_err(|error| format!("No se pudo guardar track {}: {error}", track.track_id))?;
+
+    Ok(())
+}
+
+fn copy_track_to_library(
+    conn: &Connection,
+    source_library_id: &str,
+    source_track_id: &str,
+    target_library_id: &str,
+    now: &str,
+) -> Result<Option<String>, String> {
+    let source_path = conn
+        .query_row(
+            "SELECT source_path
+             FROM playlist_index_tracks
+             WHERE library_id = ?1 AND track_id = ?2",
+            params![source_library_id, source_track_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo leer track de origen {source_track_id}: {error}"))?;
+    let Some(source_path) = source_path else {
+        return Ok(None);
+    };
+
+    if source_library_id == target_library_id {
+        return Ok(Some(source_track_id.to_string()));
+    }
+
+    let existing_by_path = if let Some(path) = source_path.as_deref() {
+        conn.query_row(
+            "SELECT track_id
+             FROM playlist_index_tracks
+             WHERE library_id = ?1 AND source_path = ?2
+             LIMIT 1",
+            params![target_library_id, path],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo deduplicar track por ruta: {error}"))?
+    } else {
+        None
+    };
+    if let Some(track_id) = existing_by_path {
+        return Ok(Some(track_id));
+    }
+
+    let id_available = conn
+        .query_row(
+            "SELECT 1 FROM playlist_index_tracks WHERE library_id = ?1 AND track_id = ?2",
+            params![target_library_id, source_track_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo validar identidad de track: {error}"))?
+        .is_none();
+    let target_track_id = if id_available {
+        source_track_id.to_string()
+    } else {
+        let identity = source_path
+            .as_deref()
+            .map(|path| format!("path:{}", path.to_lowercase()))
+            .unwrap_or_else(|| format!("{source_library_id}:{source_track_id}"));
+        format!("track-{}", stable_hash(&identity))
+    };
+
+    conn.execute(
+        "INSERT INTO playlist_index_tracks (
+            library_id, track_id, name, artist, album, kind, location, source_path,
+            size_bytes, total_time, sample_rate, bitrate, source_exists, search_text,
+            attributes_json, user_rating, created_at, updated_at
+         )
+         SELECT ?3, ?4, name, artist, album, kind, location, source_path,
+                size_bytes, total_time, sample_rate, bitrate, source_exists, search_text,
+                attributes_json, user_rating, ?5, ?5
+         FROM playlist_index_tracks
+         WHERE library_id = ?1 AND track_id = ?2
+         ON CONFLICT(library_id, track_id) DO NOTHING",
+        params![
+            source_library_id,
+            source_track_id,
+            target_library_id,
+            &target_track_id,
+            now
+        ],
+    )
+    .map_err(|error| format!("No se pudo centralizar track {source_track_id}: {error}"))?;
+    conn.execute(
+        "UPDATE playlist_index_libraries
+         SET track_count = (
+               SELECT COUNT(*) FROM playlist_index_tracks WHERE library_id = ?1
+             ),
+             updated_at = ?2
+         WHERE id = ?1",
+        params![target_library_id, now],
+    )
+    .map_err(|error| format!("No se pudo actualizar biblioteca destino: {error}"))?;
+
+    Ok(Some(target_track_id))
+}
+
+fn add_tracks_to_indexed_playlist(
+    app: &AppHandle,
+    target_library_id: &str,
+    playlist_path: &str,
+    source_library_id: &str,
+    track_ids: Vec<String>,
+) -> Result<Vec<PlaylistIndexTrack>, String> {
+    let mut conn = open_db(app)?;
+    let playlist_exists = conn
+        .query_row(
+            "SELECT 1 FROM playlist_index_playlists
+             WHERE library_id = ?1 AND path = ?2 AND node_type = '1'",
+            params![target_library_id, playlist_path],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("No se pudo validar playlist destino: {error}"))?
+        .is_some();
+    if !playlist_exists {
+        return Err(format!("Playlist indexada no encontrada: {playlist_path}"));
+    }
+    if get_library(&conn, source_library_id)?.is_none() {
+        return Err(format!(
+            "Libreria de origen no encontrada: {source_library_id}"
+        ));
+    }
+
+    let now = timestamp();
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar transaccion SQLite: {error}"))?;
+    let mut position = tx
+        .query_row(
+            "SELECT COALESCE(MAX(position), 0)
+             FROM playlist_index_memberships
+             WHERE library_id = ?1 AND playlist_path = ?2",
+            params![target_library_id, playlist_path],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("No se pudo leer posicion de playlist: {error}"))?;
+    let mut seen = BTreeSet::new();
+    for source_track_id in track_ids
+        .into_iter()
+        .filter(|track_id| seen.insert(track_id.clone()))
+    {
+        let Some(track_id) = copy_track_to_library(
+            &tx,
+            source_library_id,
+            &source_track_id,
+            target_library_id,
+            &now,
+        )?
+        else {
+            continue;
+        };
+        let already_added = tx
+            .query_row(
+                "SELECT 1 FROM playlist_index_memberships
+                 WHERE library_id = ?1 AND playlist_path = ?2 AND track_id = ?3",
+                params![target_library_id, playlist_path, &track_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("No se pudo validar membresia de track: {error}"))?
+            .is_some();
+        if already_added {
+            continue;
+        }
+
+        position += 1;
+        tx.execute(
+            "INSERT INTO playlist_index_playlist_additions (
+                library_id, playlist_path, track_id, position, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(library_id, playlist_path, track_id) DO NOTHING",
+            params![target_library_id, playlist_path, &track_id, position, &now],
+        )
+        .map_err(|error| format!("No se pudo guardar adicion local: {error}"))?;
+        tx.execute(
+            "INSERT INTO playlist_index_memberships (
+                library_id, playlist_path, track_id, position
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![target_library_id, playlist_path, &track_id, position],
+        )
+        .map_err(|error| format!("No se pudo agregar track a playlist: {error}"))?;
+    }
+    tx.execute(
+        "UPDATE playlist_index_playlists
+         SET track_count = (
+               SELECT COUNT(DISTINCT track_id)
+               FROM playlist_index_memberships
+               WHERE library_id = ?1 AND playlist_path = ?2
+             ),
+             updated_at = ?3
+         WHERE library_id = ?1 AND path = ?2",
+        params![target_library_id, playlist_path, &now],
+    )
+    .map_err(|error| format!("No se pudo actualizar playlist destino: {error}"))?;
+    tx.execute(
+        "UPDATE playlist_index_libraries SET updated_at = ?2 WHERE id = ?1",
+        params![target_library_id, &now],
+    )
+    .map_err(|error| format!("No se pudo actualizar biblioteca destino: {error}"))?;
+    tx.commit()
+        .map_err(|error| format!("No se pudo confirmar playlist destino: {error}"))?;
+    rebuild_fts(&conn)?;
+    list_playlist_tracks(&conn, target_library_id, playlist_path)
+}
+
+fn unified_track_id(track: &Track) -> String {
+    let identity = track
+        .file_path
+        .as_ref()
+        .map(|path| {
+            path.canonicalize()
+                .unwrap_or_else(|_| path.clone())
+                .to_string_lossy()
+                .to_lowercase()
+        })
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| format!("path:{path}"))
+        .unwrap_or_else(|| {
+            let name = track
+                .name
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+            let artist = track
+                .artist
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+            let album = track
+                .album
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+            let source_id = if name.is_empty()
+                && artist.is_empty()
+                && album.is_empty()
+                && track.total_time.is_none()
+                && track.size.is_none()
+            {
+                track.track_id.as_str()
+            } else {
+                ""
+            };
+            format!(
+                "metadata:{}|{}|{}|{}|{}|{}",
+                name,
+                artist,
+                album,
+                track.total_time.unwrap_or_default(),
+                track.size.unwrap_or_default(),
+                source_id
+            )
+        });
+    format!("track-{}", stable_hash(&identity))
+}
+
+fn rebuild_unified_playlist_index(conn: &Connection, now: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM playlist_index_playlists WHERE library_id = ?1",
+        params![UNIFIED_REKORDBOX_LIBRARY_ID],
+    )
+    .map_err(|error| format!("No se pudieron reconstruir playlists unificadas: {error}"))?;
+
+    conn.execute(
+        "INSERT INTO playlist_index_playlists (
+            library_id, path, name, node_type, track_count, position, created_at, updated_at
+         )
+         SELECT p.library_id, p.path, MIN(p.name), '1', COUNT(DISTINCT m.track_id),
+                MIN(p.position), ?2, ?2
+         FROM playlist_index_source_playlists p
+         LEFT JOIN playlist_index_source_memberships m
+           ON m.library_id = p.library_id
+          AND m.source_path = p.source_path
+          AND m.playlist_path = p.path
+         WHERE p.library_id = ?1
+         GROUP BY p.library_id, p.path",
+        params![UNIFIED_REKORDBOX_LIBRARY_ID, now],
+    )
+    .map_err(|error| format!("No se pudieron materializar playlists unificadas: {error}"))?;
+
+    conn.execute(
+        "INSERT INTO playlist_index_memberships (
+            library_id, playlist_path, track_id, position
+         )
+         SELECT library_id, playlist_path, track_id, MIN(position)
+         FROM playlist_index_source_memberships
+         WHERE library_id = ?1
+         GROUP BY library_id, playlist_path, track_id",
+        params![UNIFIED_REKORDBOX_LIBRARY_ID],
+    )
+    .map_err(|error| format!("No se pudieron unificar tracks de playlists: {error}"))?;
+
+    conn.execute(
+        "INSERT INTO playlist_index_memberships (
+            library_id, playlist_path, track_id, position
+         )
+         SELECT a.library_id, a.playlist_path, a.track_id, a.position
+         FROM playlist_index_playlist_additions a
+         JOIN playlist_index_playlists p
+           ON p.library_id = a.library_id
+          AND p.path = a.playlist_path
+         WHERE a.library_id = ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM playlist_index_memberships m
+             WHERE m.library_id = a.library_id
+               AND m.playlist_path = a.playlist_path
+               AND m.track_id = a.track_id
+           )",
+        params![UNIFIED_REKORDBOX_LIBRARY_ID],
+    )
+    .map_err(|error| format!("No se pudieron restaurar adiciones locales: {error}"))?;
+
+    conn.execute(
+        "UPDATE playlist_index_playlists
+         SET track_count = (
+               SELECT COUNT(DISTINCT track_id)
+               FROM playlist_index_memberships
+               WHERE library_id = playlist_index_playlists.library_id
+                 AND playlist_path = playlist_index_playlists.path
+             ),
+             updated_at = ?2
+         WHERE library_id = ?1",
+        params![UNIFIED_REKORDBOX_LIBRARY_ID, now],
+    )
+    .map_err(|error| format!("No se pudieron actualizar playlists unificadas: {error}"))?;
+
+    conn.execute(
+        "DELETE FROM playlist_index_tracks
+         WHERE library_id = ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM playlist_index_source_tracks s
+             WHERE s.library_id = playlist_index_tracks.library_id
+               AND s.track_id = playlist_index_tracks.track_id
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM playlist_draft_tracks dt
+             JOIN playlist_drafts d ON d.id = dt.draft_id
+             WHERE d.library_id = playlist_index_tracks.library_id
+               AND dt.track_id = playlist_index_tracks.track_id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM playlist_index_playlist_additions a
+             WHERE a.library_id = playlist_index_tracks.library_id
+               AND a.track_id = playlist_index_tracks.track_id
+           )",
+        params![UNIFIED_REKORDBOX_LIBRARY_ID],
+    )
+    .map_err(|error| format!("No se pudieron limpiar tracks sin fuente: {error}"))?;
+
+    conn.execute(
+        "UPDATE playlist_index_libraries
+         SET track_count = (
+               SELECT COUNT(*) FROM playlist_index_tracks WHERE library_id = ?1
+             ),
+             playlist_count = (
+               SELECT COUNT(*) FROM playlist_index_playlists
+               WHERE library_id = ?1 AND node_type = '1'
+             ),
+             updated_at = ?2
+         WHERE id = ?1",
+        params![UNIFIED_REKORDBOX_LIBRARY_ID, now],
+    )
+    .map_err(|error| format!("No se pudieron actualizar contadores unificados: {error}"))?;
 
     Ok(())
 }
@@ -8164,9 +8727,10 @@ fn list_drafts(conn: &Connection, library_id: Option<&str>) -> Result<Vec<Playli
         ""
     };
     let sql = format!(
-        "SELECT d.id, d.library_id, d.name, d.description, COUNT(dt.track_id) AS track_count,
-                d.created_at, d.updated_at
+        "SELECT d.id, d.library_id, l.source_name, d.name, d.description,
+                COUNT(dt.track_id) AS track_count, d.created_at, d.updated_at
          FROM playlist_drafts d
+         JOIN playlist_index_libraries l ON l.id = d.library_id
          LEFT JOIN playlist_draft_tracks dt ON dt.draft_id = d.id
          {library_filter}
          GROUP BY d.id
@@ -8191,11 +8755,82 @@ fn list_drafts(conn: &Connection, library_id: Option<&str>) -> Result<Vec<Playli
     }
 }
 
+fn list_playlist_targets(conn: &Connection) -> Result<Vec<PlaylistTarget>, String> {
+    let mut targets = list_drafts(conn, None)?
+        .into_iter()
+        .map(|draft| PlaylistTarget {
+            id: draft.id,
+            target_kind: "draft".to_string(),
+            library_id: draft.library_id,
+            library_name: draft.library_name,
+            playlist_path: None,
+            name: draft.name,
+            track_count: draft.track_count,
+        })
+        .collect::<Vec<_>>();
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.library_id, l.source_name, p.path, p.name, p.track_count
+             FROM playlist_index_playlists p
+             JOIN playlist_index_libraries l ON l.id = p.library_id
+             WHERE p.node_type = '1'
+             ORDER BY p.name COLLATE NOCASE, l.source_name COLLATE NOCASE, p.path COLLATE NOCASE",
+        )
+        .map_err(|error| format!("No se pudieron preparar destinos de playlists: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let library_id = row.get::<_, String>(0)?;
+            let library_name = row.get::<_, String>(1)?;
+            let playlist_path = row.get::<_, String>(2)?;
+            let name = row.get::<_, String>(3)?;
+            let track_count = i64_to_usize(row.get(4)?);
+            Ok(PlaylistTarget {
+                id: indexed_playlist_target_id(&library_id, &playlist_path),
+                target_kind: "indexed".to_string(),
+                library_id,
+                library_name,
+                playlist_path: Some(playlist_path),
+                name,
+                track_count,
+            })
+        })
+        .map_err(|error| format!("No se pudieron leer destinos de playlists: {error}"))?;
+    targets.extend(
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("No se pudieron mapear destinos de playlists: {error}"))?,
+    );
+    targets.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.library_name.cmp(&right.library_name))
+            .then_with(|| left.target_kind.cmp(&right.target_kind))
+    });
+    Ok(targets)
+}
+
+fn find_indexed_playlist_target(
+    conn: &Connection,
+    target_id: &str,
+) -> Result<Option<PlaylistTarget>, String> {
+    Ok(list_playlist_targets(conn)?
+        .into_iter()
+        .find(|target| target.target_kind == "indexed" && target.id == target_id))
+}
+
+fn indexed_playlist_target_id(library_id: &str, playlist_path: &str) -> String {
+    format!(
+        "indexed-playlist-{}",
+        stable_hash(&format!("{library_id}\0{playlist_path}"))
+    )
+}
+
 fn get_draft(conn: &Connection, draft_id: &str) -> Result<Option<PlaylistDraft>, String> {
     conn.query_row(
-        "SELECT d.id, d.library_id, d.name, d.description, COUNT(dt.track_id) AS track_count,
-                d.created_at, d.updated_at
+        "SELECT d.id, d.library_id, l.source_name, d.name, d.description,
+                COUNT(dt.track_id) AS track_count, d.created_at, d.updated_at
          FROM playlist_drafts d
+         JOIN playlist_index_libraries l ON l.id = d.library_id
          LEFT JOIN playlist_draft_tracks dt ON dt.draft_id = d.id
          WHERE d.id = ?1
          GROUP BY d.id",
@@ -8210,11 +8845,12 @@ fn row_to_draft(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistDraft> {
     Ok(PlaylistDraft {
         id: row.get(0)?,
         library_id: row.get(1)?,
-        name: row.get(2)?,
-        description: row.get(3)?,
-        track_count: i64_to_usize(row.get(4)?),
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        library_name: row.get(2)?,
+        name: row.get(3)?,
+        description: row.get(4)?,
+        track_count: i64_to_usize(row.get(5)?),
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -8588,6 +9224,232 @@ fn option_i64_to_u8(value: Option<i64>) -> Option<u8> {
 #[cfg(test)]
 mod playlist_index_tests {
     use super::*;
+
+    #[test]
+    fn unified_track_identity_deduplicates_repeated_xml_tracks() {
+        let first = Track {
+            track_id: "10".to_string(),
+            name: Some("Same Track".to_string()),
+            artist: Some("Artist".to_string()),
+            album: Some("Album".to_string()),
+            total_time: Some(240),
+            size: Some(42_000),
+            ..Track::default()
+        };
+        let mut repeated = first.clone();
+        repeated.track_id = "900".to_string();
+
+        assert_eq!(unified_track_id(&first), unified_track_id(&repeated));
+    }
+
+    #[test]
+    fn unified_playlists_merge_sources_and_deduplicate_memberships() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("enable foreign keys");
+        init_db(&conn).expect("initialize schema");
+        let now = timestamp();
+        conn.execute(
+            "INSERT INTO playlist_index_libraries (
+                id, source_path, source_name, indexed_at, updated_at
+             ) VALUES (?1, ?2, 'Coleccion unificada', ?3, ?3)",
+            params![
+                UNIFIED_REKORDBOX_LIBRARY_ID,
+                UNIFIED_REKORDBOX_SOURCE_PATH,
+                &now
+            ],
+        )
+        .expect("insert unified library");
+
+        for source in ["/tmp/one.xml", "/tmp/two.xml"] {
+            conn.execute(
+                "INSERT INTO playlist_index_sources (
+                    library_id, source_path, source_name, indexed_at, updated_at
+                 ) VALUES (?1, ?2, ?2, ?3, ?3)",
+                params![UNIFIED_REKORDBOX_LIBRARY_ID, source, &now],
+            )
+            .expect("insert source");
+            conn.execute(
+                "INSERT INTO playlist_index_source_playlists (
+                    library_id, source_path, path, name, node_type, position
+                 ) VALUES (?1, ?2, 'ROOT/Set', 'Set', '1', 0)",
+                params![UNIFIED_REKORDBOX_LIBRARY_ID, source],
+            )
+            .expect("insert source playlist");
+        }
+
+        for track_id in ["track-a", "track-b"] {
+            conn.execute(
+                "INSERT INTO playlist_index_tracks (
+                    library_id, track_id, name, source_exists, search_text,
+                    attributes_json, created_at, updated_at
+                 ) VALUES (?1, ?2, ?2, 1, ?2, '{}', ?3, ?3)",
+                params![UNIFIED_REKORDBOX_LIBRARY_ID, track_id, &now],
+            )
+            .expect("insert unified track");
+        }
+
+        for (source, source_track_id, track_id) in [
+            ("/tmp/one.xml", "1", "track-a"),
+            ("/tmp/two.xml", "88", "track-a"),
+            ("/tmp/two.xml", "89", "track-b"),
+        ] {
+            conn.execute(
+                "INSERT INTO playlist_index_source_tracks (
+                    library_id, source_path, source_track_id, track_id
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    UNIFIED_REKORDBOX_LIBRARY_ID,
+                    source,
+                    source_track_id,
+                    track_id
+                ],
+            )
+            .expect("insert source track mapping");
+            conn.execute(
+                "INSERT INTO playlist_index_source_memberships (
+                    library_id, source_path, playlist_path, track_id, position
+                 ) VALUES (?1, ?2, 'ROOT/Set', ?3, 0)",
+                params![UNIFIED_REKORDBOX_LIBRARY_ID, source, track_id],
+            )
+            .expect("insert source membership");
+        }
+
+        rebuild_unified_playlist_index(&conn, &now).expect("rebuild unified index");
+
+        let playlists =
+            list_playlists(&conn, UNIFIED_REKORDBOX_LIBRARY_ID).expect("load unified playlists");
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].track_count, 2);
+        assert_eq!(
+            list_playlist_tracks(&conn, UNIFIED_REKORDBOX_LIBRARY_ID, "ROOT/Set")
+                .expect("load merged tracks")
+                .len(),
+            2
+        );
+
+        conn.execute(
+            "INSERT INTO playlist_index_tracks (
+                library_id, track_id, name, source_exists, search_text,
+                attributes_json, created_at, updated_at
+             ) VALUES (?1, 'track-local', 'Local addition', 1, 'Local addition', '{}', ?2, ?2)",
+            params![UNIFIED_REKORDBOX_LIBRARY_ID, &now],
+        )
+        .expect("insert locally added track");
+        conn.execute(
+            "INSERT INTO playlist_index_playlist_additions (
+                library_id, playlist_path, track_id, position, created_at
+             ) VALUES (?1, 'ROOT/Set', 'track-local', 100, ?2)",
+            params![UNIFIED_REKORDBOX_LIBRARY_ID, &now],
+        )
+        .expect("insert local playlist addition");
+
+        rebuild_unified_playlist_index(&conn, &now).expect("rebuild with local addition");
+
+        let playlists =
+            list_playlists(&conn, UNIFIED_REKORDBOX_LIBRARY_ID).expect("reload unified playlists");
+        assert_eq!(playlists[0].track_count, 3);
+        assert_eq!(
+            list_playlist_tracks(&conn, UNIFIED_REKORDBOX_LIBRARY_ID, "ROOT/Set")
+                .expect("load merged tracks with local addition")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn playlist_targets_include_every_indexed_and_editable_playlist() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        init_db(&conn).expect("initialize schema");
+        let now = timestamp();
+        conn.execute(
+            "INSERT INTO playlist_index_libraries (
+                id, source_path, source_name, indexed_at, updated_at
+             ) VALUES ('library', '/tmp/library.xml', 'Imported library', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert library");
+        for index in 0..40 {
+            conn.execute(
+                "INSERT INTO playlist_index_playlists (
+                    library_id, path, name, node_type, track_count, position, created_at, updated_at
+                 ) VALUES ('library', ?1, ?2, '1', 0, ?3, ?4, ?4)",
+                params![
+                    format!("ROOT/Set {index}"),
+                    format!("Set {index}"),
+                    index,
+                    &now
+                ],
+            )
+            .expect("insert indexed playlist");
+        }
+        conn.execute(
+            "INSERT INTO playlist_drafts (id, library_id, name, created_at, updated_at)
+             VALUES ('draft', 'library', 'Editable set', ?1, ?1)",
+            params![&now],
+        )
+        .expect("insert editable playlist");
+
+        let targets = list_playlist_targets(&conn).expect("list every playlist target");
+        assert_eq!(targets.len(), 41);
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|target| target.target_kind == "indexed")
+                .count(),
+            40
+        );
+        assert!(targets
+            .iter()
+            .any(|target| target.id == "draft" && target.target_kind == "draft"));
+    }
+
+    #[test]
+    fn copying_tracks_between_libraries_reuses_the_same_audio_file() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        init_db(&conn).expect("initialize schema");
+        let now = timestamp();
+        for (id, path, name) in [
+            ("source", "/tmp/source.xml", "Source"),
+            ("target", "/tmp/target.xml", "Target"),
+        ] {
+            conn.execute(
+                "INSERT INTO playlist_index_libraries (
+                    id, source_path, source_name, indexed_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![id, path, name, &now],
+            )
+            .expect("insert library");
+        }
+        for track_id in ["one", "same-audio-new-id"] {
+            conn.execute(
+                "INSERT INTO playlist_index_tracks (
+                    library_id, track_id, name, source_path, source_exists, search_text,
+                    attributes_json, created_at, updated_at
+                 ) VALUES ('source', ?1, 'Track', '/music/shared.aiff', 1, 'Track', '{}', ?2, ?2)",
+                params![track_id, &now],
+            )
+            .expect("insert source track");
+        }
+
+        let first = copy_track_to_library(&conn, "source", "one", "target", &now)
+            .expect("copy first track")
+            .expect("source track exists");
+        let repeated = copy_track_to_library(&conn, "source", "same-audio-new-id", "target", &now)
+            .expect("copy repeated track")
+            .expect("source track exists");
+
+        assert_eq!(first, repeated);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM playlist_index_tracks WHERE library_id = 'target'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count target tracks"),
+            1
+        );
+    }
 
     #[test]
     fn local_library_xml_is_valid_for_draft_export() {

@@ -277,7 +277,7 @@ export function CatalogPage() {
 
   async function loadDrafts(libraryId = activeLibraryId) {
     if (!libraryId) return;
-    const nextDrafts = await invoke<PlaylistDraftOption[]>("playlist_index_drafts", { libraryId });
+    const nextDrafts = await invoke<PlaylistDraftOption[]>("playlist_index_playlist_targets");
     setDrafts(nextDrafts);
   }
 
@@ -509,7 +509,11 @@ export function CatalogPage() {
     setErrorMessage("");
     try {
       const trackIds = uniqueTrackIds(tracks);
-      const updated = await invoke<TrackListItem[]>("playlist_index_add_tracks_to_draft", { draftId, trackIds });
+      const updated = await invoke<TrackListItem[]>("playlist_index_add_tracks_to_target", {
+        targetId: draftId,
+        sourceLibraryId: activeLibraryId,
+        trackIds
+      });
       await loadDrafts(activeLibraryId);
       setPlaylistDialogOpen(false);
       setMessage(t("{count} tracks agregados a la playlist.", { count: updated.length }));
@@ -532,7 +536,11 @@ export function CatalogPage() {
         description: description || null
       });
       const trackIds = uniqueTrackIds(selectedTrackList);
-      await invoke("playlist_index_add_tracks_to_draft", { draftId: draft.id, trackIds });
+      await invoke("playlist_index_add_tracks_to_draft", {
+        draftId: draft.id,
+        sourceLibraryId: activeLibraryId,
+        trackIds
+      });
       await loadDrafts(activeLibraryId);
       setPlaylistDialogOpen(false);
       setMessage(t("Playlist creada: {name} con {count} tracks.", { name: draft.name, count: trackIds.length }));

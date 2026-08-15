@@ -111,6 +111,13 @@ type ImportResponse = {
   validation: Validation;
 };
 
+type UnifiedPlaylistImportResponse = {
+  library: {
+    track_count: number;
+    playlist_count: number;
+  };
+};
+
 type PlanItem = {
   track_id: string;
   name?: string;
@@ -259,6 +266,14 @@ type AudioToolSettings = {
 type EventBridgeStatus = "checking" | "connected" | "error";
 type StatusTone = "ok" | "pending" | "error";
 
+type ShellBroadcastStatus = {
+  status: string;
+};
+
+type ShellBroadcastProgressEvent = {
+  status: ShellBroadcastStatus;
+};
+
 const maxConcurrencyLimit = 4;
 const appVersion = packageMetadata.version;
 const themeModeKey = "aifficator.themeMode";
@@ -332,6 +347,7 @@ function AppShell() {
   const [systemStatusError, setSystemStatusError] = useState<string | null>(null);
   const [eventBridgeStatus, setEventBridgeStatus] = useState<EventBridgeStatus>("checking");
   const [lastRealtimeEventAt, setLastRealtimeEventAt] = useState<string | null>(null);
+  const [broadcastStatus, setBroadcastStatus] = useState<ShellBroadcastStatus | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [desktopSidebar, setDesktopSidebar] = useState(() =>
     typeof window !== "undefined" ? window.matchMedia("(min-width: 1024px)").matches : true
@@ -342,6 +358,7 @@ function AppShell() {
     [darkMode]
   );
   const broadcastVisible = location.pathname === "/broadcast";
+  const broadcastOnAir = broadcastStatus?.status === "live" || broadcastStatus?.status === "reconnecting";
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -362,6 +379,35 @@ function AppShell() {
     updateDesktopMode(desktopQuery);
     desktopQuery.addEventListener("change", updateDesktopMode);
     return () => desktopQuery.removeEventListener("change", updateDesktopMode);
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    const refreshBroadcastStatus = () => {
+      void invoke<ShellBroadcastStatus>("broadcast_status")
+        .then((next) => {
+          if (!disposed) setBroadcastStatus(next);
+        })
+        .catch(() => undefined);
+    };
+
+    refreshBroadcastStatus();
+    const timer = window.setInterval(refreshBroadcastStatus, 5000);
+    void listen<ShellBroadcastProgressEvent>("broadcast-progress", ({ payload }) => {
+      if (!disposed) setBroadcastStatus(payload.status);
+    })
+      .then((stopListening) => {
+        if (disposed) safelyUnlisten(stopListening);
+        else unlisten = stopListening;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      if (unlisten) safelyUnlisten(unlisten);
+    };
   }, []);
 
   useEffect(() => {
@@ -468,6 +514,7 @@ function AppShell() {
           onClick={() => closeMobileSidebar(true)}
         />
         <AppSidebar
+          broadcastOnAir={broadcastOnAir}
           eventBridgeStatus={eventBridgeStatus}
           lastRealtimeEventAt={lastRealtimeEventAt}
           systemStatus={systemStatus}
@@ -1353,6 +1400,20 @@ function RekordboxConvertPage() {
     try {
       const response = await invoke<ImportResponse>("import_rekordbox_xml", { path });
       setImportResult(response);
+      try {
+        const indexed = await invoke<UnifiedPlaylistImportResponse>("playlist_index_import_xml", {
+          path,
+          playlistPaths: []
+        });
+        setConversionMessage(t("XML agregado a la colección unificada: {tracks} tracks, {playlists} playlists.", {
+          tracks: indexed.library.track_count,
+          playlists: indexed.library.playlist_count
+        }));
+      } catch (indexError) {
+        setErrorMessage(t("El XML se abrió para convertir, pero no se pudo agregar a Playlist Library: {error}", {
+          error: String(indexError)
+        }));
+      }
       setImportStage("hydrating");
       await waitForBrowserPaint();
       const firstPlaylist = response.playlists.find((playlist) => playlist.node_type === "1");
@@ -2310,6 +2371,7 @@ function RekordboxConvertPage() {
 }
 
 function AppSidebar({
+  broadcastOnAir,
   eventBridgeStatus,
   lastRealtimeEventAt,
   systemStatus,
@@ -2321,6 +2383,7 @@ function AppSidebar({
   onMobileClose,
   onMobileNavigate
 }: {
+  broadcastOnAir: boolean;
   eventBridgeStatus: EventBridgeStatus;
   lastRealtimeEventAt: string | null;
   systemStatus: SystemStatus | null;
@@ -2491,7 +2554,16 @@ function AppSidebar({
           <SidebarLink to="/connect" icon={<Share2 className="h-4 w-4" />}>
             {t("Rau Connect")}
           </SidebarLink>
-          <SidebarLink to="/broadcast" icon={<Radio className="h-4 w-4" />}>
+          <SidebarLink
+            to="/broadcast"
+            icon={<Radio className={cn("h-4 w-4", broadcastOnAir && "text-red-500 animate-pulse")} />}
+            trailing={broadcastOnAir ? (
+              <span className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500 px-1.5 py-0.5 text-[9px] font-bold tracking-wide text-white shadow-sm shadow-red-500/30">
+                <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+                ON AIR
+              </span>
+            ) : null}
+          >
             {t("Broadcast")}
           </SidebarLink>
         </SidebarSection>
@@ -2720,11 +2792,13 @@ function SidebarSection({ title, children }: { title: string; children: React.Re
 function SidebarLink({
   to,
   icon,
+  trailing,
   end,
   children
 }: {
   to: string;
   icon: React.ReactNode;
+  trailing?: React.ReactNode;
   end?: boolean;
   children: React.ReactNode;
 }) {
@@ -2742,7 +2816,8 @@ function SidebarLink({
       }
     >
       <span className="shrink-0">{icon}</span>
-      <span className="truncate">{children}</span>
+      <span className="min-w-0 flex-1 truncate">{children}</span>
+      {trailing}
     </NavLink>
   );
 }

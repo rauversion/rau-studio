@@ -441,7 +441,7 @@ export function FileConversionPage() {
       }));
       const selection = await invoke<PreparedPlaylistTracks>("playlist_index_prepare_local_tracks", { items });
       const libraryId = selection.library_id;
-      const drafts = await invoke<PlaylistDraftOption[]>("playlist_index_drafts", { libraryId });
+      const drafts = await invoke<PlaylistDraftOption[]>("playlist_index_playlist_targets");
       setPlaylistTrackIds(selection.track_ids);
       setPlaylistLibraryId(libraryId);
       setPlaylistDrafts(drafts);
@@ -460,8 +460,9 @@ export function FileConversionPage() {
     setBusy(true);
     setErrorMessage("");
     try {
-      const tracks = await invoke<unknown[]>("playlist_index_add_tracks_to_draft", {
-        draftId,
+      const tracks = await invoke<unknown[]>("playlist_index_add_tracks_to_target", {
+        targetId: draftId,
+        sourceLibraryId: playlistLibraryId,
         trackIds: playlistTrackIds
       });
       setSelectedIds(new Set());
@@ -486,6 +487,7 @@ export function FileConversionPage() {
       });
       await invoke("playlist_index_add_tracks_to_draft", {
         draftId: draft.id,
+        sourceLibraryId: playlistLibraryId,
         trackIds: playlistTrackIds
       });
       setSelectedIds(new Set());

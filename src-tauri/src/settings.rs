@@ -16,6 +16,7 @@ const DB_FILE: &str = "aifficator.sqlite3";
 const SECRET_FILE: &str = "settings-secret.bin";
 const OPENAI_API_KEY_SETTING: &str = "openai_api_key";
 const ICECAST_SOURCE_PASSWORD_SETTING: &str = "broadcast.icecast_source_password";
+const ICECAST_PROFILE_PASSWORD_PREFIX: &str = "broadcast.icecast_source_password.profile";
 const ENRICHMENT_CREDENTIAL_PREFIX: &str = "enrichment.provider";
 const FFMPEG_PATH_SETTING: &str = "ffmpeg_path";
 const FFPROBE_PATH_SETTING: &str = "ffprobe_path";
@@ -217,6 +218,42 @@ pub(crate) fn save_icecast_source_password(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     save_optional_text_setting(app, ICECAST_SOURCE_PASSWORD_SETTING, password)
+}
+
+pub(crate) fn load_icecast_source_password_for_profile(
+    app: &AppHandle,
+    profile_id: &str,
+) -> Result<Option<String>, String> {
+    if profile_id == "default" {
+        return load_icecast_source_password(app);
+    }
+    load_text_setting(app, &icecast_profile_password_key(profile_id)?)
+}
+
+pub(crate) fn save_icecast_source_password_for_profile(
+    app: &AppHandle,
+    profile_id: &str,
+    password: Option<String>,
+) -> Result<(), String> {
+    if profile_id == "default" {
+        return save_icecast_source_password(app, password);
+    }
+    let password = password
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    save_optional_text_setting(app, &icecast_profile_password_key(profile_id)?, password)
+}
+
+fn icecast_profile_password_key(profile_id: &str) -> Result<String, String> {
+    if profile_id.is_empty()
+        || profile_id.len() > 64
+        || !profile_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err("Identificador de destino de broadcast inválido.".to_string());
+    }
+    Ok(format!("{ICECAST_PROFILE_PASSWORD_PREFIX}.{profile_id}"))
 }
 
 pub(crate) fn load_enrichment_credential(

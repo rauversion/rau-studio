@@ -6,7 +6,7 @@ Rekordbox Convert imports a Rekordbox XML export, lets the user select playlists
 
 1. Export a library or playlist set from Rekordbox as XML.
 2. Open **File Conversion > Rekordbox Convert** in Rau Studio.
-3. Import the XML.
+3. Import the XML. Rau Studio also adds it automatically to the unified Playlist Library.
 4. Review playlists, tracks, converted files, the conversion plan, and the report.
 5. Select one or more playlists.
 6. Create a plan if you want to run a preflight first.
@@ -14,6 +14,22 @@ Rekordbox Convert imports a Rekordbox XML export, lets the user select playlists
 8. Watch the fixed terminal for `ffmpeg` progress and errors.
 9. Export a new XML.
 10. Import the exported XML into Rekordbox.
+
+## Unified Playlist Library
+
+Every XML opened in Rekordbox Convert is indexed automatically in a single collection. Importing
+another XML adds its playlists to that collection instead of creating another source that must be
+selected manually.
+
+Tracks are deduplicated primarily by their normalized local file path. When a file path is not
+available, Rau Studio uses its identifying metadata. If the same playlist path appears in more than
+one XML, its memberships are merged and repeated tracks are kept only once. Reimporting an XML
+updates that source without duplicating its tracks or playlist memberships.
+
+Editable playlists are also presented as one centralized list throughout Playlist Library,
+Catalog, Taxonomy, Copilot, and File Conversion. The shared add dialog can target any existing
+playlist or create a new one. When source and destination come from different indexed libraries,
+Rau Studio copies the track reference safely and deduplicates it by audio path.
 
 Visual import guide: [Import Rau Studio XML into Rekordbox](rekordbox-import/README.md).
 

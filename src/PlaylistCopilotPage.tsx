@@ -315,7 +315,7 @@ export function PlaylistCopilotPage() {
 
   async function loadDrafts(libraryId = activeLibraryId) {
     if (!libraryId) return;
-    const response = await invoke<PlaylistDraftOption[]>("playlist_index_drafts", { libraryId });
+    const response = await invoke<PlaylistDraftOption[]>("playlist_index_playlist_targets");
     setDrafts(response);
   }
 
@@ -475,8 +475,9 @@ export function PlaylistCopilotPage() {
     setMessage("");
 
     try {
-      const updatedTracks = await invoke<PlaylistCopilotTrack[]>("playlist_index_add_tracks_to_draft", {
-        draftId,
+      const updatedTracks = await invoke<PlaylistCopilotTrack[]>("playlist_index_add_tracks_to_target", {
+        targetId: draftId,
+        sourceLibraryId: activeLibraryId,
         trackIds
       });
       await loadDrafts(activeLibraryId);
@@ -504,6 +505,7 @@ export function PlaylistCopilotPage() {
       });
       const updatedTracks = await invoke<PlaylistCopilotTrack[]>("playlist_index_add_tracks_to_draft", {
         draftId: draft.id,
+        sourceLibraryId: activeLibraryId,
         trackIds
       });
       await loadDrafts(activeLibraryId);
