@@ -60,12 +60,13 @@ use `ffmpeg`/`ffprobe` from `PATH` or **Settings**.
 
 Building the macOS app from source additionally requires Xcode command-line
 tools and `pkg-config`; Intel builds require `nasm`. The first native build
-downloads pinned FFmpeg, x264, and LAME source archives, verifies their SHA-256
-hashes, and compiles the sidecars locally. The bundled FFmpeg enables
-MP3/H.264/AAC encoding plus the Icecast and RTMP/RTMPS protocols used by
-Broadcast. Selecting a build with FFmpeg's `drawtext` filter also enables the
-dynamic station and current-track typography in RTMP video; Rau keeps a
-text-free visual fallback for lean builds. On macOS, Broadcast also exposes a
+downloads pinned FFmpeg, x264, LAME, GnuTLS, and Nettle source archives,
+verifies their SHA-256 hashes, and compiles the sidecars locally. The bundled
+FFmpeg enables MP3/H.264/AAC encoding plus the Icecast and RTMP/RTMPS protocols
+used by Broadcast. RTMPS uses the statically linked GnuTLS/Nettle stack instead
+of macOS SecureTransport. Selecting a build with FFmpeg's `drawtext` filter also
+enables the dynamic station and current-track typography in RTMP video; Rau
+keeps a text-free visual fallback for lean builds. On macOS, Broadcast also exposes a
 Preview/Program video studio: a camera and a selected screen or application window can remain active as independent,
 simultaneous layers. Each can run as a positionable card, full-width strip, or large background, then be fitted or cropped,
 rotated, styled, or freely dragged and resized on the interactive Preview canvas. Layer ordering and the final dissolve can
@@ -204,7 +205,7 @@ If files live on an external macOS drive and playback/conversion fails, grant Ra
 
 ## License
 
-Rau Studio source code is MIT licensed. The separately bundled FFmpeg/x264/LAME
-command-line programs are distributed under GPL terms; their notices, license
-texts, exact build configuration, and corresponding source archives accompany
-the macOS distribution.
+Rau Studio source code is MIT licensed. The separately bundled FFmpeg, x264,
+LAME, GnuTLS, and Nettle components are distributed under their applicable GPL
+or LGPL terms; their notices, license texts, exact build configuration, and
+corresponding source archives accompany the macOS distribution.

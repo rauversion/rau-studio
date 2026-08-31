@@ -74,9 +74,11 @@ The backend resolves each media tool in this order:
 2. the sidecar bundled with the macOS application;
 3. the process `PATH` and known package-manager locations.
 
-macOS sidecars are built from pinned FFmpeg, x264, and LAME source archives by
-`scripts/prepare-ffmpeg-sidecars.sh`. The script validates source checksums,
-architectures, dynamic dependencies, required encoders, filters, and network
+macOS sidecars are built from pinned FFmpeg, x264, LAME, GnuTLS, and Nettle
+source archives by `scripts/prepare-ffmpeg-sidecars.sh`. GnuTLS and Nettle are
+linked statically so RTMPS does not use macOS SecureTransport or a Homebrew
+runtime. The script validates source checksums, architectures, dynamic
+dependencies, the selected TLS backend, required encoders, filters, and network
 protocols, plus real AIFF/MP3/MP4 smoke conversions before Tauri bundles them.
 
 The frontend owns:
@@ -127,6 +129,7 @@ Long-running tasks emit Tauri events:
 - `playlist-copilot-progress`
 - `turn-progress`
 - `broadcast-progress`
+- `broadcast-line-input-preview`
 
 Rau Connect emits `p2p-network-event` for endpoint lifecycle and diagnostics, `p2p-chat-event` for persisted message delivery, and `p2p-transfer-event` for download progress and completion.
 

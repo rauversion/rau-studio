@@ -10,7 +10,9 @@
       "third-party/FFMPEG-NOTICE.md",
       "binaries/COPYING.FFMPEG-GPLv2",
       "binaries/COPYING.X264-GPLv2",
-      "binaries/COPYING.LAME-LGPLv2"
+      "binaries/COPYING.LAME-LGPLv2",
+      "binaries/COPYING.GNUTLS-LGPLv2.1",
+      "binaries/COPYING.NETTLE-GPLv2"
     ],
     "macOS": {
       "minimumSystemVersion": "12.3",

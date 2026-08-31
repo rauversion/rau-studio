@@ -1461,6 +1461,8 @@ pub fn run() {
             broadcast::broadcast_save_profile,
             broadcast::broadcast_preflight,
             broadcast::broadcast_microphone_devices,
+            broadcast::broadcast_start_line_input_preview,
+            broadcast::broadcast_stop_line_input_preview,
             broadcast::broadcast_camera_devices,
             broadcast::broadcast_application_audio_support,
             broadcast::broadcast_application_audio_devices,

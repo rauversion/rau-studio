@@ -50,7 +50,8 @@ server; do not expose an unprotected Icecast admin interface.
 
 The signed macOS build includes FFmpeg with `libmp3lame`, `libx264`, AAC, the
 FLV muxer, the `testsrc2` filter, and the
-Icecast/RTMP/RTMPS network protocols.
+Icecast/RTMP/RTMPS network protocols. Its RTMPS implementation uses statically
+linked GnuTLS and Nettle rather than macOS SecureTransport.
 A manually selected FFmpeg build must provide the capabilities required by the
 selected destination. RTMP station and track typography additionally requires
 the `drawtext` filter. The Homebrew FFmpeg build includes it; builds without it
@@ -74,8 +75,10 @@ fall back to the same animated graphic without text.
    micrófono al iniciar**, choose the input device,
    and set its gain. The microphone always starts muted for privacy.
 6. Optionally enable **Preparar línea directa al iniciar**, choose an audio
-   interface, select a mono channel or stereo pair, and set its gain. Line input
-   is prepared in standby and never starts live automatically.
+   interface, select a mono channel or stereo pair, and set its gain. Use
+   **Previsualizar canal** to verify its local signal level without sending it to
+   the broadcast. The preview closes automatically when broadcasting starts.
+   Line input is prepared in standby and never starts live automatically.
 7. Optionally enable **Preparar salida del Mac al iniciar** and leave **Toda la
    salida del Mac** selected to broadcast the computer's normal output. You can
    instead restrict capture to one open application. Set its gain; this source
@@ -129,9 +132,10 @@ reordering or removing them, and appends new tracks or playlists directly to its
 active queue. Its original time and activation policy remain locked, and the
 currently playing track is never changed by the editor. Older activated blocks
 stay read-only execution history. When a block becomes due, its exact list is loaded into the
-front of the scheduled queue. When the next block activates, any queued remainder
-from the previous scheduled block is marked skipped and is not resumed later;
-immediate-queue rows are left untouched. An **Exact time** block also cuts the
+front of the scheduled queue. When the next block activates, the previous block's
+scheduled queue is reset and its rows are removed instead of remaining as played,
+skipped, or failed entries; the block itself remains available as execution history
+and immediate-queue rows are left untouched. An **Exact time** block also cuts the
 track currently playing, while **After the current track** activates at that
 track's natural end. Immediate rows never fill gaps in Scheduled mode; the music
 bed or silence holds the signal until the next block. The daily view estimates
@@ -168,7 +172,8 @@ Immediate/Scheduled mode itself can be changed while live.
    Enable **Camera**, **Screen / window**, or both. The system picker lets you choose
    an entire display or one application window. Select either layer to edit its Card, Full width, or Background layout;
    fit/crop framing, orientation, effect, mirror, opacity, position, and size are independent. The combined visual stays
-   out of Program when the broadcast starts.
+   out of Program by default. You can move the fader before starting to choose its initial Program mix; that position is
+   retained when the broadcast starts and after it stops.
    In **PREVIEW**, click a layer and drag it directly. Use its green corner handle to resize it; this switches that layer
    to **Free** layout. **To front** and **To back** change the Z order. Editing guides never appear in **PROGRAM** or RTMP.
 6. Add tracks to the queue, configure any local inputs, confirm the FFmpeg
@@ -177,9 +182,9 @@ Immediate/Scheduled mode itself can be changed while live.
    independently paced selected broadcast presentation. It shows the configured
    station name, encoding information, and the current artist/title. Wait for
    the image to appear in Live Producer.
-8. Open **Video Studio** while the signal is running. **PREVIEW** and **PROGRAM**
+8. Open **Video Studio** before or while the signal is running. **PREVIEW** and **PROGRAM**
    show the live camera and selected display/window layers; **PROGRAM** represents the combined composition being sent. Use the
-   fader for an immediate manual mix, or **AUTO** for the saved timed dissolve.
+   fader at any time for an immediate manual mix, or **AUTO** for the saved timed dissolve.
    Returning the fader to zero makes the visual layer transparent while the
    branded RTMP video and selected capture continue uninterrupted.
 9. Review the preview, title, and audience in Instagram, then click **Go live**
@@ -317,6 +322,21 @@ Confirm that the server URL starts with `rtmps://`, paste the current Live's
 stream key again, and check the Rau terminal for reconnect messages. A key from
 an older Live may no longer be valid. Rau Studio only sends the signal; the
 operator must still click **Go live** in Live Producer after the preview loads.
+Keep the exact Live Producer page that generated those credentials open while
+connecting. If the terminal reaches `Sending publish command` but receives no
+response, RTMPS and the RTMP handshake have already succeeded: Instagram is not
+authorizing that Live session. This happens before any media can be sent and is
+therefore unrelated to whether the broadcast queue contains tracks; Rau supplies
+silence and generated video while the queue is empty. The publisher limits this
+wait to 12 seconds and reports it as a session/credential problem. On macOS the
+timeout can surface in a manually selected SecureTransport-based FFmpeg as `IO
+Error: -9806`, which is SecureTransport's abrupt TLS-close status. The bundled
+macOS sidecar uses GnuTLS instead. A later `Output #0, flv` line only describes
+FFmpeg's local muxer and does not prove that Instagram accepted the publish
+request. At this protocol stage FFmpeg is specifically waiting for
+`NetStream.Publish.Start`. To distinguish an Instagram session/key failure from
+a TLS-backend compatibility problem, repeat once with a fresh Live and the
+bundled FFmpeg or another GnuTLS build such as Homebrew FFmpeg.
 
 **The camera preview is unavailable**
 

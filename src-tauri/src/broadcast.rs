@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,6 +29,7 @@ const RTMP_PLATFORM_CUSTOM: &str = "custom";
 const RTMP_VIDEO_WIDTH: usize = 720;
 const RTMP_VIDEO_HEIGHT: usize = 1280;
 const RTMP_VIDEO_FPS: usize = 30;
+const RTMP_IO_TIMEOUT_MICROS: u64 = 12_000_000;
 #[cfg(target_os = "macos")]
 const RTMP_DISPLAY_FONT: &str = "/System/Library/Fonts/Supplemental/Arial Bold.ttf";
 #[cfg(target_os = "macos")]
@@ -456,6 +457,17 @@ pub struct BroadcastLineInputStatus {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BroadcastLineInputPreview {
+    active: bool,
+    receiving_audio: bool,
+    level_percent: u8,
+    device: String,
+    channel: u16,
+    stereo: bool,
+    message: String,
+}
+
 impl Default for BroadcastLineInputStatus {
     fn default() -> Self {
         Self {
@@ -871,10 +883,42 @@ struct WorkerHandle {
     join: Option<thread::JoinHandle<()>>,
 }
 
+struct LineInputPreviewHandle {
+    stop: Sender<()>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl LineInputPreviewHandle {
+    fn stop_and_join(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for LineInputPreviewHandle {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CameraMixSetting {
+    mix_percent: u8,
+}
+
+impl Default for CameraMixSetting {
+    fn default() -> Self {
+        Self { mix_percent: 0 }
+    }
+}
+
 #[derive(Clone)]
 struct WorkerVisualState {
     settings: Arc<Mutex<BroadcastVideoCompositor>>,
     frame: Arc<Mutex<Option<BrowserVisualFrame>>>,
+    mix: Arc<Mutex<CameraMixSetting>>,
 }
 
 struct BrowserVisualFrame {
@@ -906,6 +950,8 @@ impl Drop for WorkerHandle {
 pub struct BroadcastManager {
     runtime: Arc<RuntimeState>,
     worker: Mutex<Option<WorkerHandle>>,
+    camera_mix: Arc<Mutex<CameraMixSetting>>,
+    line_input_preview: Mutex<Option<LineInputPreviewHandle>>,
 }
 
 impl Default for BroadcastManager {
@@ -915,12 +961,19 @@ impl Default for BroadcastManager {
                 snapshot: Mutex::new(BroadcastStatus::default()),
             }),
             worker: Mutex::new(None),
+            camera_mix: Arc::new(Mutex::new(CameraMixSetting::default())),
+            line_input_preview: Mutex::new(None),
         }
     }
 }
 
 impl Drop for BroadcastManager {
     fn drop(&mut self) {
+        if let Ok(preview) = self.line_input_preview.get_mut() {
+            if let Some(mut handle) = preview.take() {
+                handle.stop_and_join();
+            }
+        }
         if let Ok(worker) = self.worker.get_mut() {
             if let Some(mut handle) = worker.take() {
                 handle.stop_and_join();
@@ -930,6 +983,72 @@ impl Drop for BroadcastManager {
 }
 
 impl BroadcastManager {
+    fn stop_line_input_preview(&self) {
+        let preview = self
+            .line_input_preview
+            .lock()
+            .ok()
+            .and_then(|mut preview| preview.take());
+        if let Some(mut preview) = preview {
+            preview.stop_and_join();
+        }
+    }
+
+    fn start_line_input_preview(
+        &self,
+        app: &AppHandle,
+        device: String,
+        channel: u16,
+        stereo: bool,
+        gain_percent: u16,
+    ) -> Result<(), String> {
+        if !(1..=64).contains(&channel) || gain_percent > 200 {
+            return Err("Canal o ganancia de previsualización inválidos.".to_string());
+        }
+        if self
+            .worker
+            .lock()
+            .map_err(|_| "No se pudo bloquear el motor de broadcast.".to_string())?
+            .is_some()
+        {
+            return Err(
+                "Detén el broadcast antes de previsualizar la entrada de línea.".to_string(),
+            );
+        }
+        self.stop_line_input_preview();
+        let capture = spawn_audio_input_capture(
+            app,
+            &device,
+            channel,
+            Some(stereo),
+            "entrada de línea",
+            &self.runtime,
+        )?;
+        let (stop, receiver) = mpsc::channel();
+        let thread_app = app.clone();
+        let thread_device = device.clone();
+        let join = thread::spawn(move || {
+            run_line_input_preview(
+                thread_app,
+                capture,
+                receiver,
+                thread_device,
+                channel,
+                stereo,
+                gain_percent,
+            )
+        });
+        let mut preview = self
+            .line_input_preview
+            .lock()
+            .map_err(|_| "No se pudo guardar la previsualización de línea.".to_string())?;
+        *preview = Some(LineInputPreviewHandle {
+            stop,
+            join: Some(join),
+        });
+        Ok(())
+    }
+
     fn cleanup_finished_worker(&self) {
         let finished = self
             .worker
@@ -947,6 +1066,7 @@ impl BroadcastManager {
     }
 
     fn start(&self, app: AppHandle, stream_key: Option<String>) -> Result<BroadcastStatus, String> {
+        self.stop_line_input_preview();
         self.cleanup_finished_worker();
         let mut worker = self
             .worker
@@ -981,6 +1101,7 @@ impl BroadcastManager {
         let visual = WorkerVisualState {
             settings: Arc::new(Mutex::new(profile.video_compositor.clone())),
             frame: Arc::new(Mutex::new(None)),
+            mix: Arc::clone(&self.camera_mix),
         };
         let worker_visual = visual.clone();
         let started_at = timestamp();
@@ -1118,6 +1239,7 @@ impl BroadcastManager {
 
     fn set_camera_mix(
         &self,
+        app: &AppHandle,
         mix_percent: u8,
         transition_millis: u16,
     ) -> Result<BroadcastStatus, String> {
@@ -1125,17 +1247,43 @@ impl BroadcastManager {
             return Err("Mezcla o duración de transición visual inválida.".to_string());
         }
         self.cleanup_finished_worker();
+        if let Ok(mut requested) = self.camera_mix.lock() {
+            *requested = CameraMixSetting { mix_percent };
+        }
         let worker = self
             .worker
             .lock()
             .map_err(|_| "No se pudo bloquear el motor de broadcast.".to_string())?;
-        let Some(worker) = worker.as_ref() else {
-            return Err("La radio no esta transmitiendo.".to_string());
+        let running = worker.is_some();
+        if let Some(worker) = worker.as_ref() {
+            worker
+                .commands
+                .send(WorkerCommand::SetCameraMix(mix_percent, transition_millis))
+                .map_err(|_| "El motor de broadcast ya se detuvo.".to_string())?;
+        }
+        let mut camera = self.runtime.snapshot().camera;
+        if !running {
+            if let Ok(profile) = load_profile(app) {
+                camera.configured = profile.video_compositor.enabled;
+                camera.device = Some(profile.video_compositor.camera_device.clone());
+                camera.label = Some(profile.video_compositor.camera_device);
+            }
+            camera.ready = false;
+        }
+        camera.live = running && mix_percent > 0;
+        camera.mix_percent = mix_percent;
+        camera.transition_millis = transition_millis;
+        camera.message = if running {
+            if mix_percent > 0 {
+                "Fuente visual solicitada en Program.".to_string()
+            } else {
+                "Fuente visual solicitada fuera de Program.".to_string()
+            }
+        } else {
+            format!("Fader visual preparado en {mix_percent}% para la próxima transmisión.")
         };
-        worker
-            .commands
-            .send(WorkerCommand::SetCameraMix(mix_percent, transition_millis))
-            .map_err(|_| "El motor de broadcast ya se detuvo.".to_string())?;
+        self.runtime
+            .update_camera(app, camera, "info", "camera_mix_requested");
         Ok(self.runtime.snapshot())
     }
 
@@ -1421,6 +1569,23 @@ pub fn broadcast_microphone_devices(
 }
 
 #[tauri::command]
+pub fn broadcast_start_line_input_preview(
+    app: AppHandle,
+    manager: State<'_, BroadcastManager>,
+    device: String,
+    channel: u16,
+    stereo: bool,
+    gain_percent: u16,
+) -> Result<(), String> {
+    manager.start_line_input_preview(&app, device, channel, stereo, gain_percent)
+}
+
+#[tauri::command]
+pub fn broadcast_stop_line_input_preview(manager: State<'_, BroadcastManager>) {
+    manager.stop_line_input_preview();
+}
+
+#[tauri::command]
 pub fn broadcast_camera_devices(app: AppHandle) -> Result<Vec<BroadcastCameraDevice>, String> {
     camera_devices(&app)
 }
@@ -1698,11 +1863,12 @@ pub fn broadcast_set_application_audio_live(
 
 #[tauri::command]
 pub fn broadcast_set_camera_mix(
+    app: AppHandle,
     manager: State<'_, BroadcastManager>,
     mix_percent: u8,
     transition_millis: u16,
 ) -> Result<BroadcastStatus, String> {
-    manager.set_camera_mix(mix_percent, transition_millis)
+    manager.set_camera_mix(&app, mix_percent, transition_millis)
 }
 
 #[tauri::command]
@@ -2782,6 +2948,7 @@ impl CameraFeeder {
     fn start(
         app: &AppHandle,
         config: BroadcastVideoCompositor,
+        initial_mix: CameraMixSetting,
         pipe: PreparedCameraPipe,
         runtime: &Arc<RuntimeState>,
         visual_frame: Arc<Mutex<Option<BrowserVisualFrame>>>,
@@ -2794,7 +2961,15 @@ impl CameraFeeder {
         let app = app.clone();
         let runtime = Arc::clone(runtime);
         let join = thread::spawn(move || {
-            run_camera_feeder(app, config, writer, receiver, runtime, visual_frame)
+            run_camera_feeder(
+                app,
+                config,
+                initial_mix,
+                writer,
+                receiver,
+                runtime,
+                visual_frame,
+            )
         });
         Ok(Self {
             commands,
@@ -2843,6 +3018,7 @@ struct CameraFrame {
 fn run_camera_feeder(
     app: AppHandle,
     mut config: BroadcastVideoCompositor,
+    initial_mix: CameraMixSetting,
     mut writer: fs::File,
     commands: Receiver<CameraFeedCommand>,
     runtime: Arc<RuntimeState>,
@@ -2851,9 +3027,11 @@ fn run_camera_feeder(
     let mut raw_frame = vec![0u8; CAMERA_FRAME_BYTES];
     let mut output_frame = vec![0u8; CAMERA_FRAME_BYTES];
     let mut maximum_alpha = maximum_camera_alpha(&config);
-    let mut requested_mix_percent = 0u8;
-    let mut current_alpha = 0i32;
-    let mut target_alpha = 0i32;
+    let mut requested_mix_percent = initial_mix.mix_percent;
+    let initial_alpha =
+        i32::from(u16::from(requested_mix_percent).saturating_mul(maximum_alpha) / 100);
+    let mut current_alpha = initial_alpha;
+    let mut target_alpha = initial_alpha;
     let mut transition_frames = 0u32;
     let mut capture = if config.capture_mode == "browser" {
         None
@@ -2871,12 +3049,20 @@ fn run_camera_feeder(
         camera_status(
             &config,
             source_ready,
-            false,
-            0,
+            requested_mix_percent > 0,
+            requested_mix_percent,
             if config.capture_mode == "browser" {
-                "Estudio visual preparado; esperando el primer cuadro de Preview."
+                if requested_mix_percent > 0 {
+                    "Estudio visual preparado en Program; esperando el primer cuadro."
+                } else {
+                    "Estudio visual preparado; esperando el primer cuadro de Preview."
+                }
             } else if capture.is_some() {
-                "Fuente visual capturando en Preview; fuera de Program."
+                if requested_mix_percent > 0 {
+                    "Fuente visual capturando en Program."
+                } else {
+                    "Fuente visual capturando en Preview; fuera de Program."
+                }
             } else {
                 "No se pudo preparar la fuente visual; se reintentará automáticamente."
             },
@@ -3710,6 +3896,8 @@ fn rtmp_publisher_args(
         "1".to_string(),
         "-tcp_nodelay".to_string(),
         "1".to_string(),
+        "-rw_timeout".to_string(),
+        RTMP_IO_TIMEOUT_MICROS.to_string(),
         "-f".to_string(),
         "flv".to_string(),
         destination,
@@ -4120,6 +4308,24 @@ struct AudioInputMix {
 }
 
 impl AudioInputCapture {
+    fn preview_level(&mut self, gain_percent: u16) -> Result<(bool, u8), String> {
+        if let Some(error) = self
+            .stream_error
+            .lock()
+            .map_err(|_| format!("No se pudo revisar la {}.", self.label))?
+            .take()
+        {
+            return Err(error);
+        }
+        let mut input = self
+            .buffer
+            .lock()
+            .map_err(|_| format!("No se pudo leer el buffer de {}.", self.label))?;
+        let preview = line_input_preview_level(&input, gain_percent);
+        input.clear();
+        Ok(preview)
+    }
+
     fn mix_into(
         &mut self,
         output: &mut [u8],
@@ -4246,6 +4452,102 @@ impl AudioInputCapture {
             capture.stop();
         }
     }
+}
+
+fn line_input_preview_level(input: &VecDeque<[i16; 2]>, gain_percent: u16) -> (bool, u8) {
+    let peak = input.iter().fold(0u16, |current, [left, right]| {
+        current.max(left.unsigned_abs()).max(right.unsigned_abs())
+    });
+    let maximum = u32::from(i16::MAX as u16);
+    let level_percent = (u32::from(peak)
+        .saturating_mul(u32::from(gain_percent))
+        .saturating_add(maximum / 2)
+        / maximum)
+        .min(100) as u8;
+    (!input.is_empty() && peak > 0, level_percent)
+}
+
+fn run_line_input_preview(
+    app: AppHandle,
+    mut capture: AudioInputCapture,
+    stop: Receiver<()>,
+    device: String,
+    channel: u16,
+    stereo: bool,
+    gain_percent: u16,
+) {
+    let selection = if stereo {
+        format!("Canales {channel}–{} estéreo", channel.saturating_add(1))
+    } else {
+        format!("Canal {channel} mono")
+    };
+    let _ = app.emit(
+        "broadcast-line-input-preview",
+        BroadcastLineInputPreview {
+            active: true,
+            receiving_audio: false,
+            level_percent: 0,
+            device: device.clone(),
+            channel,
+            stereo,
+            message: format!("Previsualizando {selection}; esperando señal."),
+        },
+    );
+    loop {
+        match stop.recv_timeout(Duration::from_millis(100)) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        match capture.preview_level(gain_percent) {
+            Ok((receiving_audio, level_percent)) => {
+                let _ = app.emit(
+                    "broadcast-line-input-preview",
+                    BroadcastLineInputPreview {
+                        active: true,
+                        receiving_audio,
+                        level_percent,
+                        device: device.clone(),
+                        channel,
+                        stereo,
+                        message: if receiving_audio {
+                            format!("{selection} · señal {level_percent}%.")
+                        } else {
+                            format!("{selection} · sin señal.")
+                        },
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    "broadcast-line-input-preview",
+                    BroadcastLineInputPreview {
+                        active: false,
+                        receiving_audio: false,
+                        level_percent: 0,
+                        device: device.clone(),
+                        channel,
+                        stereo,
+                        message: error,
+                    },
+                );
+                capture.terminate();
+                return;
+            }
+        }
+    }
+    capture.terminate();
+    let _ = app.emit(
+        "broadcast-line-input-preview",
+        BroadcastLineInputPreview {
+            active: false,
+            receiving_audio: false,
+            level_percent: 0,
+            device,
+            channel,
+            stereo,
+            message: "Previsualización de línea detenida.".to_string(),
+        },
+    );
 }
 
 fn mix_pcm_sample(music: i16, microphone: i16, gain_percent: u16, music_gain_percent: u16) -> i16 {
@@ -4971,15 +5273,20 @@ struct Publisher {
     child: Child,
     stdin: ChildStdin,
     destination_label: String,
-    opened: Arc<AtomicBool>,
+    publish_requested: Arc<AtomicBool>,
+    tls_closed_abort: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
     overlay: Option<RtmpOverlay>,
     camera: Option<CameraFeeder>,
 }
 
 impl Publisher {
-    fn is_opened(&self) -> bool {
-        self.opened.load(Ordering::Acquire)
+    fn is_publish_requested(&self) -> bool {
+        self.publish_requested.load(Ordering::Acquire)
+    }
+
+    fn has_tls_closed_abort(&self) -> bool {
+        self.tls_closed_abort.load(Ordering::Acquire)
     }
 
     fn is_ready(&self) -> bool {
@@ -5024,14 +5331,17 @@ impl Publisher {
     }
 
     fn terminate(mut self) {
-        if let Some(camera) = self.camera.take() {
-            camera.terminate();
-        }
         drop(self.stdin);
         if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
+        // Close FFmpeg's read end of the visual pipe before joining the feeder.
+        // Otherwise a publisher blocked on the network can stop consuming frames,
+        // leaving the feeder blocked in write_all and the broadcast in `stopping`.
+        if let Some(camera) = self.camera.take() {
+            camera.terminate();
+        }
     }
 }
 
@@ -5041,9 +5351,11 @@ fn spawn_publisher(
     credential: &str,
     runtime: &Arc<RuntimeState>,
     visual_frame: Arc<Mutex<Option<BrowserVisualFrame>>>,
+    initial_camera_mix: CameraMixSetting,
 ) -> Result<Publisher, String> {
     let is_rtmp = profile.output_kind == OUTPUT_KIND_RTMP;
-    let opened = Arc::new(AtomicBool::new(!is_rtmp));
+    let publish_requested = Arc::new(AtomicBool::new(false));
+    let tls_closed_abort = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicBool::new(!is_rtmp));
     let overlay_available = is_rtmp && ffmpeg_filter_available(app, "drawtext");
     let overlay = if overlay_available {
@@ -5085,6 +5397,7 @@ fn spawn_publisher(
             match CameraFeeder::start(
                 app,
                 profile.video_compositor.clone(),
+                initial_camera_mix,
                 pipe,
                 runtime,
                 visual_frame,
@@ -5103,23 +5416,41 @@ fn spawn_publisher(
         let app = app.clone();
         let runtime = Arc::clone(runtime);
         let credential = credential.to_string();
-        let opened = Arc::clone(&opened);
+        let publish_requested_reader = Arc::clone(&publish_requested);
+        let tls_closed_abort_reader = Arc::clone(&tls_closed_abort);
         let ready = Arc::clone(&ready);
         let connected_message = connected_message(profile);
+        let publish_pending_message = if profile.rtmp_platform == RTMP_PLATFORM_INSTAGRAM {
+            "Instagram está validando la publicación RTMP...".to_string()
+        } else {
+            "El servidor está validando la publicación RTMP...".to_string()
+        };
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if is_rtmp && is_rtmp_output_open_line(&line) {
-                    opened.store(true, Ordering::Release);
-                    runtime.log(
-                        &app,
-                        "info",
-                        "output_opened",
-                        "Instagram aceptó la publicación · verificando flujo continuo...",
-                    );
-                } else if is_rtmp && is_rtmp_output_ready_line(&line) {
+                if is_rtmp && is_tls_closed_abort_line(&line) {
+                    tls_closed_abort_reader.store(true, Ordering::Release);
+                }
+                if is_rtmp && is_rtmp_output_ready_line(&line) {
                     if !ready.swap(true, Ordering::AcqRel) {
                         runtime.mark_output_ready(&app, connected_message.clone());
                     }
+                } else if is_rtmp && is_rtmp_publish_command_line(&line) {
+                    publish_requested_reader.store(true, Ordering::Release);
+                    let current = runtime.snapshot();
+                    runtime.update(
+                        &app,
+                        "connecting",
+                        publish_pending_message.clone(),
+                        current.now_playing,
+                        current.started_at,
+                        ("info", "rtmp_publish_pending"),
+                    );
+                    runtime.log(
+                        &app,
+                        "info",
+                        "ffmpeg_rtmp",
+                        format!("RTMP: {}", redact_secret(&line, &credential)),
+                    );
                 } else if is_publisher_warning_line(&line) {
                     runtime.log(
                         &app,
@@ -5142,7 +5473,8 @@ fn spawn_publisher(
         child,
         stdin,
         destination_label: destination_label(profile).to_string(),
-        opened,
+        publish_requested,
+        tls_closed_abort,
         ready,
         overlay,
         camera,
@@ -5156,8 +5488,14 @@ fn is_rtmp_output_ready_line(line: &str) -> bool {
         .is_some_and(|value| value >= 2_000_000)
 }
 
-fn is_rtmp_output_open_line(line: &str) -> bool {
-    line.contains("Output #0, flv, to ")
+fn is_tls_closed_abort_line(line: &str) -> bool {
+    let normalized = line.to_ascii_lowercase();
+    normalized.contains("[tls @") && normalized.contains("io error: -9806")
+}
+
+fn is_rtmp_publish_command_line(line: &str) -> bool {
+    line.to_ascii_lowercase()
+        .contains("sending publish command")
 }
 
 fn is_publisher_warning_line(line: &str) -> bool {
@@ -5208,18 +5546,37 @@ fn is_rtmp_diagnostic_line(line: &str) -> bool {
 
 fn fatal_publisher_failure_message(
     profile: &BroadcastProfile,
-    publisher_opened: bool,
+    publish_requested: bool,
+    tls_closed_abort: bool,
     publisher_ready: bool,
 ) -> Option<String> {
     if profile.output_kind != OUTPUT_KIND_RTMP || publisher_ready {
         return None;
     }
-    if publisher_opened {
+    if publish_requested && tls_closed_abort {
         return Some(if profile.rtmp_platform == RTMP_PLATFORM_INSTAGRAM {
-            "Instagram aceptó la publicación, pero cerró antes de recibir dos segundos continuos de audio y video. Prueba otro motor FFmpeg o crea un Live nuevo."
+            "Instagram no devolvió NetStream.Publish.Start después del comando publish. El handshake y createStream sí funcionaron; al vencer la espera, macOS cerró TLS con SecureTransport -9806. Esto ocurre antes de validar audio o video y no depende de la cola musical. Crea un Live nuevo con URL y clave frescas; si vuelve a pasar, prueba otro motor FFmpeg para separar una sesión rechazada por Meta de una incompatibilidad con SecureTransport."
                 .to_string()
         } else {
-            "El servidor RTMP aceptó la publicación, pero cerró antes de recibir un flujo multimedia continuo."
+            "El servidor no devolvió NetStream.Publish.Start después del comando publish. Al vencer la espera, macOS cerró TLS con SecureTransport -9806 antes de iniciar el flujo multimedia."
+                .to_string()
+        });
+    }
+    if publish_requested {
+        return Some(if profile.rtmp_platform == RTMP_PLATFORM_INSTAGRAM {
+            "Instagram no respondió al comando publish antes del límite. La conexión RTMPS y el handshake funcionaron, pero la sesión no autorizó el stream. Mantén abierto ese Live Producer y copia nuevamente la URL y la clave de esa misma sesión; la cola musical no interviene en esta fase."
+                .to_string()
+        } else {
+            "El servidor RTMP no respondió al comando publish antes del límite. La conexión y el handshake funcionaron, pero la sesión no autorizó el stream."
+            .to_string()
+        });
+    }
+    if tls_closed_abort {
+        return Some(if profile.rtmp_platform == RTMP_PLATFORM_INSTAGRAM {
+            "La conexión TLS con Instagram terminó abruptamente (SecureTransport -9806) antes de enviar la señal. Crea un Live nuevo y vuelve a copiar la URL y la clave de esa misma sesión."
+                .to_string()
+        } else {
+            "La conexión TLS con el servidor RTMP terminó abruptamente (SecureTransport -9806) antes de enviar la señal."
                 .to_string()
         });
     }
@@ -5726,6 +6083,11 @@ fn run_worker(
                 &credential,
                 &runtime,
                 Arc::clone(&visual.frame),
+                visual
+                    .mix
+                    .lock()
+                    .map(|requested| *requested)
+                    .unwrap_or_default(),
             ) {
                 Ok(candidate) => {
                     publisher = Some(candidate);
@@ -5802,7 +6164,8 @@ fn run_worker(
                     let fatal_message = publisher.as_ref().and_then(|publisher| {
                         fatal_publisher_failure_message(
                             &profile,
-                            publisher.is_opened(),
+                            publisher.is_publish_requested(),
+                            publisher.has_tls_closed_abort(),
                             publisher.is_ready(),
                         )
                     });
@@ -5882,7 +6245,8 @@ fn run_worker(
                         let fatal_message = publisher.as_ref().and_then(|publisher| {
                             fatal_publisher_failure_message(
                                 &profile,
-                                publisher.is_opened(),
+                                publisher.is_publish_requested(),
+                                publisher.has_tls_closed_abort(),
                                 publisher.is_ready(),
                             )
                         });
@@ -5984,7 +6348,8 @@ fn run_worker(
                     let fatal_message = publisher.as_ref().and_then(|publisher| {
                         fatal_publisher_failure_message(
                             &profile,
-                            publisher.is_opened(),
+                            publisher.is_publish_requested(),
+                            publisher.has_tls_closed_abort(),
                             publisher.is_ready(),
                         )
                     });
@@ -6026,15 +6391,20 @@ fn run_worker(
         decoder.terminate();
     }
     worker_audio.terminate();
+    let requested_camera_mix = visual
+        .mix
+        .lock()
+        .map(|requested| *requested)
+        .unwrap_or_default();
     runtime.update_camera(
         &app,
         camera_status(
             &profile.video_compositor,
             false,
             false,
-            0,
+            requested_camera_mix.mix_percent,
             if profile.video_compositor.enabled {
-                "Fuente visual detenida."
+                "Fuente visual detenida; se conserva la posición del fader."
             } else {
                 "Fuente visual desactivada."
             },
@@ -7744,7 +8114,7 @@ fn activate_schedule_item(
         )
         .map_err(|error| format!("No se pudo vincular la pista programada: {error}"))?;
     }
-    discard_previous_schedule_remainder(conn, &item.id)?;
+    reset_previous_schedule_queue(conn, &item.id)?;
     conn.execute(
         "UPDATE broadcast_schedule_items
          SET status = 'activated', error = NULL, activated_at = ?2, updated_at = ?2
@@ -7758,22 +8128,29 @@ fn activate_schedule_item(
         .collect())
 }
 
-fn discard_previous_schedule_remainder(
+fn reset_previous_schedule_queue(
     conn: &Connection,
     next_schedule_item_id: &str,
 ) -> Result<usize, String> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM broadcast_queue_entries
+             WHERE EXISTS (
+               SELECT 1 FROM broadcast_schedule_queue_entries sq
+               WHERE sq.queue_entry_id = broadcast_queue_entries.id
+                 AND sq.schedule_item_id != ?1
+             )",
+            params![next_schedule_item_id],
+        )
+        .map_err(|error| format!("No se pudo resetear la cola programada anterior: {error}"))?;
+    // SQLite foreign keys are not assumed to be enabled for existing databases.
+    // Remove stale links explicitly after deleting their queue entries.
     conn.execute(
-        "UPDATE broadcast_queue_entries
-         SET status = 'skipped', updated_at = ?2
-         WHERE status = 'queued'
-           AND EXISTS (
-             SELECT 1 FROM broadcast_schedule_queue_entries sq
-             WHERE sq.queue_entry_id = broadcast_queue_entries.id
-               AND sq.schedule_item_id != ?1
-           )",
-        params![next_schedule_item_id, timestamp()],
+        "DELETE FROM broadcast_schedule_queue_entries WHERE schedule_item_id != ?1",
+        params![next_schedule_item_id],
     )
-    .map_err(|error| format!("No se pudo cerrar el bloque programado anterior: {error}"))
+    .map_err(|error| format!("No se pudieron limpiar vínculos de la parrilla anterior: {error}"))?;
+    Ok(deleted)
 }
 
 fn queued_entry_ids(conn: &Connection) -> Result<Vec<String>, String> {
@@ -8915,6 +9292,9 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-rtmp_flush_interval", "1"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["-rw_timeout", RTMP_IO_TIMEOUT_MICROS.to_string().as_str()] }));
         assert!(args.windows(2).any(|pair| pair == ["-tcp_nodelay", "1"]));
         assert!(args.windows(2).any(|pair| pair == ["-loglevel", "debug"]));
         assert!(args.iter().any(|value| value == "-nostats"));
@@ -9046,9 +9426,6 @@ mod tests {
 
     #[test]
     fn rtmp_readiness_waits_for_sustained_media_progress() {
-        assert!(is_rtmp_output_open_line(
-            "Output #0, flv, to 'rtmps://example.test/rtmp/private-key':"
-        ));
         assert!(!is_rtmp_output_ready_line("out_time_us=700000"));
         assert!(is_rtmp_output_ready_line("out_time_us=2000000"));
         assert!(is_rtmp_output_ready_line("out_time_us=3123456"));
@@ -9067,20 +9444,36 @@ mod tests {
         assert!(is_rtmp_diagnostic_line(
             "[rtmps @ 0x123] Sending publish command for 'private-key'"
         ));
+        assert!(is_rtmp_publish_command_line(
+            "[rtmps @ 0x123] Sending publish command for 'private-key'"
+        ));
+        assert!(is_tls_closed_abort_line("[tls @ 0x123] IO Error: -9806"));
+        assert!(!is_tls_closed_abort_line(
+            "[out#0/flv @ 0x123] Error muxing a packet"
+        ));
         assert!(!is_rtmp_diagnostic_line(
             "[AVFilterGraph @ 0x123] query_formats: 7 queried"
         ));
 
         let mut rtmp_profile = profile();
         rtmp_profile.output_kind = OUTPUT_KIND_RTMP.to_string();
-        assert!(fatal_publisher_failure_message(&rtmp_profile, false, false)
-            .unwrap()
-            .contains("rechazó la publicación"));
-        assert!(fatal_publisher_failure_message(&rtmp_profile, true, false)
-            .unwrap()
-            .contains("dos segundos continuos"));
-        assert!(fatal_publisher_failure_message(&rtmp_profile, true, true).is_none());
-        assert!(fatal_publisher_failure_message(&profile(), false, false).is_none());
+        assert!(
+            fatal_publisher_failure_message(&rtmp_profile, false, false, false)
+                .unwrap()
+                .contains("rechazó la publicación")
+        );
+        assert!(
+            fatal_publisher_failure_message(&rtmp_profile, true, false, false)
+                .unwrap()
+                .contains("no respondió al comando publish")
+        );
+        assert!(
+            fatal_publisher_failure_message(&rtmp_profile, true, true, false)
+                .unwrap()
+                .contains("SecureTransport -9806")
+        );
+        assert!(fatal_publisher_failure_message(&rtmp_profile, true, true, true).is_none());
+        assert!(fatal_publisher_failure_message(&profile(), false, false, false).is_none());
     }
 
     #[test]
@@ -9137,6 +9530,14 @@ mod tests {
             |sample| sample,
         );
         assert_eq!(target.into_iter().collect::<Vec<_>>(), [[30, 40], [31, 41]]);
+    }
+
+    #[test]
+    fn line_input_preview_reports_selected_signal_with_gain() {
+        let frames = VecDeque::from([[i16::MAX / 4, 0], [0, i16::MAX / 2]]);
+        assert_eq!(line_input_preview_level(&frames, 100), (true, 50));
+        assert_eq!(line_input_preview_level(&frames, 200), (true, 100));
+        assert_eq!(line_input_preview_level(&VecDeque::new(), 100), (false, 0));
     }
 
     #[test]
@@ -9332,7 +9733,7 @@ mod tests {
     }
 
     #[test]
-    fn next_scheduled_block_discards_the_previous_remainder_but_keeps_immediate_tracks() {
+    fn next_scheduled_block_resets_the_previous_queue_but_keeps_immediate_tracks() {
         let mut conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         conn.execute_batch(
@@ -9392,6 +9793,20 @@ mod tests {
                 .as_deref(),
             Some("queued")
         );
+        conn.execute(
+            "INSERT INTO broadcast_queue_entries VALUES
+               ('first-played', 'lib', 'played', '__scheduled__:first-block', 'First block',
+                '/music/played.wav', 'Already played', NULL, 120, 4, 'played', NULL, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO broadcast_schedule_queue_entries (
+               schedule_item_id, queue_entry_id, schedule_track_id, created_at
+             ) VALUES ('first-block', 'first-played', NULL, 'now')",
+            [],
+        )
+        .unwrap();
 
         conn.execute(
             "UPDATE broadcast_schedule_items SET start_at = ?2 WHERE id = ?1",
@@ -9406,12 +9821,8 @@ mod tests {
             .unwrap();
 
         assert_ne!(second_entry_id, first_entry_id);
-        assert_eq!(
-            queue_entry_status(&conn, &first_entry_id)
-                .unwrap()
-                .as_deref(),
-            Some("skipped")
-        );
+        assert_eq!(queue_entry_status(&conn, &first_entry_id).unwrap(), None);
+        assert_eq!(queue_entry_status(&conn, "first-played").unwrap(), None);
         assert_eq!(
             queue_entry_status(&conn, &second_entry_id)
                 .unwrap()

@@ -202,6 +202,16 @@ type BroadcastLineInputStatus = {
   message: string;
 };
 
+type BroadcastLineInputPreview = {
+  active: boolean;
+  receiving_audio: boolean;
+  level_percent: number;
+  device: string;
+  channel: number;
+  stereo: boolean;
+  message: string;
+};
+
 type BroadcastApplicationAudioStatus = {
   configured: boolean;
   ready: boolean;
@@ -521,6 +531,7 @@ export function BroadcastPage() {
   const [lineInputChannel, setLineInputChannel] = useState("1");
   const [lineInputStereo, setLineInputStereo] = useState(true);
   const [lineInputGain, setLineInputGain] = useState("100");
+  const [lineInputPreview, setLineInputPreview] = useState<BroadcastLineInputPreview | null>(null);
   const [applicationAudioEnabled, setApplicationAudioEnabled] = useState(false);
   const [applicationAudioBundleId, setApplicationAudioBundleId] = useState("");
   const [applicationAudioGain, setApplicationAudioGain] = useState("100");
@@ -763,6 +774,22 @@ export function BroadcastPage() {
     };
   }, [hydrateProfile, locale]);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen<BroadcastLineInputPreview>("broadcast-line-input-preview", ({ payload }) => {
+      if (!disposed) setLineInputPreview(payload);
+    }).then((stopListening) => {
+      if (disposed) safelyUnlisten(stopListening);
+      else unlisten = stopListening;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      if (unlisten) safelyUnlisten(unlisten);
+      void invoke("broadcast_stop_line_input_preview").catch(() => undefined);
+    };
+  }, []);
+
   useEffect(() => () => {
     if (compositorSaveTimer.current !== null) {
       window.clearTimeout(compositorSaveTimer.current);
@@ -788,6 +815,7 @@ export function BroadcastPage() {
   const lineInputChannels = Math.max(1, selectedLineInputDevice?.input_channels ?? 1);
 
   function changeLineInputDevice(deviceId: string) {
+    if (lineInputPreview?.active) void stopLineInputPreview();
     const nextDevice = microphoneDevices.find((device) => device.id === deviceId);
     const channels = Math.max(1, nextDevice?.input_channels ?? 1);
     setLineInputDevice(deviceId);
@@ -1121,6 +1149,7 @@ export function BroadcastPage() {
         transitionMillis
       });
       setStatus(nextStatus);
+      setCameraMix(nextStatus.camera?.mix_percent ?? normalized);
     });
   }
 
@@ -1159,6 +1188,32 @@ export function BroadcastPage() {
       if (!devices.some((device) => device.id === lineInputDevice)) {
         setLineInputDevice("default");
       }
+    });
+  }
+
+  async function stopLineInputPreview() {
+    setLineInputPreview((current) => current ? {
+      ...current,
+      active: false,
+      receiving_audio: false,
+      level_percent: 0,
+      message: t("Previsualización de línea detenida.")
+    } : current);
+    await invoke("broadcast_stop_line_input_preview");
+  }
+
+  async function toggleLineInputPreview() {
+    await runAction("line-input-preview", async () => {
+      if (lineInputPreview?.active) {
+        await stopLineInputPreview();
+        return;
+      }
+      await invoke("broadcast_start_line_input_preview", {
+        device: lineInputDevice,
+        channel: Number(lineInputChannel),
+        stereo: lineInputStereo,
+        gainPercent: Number(lineInputGain)
+      });
     });
   }
 
@@ -1365,7 +1420,10 @@ export function BroadcastPage() {
                       type="checkbox"
                       checked={lineInputEnabled}
                       disabled={running || !preflight?.microphone_input_available}
-                      onChange={(event) => setLineInputEnabled(event.target.checked)}
+                      onChange={(event) => {
+                        if (!event.target.checked && lineInputPreview?.active) void stopLineInputPreview();
+                        setLineInputEnabled(event.target.checked);
+                      }}
                     />
                     {t("Preparar línea directa al iniciar")}
                   </label>
@@ -1382,6 +1440,7 @@ export function BroadcastPage() {
                           value={`${lineInputStereo ? "stereo" : "mono"}:${lineInputChannel}`}
                           disabled={running}
                           onChange={(event) => {
+                            if (lineInputPreview?.active) void stopLineInputPreview();
                             const [mode, channel] = event.target.value.split(":");
                             setLineInputStereo(mode === "stereo");
                             setLineInputChannel(channel);
@@ -1410,9 +1469,49 @@ export function BroadcastPage() {
                           step={5}
                           value={lineInputGain}
                           disabled={running}
-                          onChange={(event) => setLineInputGain(event.target.value)}
+                          onChange={(event) => {
+                            if (lineInputPreview?.active) void stopLineInputPreview();
+                            setLineInputGain(event.target.value);
+                          }}
                         />
                       </Field>
+                      <div className="grid gap-2 rounded-md border border-border bg-background/60 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <strong className="block text-xs">{t("Preview del canal")}</strong>
+                            <span className="text-[11px] text-muted-foreground">
+                              {lineInputPreview?.active
+                                ? translateBackendMessage(locale, lineInputPreview.message)
+                                : t("Comprueba la señal seleccionada sin enviarla al broadcast.")}
+                            </span>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={lineInputPreview?.active ? "destructive" : "secondary"}
+                            disabled={running || busy === "line-input-preview"}
+                            onClick={() => void toggleLineInputPreview()}
+                          >
+                            {busy === "line-input-preview"
+                              ? <LoaderCircle className="h-4 w-4 animate-spin" />
+                              : lineInputPreview?.active ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                            {lineInputPreview?.active ? t("Detener preview") : t("Previsualizar canal")}
+                          </Button>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-secondary">
+                          <div
+                            className={cn(
+                              "h-full rounded-full transition-[width] duration-100",
+                              (lineInputPreview?.level_percent ?? 0) > 80 ? "bg-red-500" : "bg-cyan-500"
+                            )}
+                            style={{ width: `${lineInputPreview?.level_percent ?? 0}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-[10px] text-muted-foreground">
+                          <span>{lineInputPreview?.receiving_audio ? t("Señal detectada") : t("Sin señal")}</span>
+                          <span>{lineInputPreview?.level_percent ?? 0}%</span>
+                        </div>
+                      </div>
                       <p className="text-xs text-muted-foreground">
                         {t("La línea reemplaza temporalmente la playlist y pasa directo al destino, sin ducking.")}
                       </p>
@@ -3677,7 +3776,7 @@ function VideoStudioModal({
     return () => cancelAnimationFrame(frameRequest);
   }, [cameraAvailable, locale, running, screenAvailable]);
 
-  const faderEnabled = running && config.enabled && cameraReady;
+  const faderEnabled = config.enabled;
   const take = async (nextMix: number, transitionMillis: number) => {
     if (handoffPending || busy === "camera-mix") return;
     setDraftMix(nextMix);
@@ -3800,14 +3899,14 @@ function VideoStudioModal({
                 value={draftMix}
                 disabled={!faderEnabled || busy === "camera-mix" || handoffPending}
                 onChange={(event) => setDraftMix(Number(event.currentTarget.value))}
-                onPointerUp={() => void take(draftMix, 0)}
-                onKeyUp={() => void take(draftMix, 0)}
+                onPointerUp={(event) => void take(Number(event.currentTarget.value), 0)}
+                onKeyUp={(event) => void take(Number(event.currentTarget.value), 0)}
               />
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                 <span className="text-xs text-white/45">
                   {running
                     ? cameraReady ? t("El fader controla la señal que recibe Instagram.") : t("Esperando que el compositor quede listo...")
-                    : t("El fader se habilita al iniciar el broadcast; la fuente visual comienza fuera de Program.")}
+                    : t("El fader define la posición inicial de Program para la próxima transmisión.")}
                 </span>
                 <Button
                   type="button"

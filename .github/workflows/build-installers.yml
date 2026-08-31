@@ -119,7 +119,7 @@ jobs:
           path: |
             .cache/ffmpeg
             src-tauri/binaries
-          key: ffmpeg-8.1.2-lame-3.101-network-avfoundation-${{ matrix.artifact }}
+          key: ffmpeg-8.1.2-gnutls-3.8.13-nettle-3.10.2-${{ hashFiles('scripts/prepare-ffmpeg-sidecars.sh') }}-${{ matrix.artifact }}
 
       - name: Validate Apple secrets
         if: runner.os == 'macOS'
@@ -247,6 +247,17 @@ jobs:
             test -x "$app/Contents/MacOS/$tool"
             codesign --verify --strict --verbose=2 "$app/Contents/MacOS/$tool"
           done
+
+          ffmpeg_build_info="$("$app/Contents/MacOS/ffmpeg" -version 2>&1)"
+          if [[ "$ffmpeg_build_info" != *"--enable-gnutls"* ]]; then
+            echo "Bundled FFmpeg was not built with GnuTLS." >&2
+            exit 1
+          fi
+          if [[ "$ffmpeg_build_info" == *"--enable-securetransport"* ]]; then
+            echo "Bundled FFmpeg unexpectedly enables SecureTransport." >&2
+            exit 1
+          fi
+
           codesign --verify --deep --strict --verbose=2 "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute -vv "$app"
@@ -341,7 +352,7 @@ jobs:
         with:
           path: release-artifacts
 
-      - name: Add corresponding FFmpeg source
+      - name: Add corresponding bundled media sources
         shell: bash
         run: |
           curl --fail --location --show-error \
@@ -358,6 +369,16 @@ jobs:
             https://downloads.sourceforge.net/project/lame/lame/3.101/lame-3.101.tar.gz \
             --output release-artifacts/lame-3.101-source.tar.gz
           echo "7578af6eebd578b2bd64e468fac4ae1f03670a7e028166e67f855674b9b6aeac  release-artifacts/lame-3.101-source.tar.gz" | \
+            sha256sum --check
+          curl --fail --location --show-error \
+            https://ftp.gnu.org/gnu/nettle/nettle-3.10.2.tar.gz \
+            --output release-artifacts/nettle-3.10.2-source.tar.gz
+          echo "fe9ff51cb1f2abb5e65a6b8c10a92da0ab5ab6eaf26e7fc2b675c45f1fb519b5  release-artifacts/nettle-3.10.2-source.tar.gz" | \
+            sha256sum --check
+          curl --fail --location --show-error \
+            https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz \
+            --output release-artifacts/gnutls-3.8.13-source.tar.xz
+          echo "ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e  release-artifacts/gnutls-3.8.13-source.tar.xz" | \
             sha256sum --check
 
       - name: Publish release assets
@@ -377,6 +398,8 @@ jobs:
             -name 'ffmpeg-*-source.tar.xz' \
             -o -name 'x264-*-source.tar.bz2' \
             -o -name 'lame-*-source.tar.gz' \
+            -o -name 'nettle-*-source.tar.gz' \
+            -o -name 'gnutls-*-source.tar.xz' \
           \))
 
           if [ "${#files[@]}" -eq 0 ]; then

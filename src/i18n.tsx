@@ -130,6 +130,8 @@ const translations: Record<Locale, Record<string, string>> = {
     "{source} en Program": "{source} in Program",
     "El fader se habilita al iniciar el broadcast; la fuente visual comienza fuera de Program.":
       "The fader is enabled when the broadcast starts; the visual source begins outside Program.",
+    "El fader define la posición inicial de Program para la próxima transmisión.":
+      "The fader sets the initial Program position for the next broadcast.",
     "Los cambios de fuente visual se aplican y guardan en vivo sin reiniciar RTMP.":
       "Visual source changes are applied and saved live without restarting RTMP.",
     "Cámara": "Camera",
@@ -404,15 +406,25 @@ const translations: Record<Locale, Record<string, string>> = {
       "Instagram rejected the publish request before receiving the signal. Create a new Live and paste the server URL and stream key from that same session into their separate fields.",
     "El servidor RTMP rechazó la publicación antes de recibir la señal. Revisa la URL y la clave de transmisión.":
       "The RTMP server rejected the publish request before receiving the signal. Check the server URL and stream key.",
-    "Instagram aceptó la publicación, pero cerró antes de recibir dos segundos continuos de audio y video. Prueba otro motor FFmpeg o crea un Live nuevo.":
-      "Instagram accepted the publish request but closed before receiving two continuous seconds of audio and video. Try another FFmpeg engine or create a new Live.",
-    "El servidor RTMP aceptó la publicación, pero cerró antes de recibir un flujo multimedia continuo.":
-      "The RTMP server accepted the publish request but closed before receiving a continuous media stream.",
+    "Instagram no devolvió NetStream.Publish.Start después del comando publish. El handshake y createStream sí funcionaron; al vencer la espera, macOS cerró TLS con SecureTransport -9806. Esto ocurre antes de validar audio o video y no depende de la cola musical. Crea un Live nuevo con URL y clave frescas; si vuelve a pasar, prueba otro motor FFmpeg para separar una sesión rechazada por Meta de una incompatibilidad con SecureTransport.":
+      "Instagram did not return NetStream.Publish.Start after the publish command. The handshake and createStream succeeded; when the wait expired, macOS closed TLS with SecureTransport -9806. This happens before audio or video validation and does not depend on the music queue. Create a new Live with a fresh URL and key; if it happens again, try another FFmpeg engine to distinguish a session rejected by Meta from a SecureTransport incompatibility.",
+    "El servidor no devolvió NetStream.Publish.Start después del comando publish. Al vencer la espera, macOS cerró TLS con SecureTransport -9806 antes de iniciar el flujo multimedia.":
+      "The server did not return NetStream.Publish.Start after the publish command. When the wait expired, macOS closed TLS with SecureTransport -9806 before the media stream started.",
+    "Instagram no respondió al comando publish antes del límite. La conexión RTMPS y el handshake funcionaron, pero la sesión no autorizó el stream. Mantén abierto ese Live Producer y copia nuevamente la URL y la clave de esa misma sesión; la cola musical no interviene en esta fase.":
+      "Instagram did not answer the publish command before the deadline. The RTMPS connection and handshake succeeded, but the session did not authorize the stream. Keep that Live Producer open and copy the URL and key again from the same session; the music queue is not involved at this stage.",
+    "El servidor RTMP no respondió al comando publish antes del límite. La conexión y el handshake funcionaron, pero la sesión no autorizó el stream.":
+      "The RTMP server did not answer the publish command before the deadline. The connection and handshake succeeded, but the session did not authorize the stream.",
+    "La conexión TLS con Instagram terminó abruptamente (SecureTransport -9806) antes de enviar la señal. Crea un Live nuevo y vuelve a copiar la URL y la clave de esa misma sesión.":
+      "The TLS connection to Instagram ended abruptly (SecureTransport -9806) before sending the signal. Create a new Live and copy the URL and key again from that same session.",
+    "La conexión TLS con el servidor RTMP terminó abruptamente (SecureTransport -9806) antes de enviar la señal.":
+      "The TLS connection to the RTMP server ended abruptly (SecureTransport -9806) before sending the signal.",
     "Señal enviada a Instagram · revisa la vista previa y pulsa Go live en Live Producer.":
       "Signal sent to Instagram · check the preview and click Go live in Live Producer.",
+    "Instagram está validando la publicación RTMP...":
+      "Instagram is validating the RTMP publish request...",
+    "El servidor está validando la publicación RTMP...":
+      "The server is validating the RTMP publish request...",
     "Señal RTMP conectada · esperando audio.": "RTMP signal connected · waiting for audio.",
-    "Instagram aceptó la publicación · verificando flujo continuo...":
-      "Instagram accepted the publish request · verifying continuous media flow...",
     "Se agregaron {count} pistas al broadcast. {skipped} omitidas.":
       "Added {count} tracks to the broadcast. {skipped} skipped.",
     "Se quitaron {count} entradas de la cola.": "Removed {count} queue entries.",
@@ -457,6 +469,13 @@ const translations: Record<Locale, Record<string, string>> = {
       "Camera settings applied; capture restarted without interrupting RTMP.",
     "Ajustes de cámara aplicados en vivo.": "Camera settings applied live.",
     "Cámara detenida.": "Camera stopped.",
+    "Fuente visual solicitada en Program.": "Visual source requested in Program.",
+    "Fuente visual solicitada fuera de Program.": "Visual source requested outside Program.",
+    "Fuente visual detenida; se conserva la posición del fader.":
+      "Visual source stopped; the fader position is preserved.",
+    "Estudio visual preparado en Program; esperando el primer cuadro.":
+      "Visual studio ready in Program; waiting for the first frame.",
+    "Fuente visual capturando en Program.": "Visual source capturing in Program.",
     "FFmpeg no incluye el protocolo RTMPS requerido por este destino.":
       "FFmpeg does not include the RTMPS protocol required by this destination.",
     "FFmpeg no incluye el protocolo RTMP requerido por este destino.":
@@ -491,6 +510,13 @@ const translations: Record<Locale, Record<string, string>> = {
     "Preparar línea directa al iniciar": "Prepare direct line input on start",
     "Dispositivo de línea": "Line input device",
     "Canal de entrada": "Input channel",
+    "Preview del canal": "Channel preview",
+    "Previsualizar canal": "Preview channel",
+    "Detener preview": "Stop preview",
+    "Comprueba la señal seleccionada sin enviarla al broadcast.":
+      "Check the selected signal without sending it to the broadcast.",
+    "Señal detectada": "Signal detected",
+    "Previsualización de línea detenida.": "Line input preview stopped.",
     "Mono": "Mono",
     "Estéreo": "Stereo",
     "Canal {channel} mono": "Mono channel {channel}",
@@ -1470,7 +1496,14 @@ export function translateBackendMessage(locale: Locale, message: string) {
     [/^FFmpeg inició la salida; esperando confirmación de (.+)\.\.\.$/, (match) => `FFmpeg started the output; waiting for ${match[1]} to confirm...`],
     [/^Preparando señal: (.+)$/, (match) => `Preparing signal: ${match[1]}`],
     [/^En vivo: (.+)$/, (match) => `Live: ${match[1]}`],
+    [/^Fader visual preparado en (\d+)% para la próxima transmisión\.$/, (match) => `Visual fader set to ${match[1]}% for the next broadcast.`],
     [/^Línea directa · señal (\d+)%\.$/, (match) => `Direct line · signal ${match[1]}%.`],
+    [/^Previsualizando Canal (\d+) mono; esperando señal\.$/, (match) => `Previewing mono channel ${match[1]}; waiting for signal.`],
+    [/^Previsualizando Canales (\d+)–(\d+) estéreo; esperando señal\.$/, (match) => `Previewing stereo channels ${match[1]}–${match[2]}; waiting for signal.`],
+    [/^Canal (\d+) mono · señal (\d+)%\.$/, (match) => `Mono channel ${match[1]} · signal ${match[2]}%.`],
+    [/^Canales (\d+)–(\d+) estéreo · señal (\d+)%\.$/, (match) => `Stereo channels ${match[1]}–${match[2]} · signal ${match[3]}%.`],
+    [/^Canal (\d+) mono · sin señal\.$/, (match) => `Mono channel ${match[1]} · no signal.`],
+    [/^Canales (\d+)–(\d+) estéreo · sin señal\.$/, (match) => `Stereo channels ${match[1]}–${match[2]} · no signal.`],
     [/^Audio de (.+) al aire\.$/, (match) => `Audio from ${match[1]} live.`],
     [/^Audio de (.+) · señal (\d+)%\.$/, (match) => `Audio from ${match[1]} · signal ${match[2]}%.`],
     [/^Audio de (.+) · estabilizando señal\.$/, (match) => `Audio from ${match[1]} · stabilizing signal.`],
