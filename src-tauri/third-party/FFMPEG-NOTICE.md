@@ -22,7 +22,7 @@ Corresponding source code:
 
 https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz
 
-https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2
+https://codeload.github.com/mirror/x264/tar.gz/b35605ace3ddf7c1a5d67a2eb553f034aef41d55
 
 https://downloads.sourceforge.net/project/lame/lame/3.101/lame-3.101.tar.gz
 

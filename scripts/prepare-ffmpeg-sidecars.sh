@@ -4,7 +4,7 @@ set -euo pipefail
 FFMPEG_VERSION="8.1.2"
 FFMPEG_SHA256="464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
 X264_COMMIT="b35605ace3ddf7c1a5d67a2eb553f034aef41d55"
-X264_SHA256="6eeb82934e69fd51e043bd8c5b0d152839638d1ce7aa4eea65a3fedcf83ff224"
+X264_SHA256="cd71a7515b0e9a012e1ac9b1f8415bebcaf6fc97d4db32286642ac4c0fbe24f9"
 LAME_VERSION="3.101"
 LAME_SHA256="7578af6eebd578b2bd64e468fac4ae1f03670a7e028166e67f855674b9b6aeac"
 GNUTLS_VERSION="3.8.13"
@@ -33,7 +33,7 @@ esac
 cache_dir="$root_dir/.cache/ffmpeg"
 archive="$cache_dir/ffmpeg-$FFMPEG_VERSION.tar.xz"
 source_dir="$cache_dir/ffmpeg-$FFMPEG_VERSION"
-x264_archive="$cache_dir/x264-$X264_COMMIT.tar.bz2"
+x264_archive="$cache_dir/x264-$X264_COMMIT.tar.gz"
 x264_source_dir="$cache_dir/x264-$X264_COMMIT"
 x264_build_dir="$cache_dir/build-x264-$target_triple"
 x264_install_dir="$cache_dir/install-x264-$target_triple"
@@ -249,9 +249,9 @@ fi
 verify_archive
 
 if [[ ! -f "$x264_archive" ]]; then
-  echo "Downloading x264 $X264_COMMIT source from VideoLAN..."
+  echo "Downloading x264 $X264_COMMIT source from the GitHub mirror..."
   curl --fail --location --show-error \
-    "https://code.videolan.org/videolan/x264/-/archive/$X264_COMMIT/x264-$X264_COMMIT.tar.bz2" \
+    "https://codeload.github.com/mirror/x264/tar.gz/$X264_COMMIT" \
     --output "$x264_archive"
 fi
 verify_x264_archive
