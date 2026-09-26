@@ -824,6 +824,16 @@ fn convert_track(app: &tauri::AppHandle, track: &Track) -> ConversionItemResult 
         return item;
     };
 
+    let _destination_lease = match local_conversion::regeneration::DestinationLease::acquire(&target_path) {
+        Ok(lease) => lease,
+        Err(error) => {
+            item.status = ConversionStatus::Failed;
+            item.message = Some(error);
+            emit_conversion_progress(app, item_progress_event(&item, None, None, None));
+            return item;
+        }
+    };
+
     if target_path.exists() {
         item.status = ConversionStatus::AlreadyConverted;
         item.message = Some(settings::localized(
@@ -1447,6 +1457,7 @@ fn is_inside_converted_folder(root: &Path, path: &Path) -> bool {
 pub fn run() {
     tauri::Builder::default()
         .manage(broadcast::BroadcastManager::default())
+        .manage(playlist_index::duplicates::DuplicateManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
@@ -1569,6 +1580,15 @@ pub fn run() {
             playlist_index::playlist_index_taxonomy_graph,
             playlist_index::playlist_index_taxonomy_tracks,
             playlist_index::playlist_catalog_search,
+            playlist_index::duplicates::playlist_duplicates_start,
+            playlist_index::duplicates::playlist_duplicates_status,
+            playlist_index::duplicates::playlist_duplicates_cancel,
+            playlist_index::duplicates::playlist_duplicates_skip,
+            playlist_index::duplicates::playlist_duplicates_report,
+            playlist_index::duplicates::playlist_duplicates_merge,
+            playlist_index::duplicates::playlist_duplicates_merge_batch_start,
+            playlist_index::duplicates::playlist_duplicates_merge_batch_status,
+            playlist_index::duplicates::playlist_duplicates_merge_batch_cancel,
             playlist_index::playlist_catalog_create_playlist_from_files,
             playlist_index::playlist_catalog_artist_facets,
             playlist_index::playlist_catalog_playlist_facets,

@@ -24,6 +24,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+pub mod duplicates;
+mod conversion_refresh;
+pub(crate) use conversion_refresh::refresh_converted_file;
+
 const DB_FILE: &str = "aifficator.sqlite3";
 const EMBEDDING_MODEL: &str = "text-embedding-3-small";
 const EMBEDDING_DIMENSIONS: usize = 512;
@@ -835,19 +839,27 @@ pub fn playlist_index_import_xml(
         let mut unified_track_ids = HashMap::new();
         let mut unified_playlist_paths_by_track = playlist_paths_by_track.clone();
         for (index, track) in indexed_tracks.iter().enumerate() {
-            let unified_track_id = unified_track_id(track);
+            let original_id = unified_track_id(track);
+            let unified_track_id = duplicates::resolve_alias(
+                &tx,
+                &library_id,
+                &original_id,
+                track.file_path.as_deref(),
+            )?;
             if let Some(paths) = playlist_paths_by_track.get(&track.track_id) {
                 unified_playlist_paths_by_track.insert(unified_track_id.clone(), paths.clone());
             }
             let mut unified_track = (*track).clone();
             unified_track.track_id = unified_track_id.clone();
-            insert_track(
-                &tx,
-                &library_id,
-                &unified_track,
-                &unified_playlist_paths_by_track,
-                &now,
-            )?;
+            if original_id == unified_track_id {
+                insert_track(
+                    &tx,
+                    &library_id,
+                    &unified_track,
+                    &unified_playlist_paths_by_track,
+                    &now,
+                )?;
+            }
             tx.execute(
                 "INSERT INTO playlist_index_source_tracks (
                     library_id, source_path, source_track_id, track_id
@@ -2808,6 +2820,7 @@ fn init_db(conn: &Connection) -> Result<(), String> {
         "TEXT NOT NULL DEFAULT 'legacy'",
     )?;
 
+    duplicates::init_db(conn)?;
     Ok(())
 }
 
@@ -2988,6 +3001,15 @@ fn copy_track_to_library(
             .unwrap_or_else(|| format!("{source_library_id}:{source_track_id}"));
         format!("track-{}", stable_hash(&identity))
     };
+    let resolved = duplicates::resolve_alias(
+        conn,
+        target_library_id,
+        &target_track_id,
+        source_path.as_deref().map(Path::new),
+    )?;
+    if resolved != target_track_id {
+        return Ok(Some(resolved));
+    }
 
     conn.execute(
         "INSERT INTO playlist_index_tracks (
@@ -3372,6 +3394,12 @@ fn prepare_local_tracks(
     for (item_id, path) in local_tracks {
         let source_path = path.to_string_lossy().into_owned();
         let track_id = format!("local-{item_id}");
+        let resolved =
+            duplicates::resolve_alias(conn, LOCAL_CONVERSION_LIBRARY_ID, &track_id, Some(&path))?;
+        if resolved != track_id {
+            track_ids.push(resolved);
+            continue;
+        }
         let probe = probe_local_track_metadata(app, &path);
         let fallback_name = path
             .file_stem()

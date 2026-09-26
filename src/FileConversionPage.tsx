@@ -11,6 +11,7 @@ import {
   Loader2,
   Play,
   RefreshCw,
+  RotateCcw,
   Trash2,
   Upload
 } from "lucide-react";
@@ -35,6 +36,8 @@ type LocalConversionState =
   | "already_aiff"
   | "failed";
 
+type ConversionMode = "convert" | "regenerate";
+
 type LocalConversionItem = {
   id: string;
   source_path: string;
@@ -51,6 +54,8 @@ type LocalConversionItem = {
   completed_at?: string | null;
   source_exists: boolean;
   target_exists: boolean;
+  last_operation: ConversionMode;
+  operation_id?: string | null;
 };
 
 type LocalConversionImportResponse = {
@@ -84,6 +89,9 @@ type LocalConversionProgressEvent = {
   percent?: number | null;
   elapsed_seconds?: number | null;
   speed?: string | null;
+  operation_id?: string | null;
+  mode: ConversionMode;
+  phase: string;
 };
 
 type LocalConversionLogEvent = {
@@ -96,6 +104,7 @@ type LocalConversionLogEvent = {
 type LocalConversionBatchResult = {
   items: LocalConversionItem[];
   converted_total: number;
+  regenerated_total: number;
   already_converted_total: number;
   already_aiff_total: number;
   failed_total: number;
@@ -127,6 +136,10 @@ export function FileConversionPage() {
   const [folderRecursive, setFolderRecursive] = useState(true);
   const [maxConcurrency, setMaxConcurrency] = useState(() => recommendedConcurrencyForCores(detectLogicalCores()));
   const [busy, setBusy] = useState(false);
+  const [activeMode, setActiveMode] = useState<ConversionMode | null>(null);
+  const conversionInFlight = useRef(false);
+  const expectedOperations = useRef(new Map<string, string>());
+  const completedOperations = useRef(new Set<string>());
   const [terminalExpanded, setTerminalExpanded] = useState(false);
   const [terminalLogs, setTerminalLogs] = useState<TerminalLogEntry[]>([]);
   const [message, setMessage] = useState("");
@@ -142,11 +155,22 @@ export function FileConversionPage() {
 
     const unlisteners: UnlistenFn[] = [];
     listen<LocalConversionProgressEvent>("local-conversion-progress", (event) => {
+      const expected = expectedOperations.current.get(event.payload.item_id);
+      if (expected && expected !== event.payload.operation_id) return;
+      if (event.payload.operation_id && completedOperations.current.has(event.payload.operation_id)) return;
       setProgressById((current) => {
         const next = new Map(current);
         next.set(event.payload.item_id, event.payload);
         return next;
       });
+      if (isDoneState(event.payload.status)) {
+        const updateCompleted = (items: LocalConversionItem[]) => items.map((item) => item.id === event.payload.item_id
+          ? { ...item, state: event.payload.status, target_exists: true, last_operation: event.payload.mode,
+              message: event.payload.message, operation_id: event.payload.operation_id }
+          : item);
+        setAllItems(updateCompleted);
+        setCurrentItems(updateCompleted);
+      }
     }).then((unlisten) => unlisteners.push(unlisten));
 
     listen<LocalConversionLogEvent>("local-conversion-log", (event) => {
@@ -205,6 +229,9 @@ export function FileConversionPage() {
   const allSelected = visibleItems.length > 0 && selectedItems.length === visibleItems.length;
   const selectedConvertibleIds = selectedItems
     .filter((item) => canConvert(item, progressById.get(item.id)))
+    .map((item) => item.id);
+  const selectedRegeneratableIds = selectedItems
+    .filter((item) => !regenerationUnavailableReason(item, progressById.get(item.id)))
     .map((item) => item.id);
   const stats = useMemo(() => {
     const converted = visibleItems.filter((item) => item.state === "converted" || item.state === "already_converted").length;
@@ -383,13 +410,22 @@ export function FileConversionPage() {
     }
   }
 
-  async function convertIds(itemIds: string[]) {
+  async function convertIds(itemIds: string[], mode: ConversionMode = "convert") {
+    if (conversionInFlight.current || busy) return;
     const uniqueIds = Array.from(new Set(itemIds)).filter((itemId) => !processingIds.has(itemId));
     if (uniqueIds.length === 0) return;
 
+    conversionInFlight.current = true;
+    const requestId = crypto.randomUUID();
+    for (const itemId of uniqueIds) expectedOperations.current.set(itemId, `${requestId}:${itemId}`);
+    const regeneratingPaths = mode === "regenerate"
+      ? allItems.filter((item) => uniqueIds.includes(item.id)).map((item) => item.target_path)
+      : [];
+    for (const path of regeneratingPaths) audioPlayer.setPathProcessing(path, true);
+    setActiveMode(mode);
     setBusy(true);
     setErrorMessage("");
-    setMessage(`${uniqueIds.length} archivo(s) enviados a conversion.`);
+    setMessage(t(mode === "regenerate" ? "Regenerando {count} archivos desde sus originales." : "Convirtiendo {count} archivos.", { count: uniqueIds.length }));
     setProgressById((current) => {
       const next = new Map(current);
       for (const itemId of uniqueIds) {
@@ -402,6 +438,9 @@ export function FileConversionPage() {
           target_path: item.target_path,
           status: "queued",
           message: "En cola",
+          operation_id: `${requestId}:${item.id}`,
+          mode,
+          phase: "queued",
           percent: 0
         });
       }
@@ -411,7 +450,9 @@ export function FileConversionPage() {
     try {
       const result = await invoke<LocalConversionBatchResult>("local_conversion_convert_items", {
         itemIds: uniqueIds,
-        maxConcurrency
+        maxConcurrency,
+        mode,
+        requestId
       });
       setAllItems((current) => upsertItems(current, result.items));
       setCurrentItems((current) => {
@@ -420,11 +461,26 @@ export function FileConversionPage() {
         return relevantItems.length > 0 ? upsertItems(current, relevantItems) : current;
       });
       setMessage(
-        `Conversion terminada: ${result.converted_total} convertidos, ${result.already_converted_total} existentes, ${result.failed_total} errores.`
+        t("Conversión terminada: {converted} convertidos, {regenerated} regenerados, {existing} existentes, {failed} errores.", {
+          converted: result.converted_total, regenerated: result.regenerated_total,
+          existing: result.already_converted_total, failed: result.failed_total
+        })
       );
     } catch (error) {
       setErrorMessage(String(error));
     } finally {
+      for (const path of regeneratingPaths) audioPlayer.setPathProcessing(path, false);
+      for (const id of uniqueIds) {
+        completedOperations.current.add(`${requestId}:${id}`);
+        expectedOperations.current.delete(id);
+      }
+      conversionInFlight.current = false;
+      setActiveMode(null);
+      setProgressById((current) => {
+        const next = new Map(current);
+        for (const id of uniqueIds) next.delete(id);
+        return next;
+      });
       setBusy(false);
     }
   }
@@ -699,8 +755,14 @@ export function FileConversionPage() {
                   </Select>
                 </label>
                 <Button disabled={busy || selectedConvertibleIds.length === 0} onClick={() => void convertIds(selectedConvertibleIds)}>
-                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileAudio2 className="h-4 w-4" />}
+                  {activeMode === "convert" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileAudio2 className="h-4 w-4" />}
                   {t("Convertir seleccionados")}
+                </Button>
+                <Button variant="secondary" disabled={busy || selectedRegeneratableIds.length === 0}
+                  title={t("Vuelve a crear el AIFF desde el original, actualiza sus metadatos y conserva la misma ubicación.")}
+                  onClick={() => void convertIds(selectedRegeneratableIds, "regenerate")}>
+                  {activeMode === "regenerate" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                  {t("Regenerar seleccionados ({count})", { count: selectedRegeneratableIds.length })}
                 </Button>
                 <Button
                   variant="secondary"
@@ -711,6 +773,11 @@ export function FileConversionPage() {
                   {t("Agregar a playlist")}
                 </Button>
               </div>
+              {selectedItems.length > selectedRegeneratableIds.length ? (
+                <p className="text-xs text-muted-foreground">
+                  {t("{count} seleccionados no se pueden regenerar. Revisa el motivo en la acción de cada archivo.", { count: selectedItems.length - selectedRegeneratableIds.length })}
+                </p>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -778,8 +845,8 @@ export function FileConversionPage() {
             </CardHeader>
             <CardContent className="p-0">
               <div className="overflow-x-auto">
-                <div className="min-w-[760px]">
-                  <div className="grid grid-cols-[32px_minmax(0,1.4fr)_112px_76px_minmax(0,0.9fr)_174px] gap-2 border-b border-border bg-secondary px-3 py-2 text-xs font-semibold text-muted-foreground">
+                <div className="min-w-[800px]">
+                  <div className="grid grid-cols-[32px_minmax(0,1.4fr)_112px_76px_minmax(0,0.9fr)_210px] gap-2 border-b border-border bg-secondary px-3 py-2 text-xs font-semibold text-muted-foreground">
                     <span />
                     <span>{t("Archivo")}</span>
                     <span>{t("Estado")}</span>
@@ -799,10 +866,12 @@ export function FileConversionPage() {
                     const state = progress?.status ?? item.state;
                     const percent = progress?.percent ?? (isDoneState(state) ? 100 : 0);
                     const processing = state === "queued" || state === "running";
-                    const canPlayTarget = item.target_exists || state === "converted" || state === "already_converted" || state === "already_aiff";
+                    const canPlayTarget = item.target_exists && !processing;
+                    const regenerationReason = regenerationUnavailableReason(item, progress);
+                    const rowMessage = progress?.message ?? item.message;
 
                     return (
-                      <div key={item.id} className="grid grid-cols-[32px_minmax(0,1.4fr)_112px_76px_minmax(0,0.9fr)_174px] items-center gap-2 border-b border-border px-3 py-2 text-sm">
+                      <div key={item.id} className="grid grid-cols-[32px_minmax(0,1.4fr)_112px_76px_minmax(0,0.9fr)_210px] items-center gap-2 border-b border-border px-3 py-2 text-sm">
                         <input
                           type="checkbox"
                           checked={selectedIds.has(item.id)}
@@ -820,9 +889,12 @@ export function FileConversionPage() {
                           <div className="mt-1 truncate text-xs text-muted-foreground" title={item.source_parent}>
                             {item.source_parent}
                           </div>
+                          {rowMessage ? <div className="mt-1 text-xs text-muted-foreground" role={processing ? "status" : undefined}>
+                            {translateBackendMessage(locale, rowMessage)}
+                          </div> : null}
                           {processing || percent > 0 ? <Progress value={percent} /> : null}
                         </div>
-                        <StatusBadge state={state} />
+                        <StatusBadge state={state} regenerated={state === "converted" && (progress?.mode ?? item.last_operation) === "regenerate"} />
                         <span className="text-xs text-muted-foreground">{formatBytes(item.size_bytes ?? 0)}</span>
                         <span className="truncate text-xs text-muted-foreground" title={item.target_path}>
                           {item.target_path}
@@ -834,9 +906,15 @@ export function FileConversionPage() {
                           <Button variant="secondary" size="icon" title={t("Escuchar AIFF")} disabled={!canPlayTarget} onClick={() => playPath(item.target_path, `${item.source_name} AIFF`)}>
                             <CheckCircle2 className="h-3.5 w-3.5" />
                           </Button>
-                          <Button variant="secondary" size="icon" title={t("Convertir")} disabled={!canConvert(item, progress)} onClick={() => void convertIds([item.id])}>
-                            {processing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileAudio2 className="h-3.5 w-3.5" />}
+                          <Button variant="secondary" size="icon" title={t("Convertir")} disabled={busy || !canConvert(item, progress)} onClick={() => void convertIds([item.id])}>
+                            {processing && progress?.mode !== "regenerate" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileAudio2 className="h-3.5 w-3.5" />}
                           </Button>
+                          <span title={t(regenerationReason ?? "Regenerar AIFF")}>
+                            <Button variant="secondary" size="icon" aria-label={t("Regenerar AIFF")}
+                              disabled={busy || Boolean(regenerationReason)} onClick={() => void convertIds([item.id], "regenerate")}>
+                              {processing && progress?.mode === "regenerate" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                            </Button>
+                          </span>
                           <Button variant="secondary" size="icon" title={t("Abrir carpeta")} onClick={() => void openFolderFor(item.target_exists ? item.target_path : item.source_path)}>
                             <FolderOpen className="h-3.5 w-3.5" />
                           </Button>
@@ -870,6 +948,7 @@ export function FileConversionPage() {
               <p>{t("Los AIFF se guardan al lado del original, dentro de una carpeta llamada converted.")}</p>
               <p>{t("No se reemplazan archivos fuente.")}</p>
               <p>{t("Si el AIFF ya existe, Convertir recupera del original los metadatos faltantes sin recodificar el audio.")}</p>
+              <p>{t("Regenerar vuelve a crear el audio desde el original. Sus etiquetas tienen prioridad; se conservan las etiquetas exclusivas y la carátula del AIFF anterior.")}</p>
             </CardContent>
           </Card>
         </aside>
@@ -931,7 +1010,7 @@ function Metric({ label, value, danger = false }: { label: string; value: number
   );
 }
 
-function StatusBadge({ state }: { state: LocalConversionState }) {
+function StatusBadge({ state, regenerated = false }: { state: LocalConversionState; regenerated?: boolean }) {
   const { t } = useI18n();
   return (
     <span
@@ -945,7 +1024,7 @@ function StatusBadge({ state }: { state: LocalConversionState }) {
       )}
     >
       {state === "running" || state === "queued" ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-      {t(stateLabel(state))}
+      {t(regenerated ? "regenerado" : stateLabel(state))}
     </span>
   );
 }
@@ -961,6 +1040,15 @@ function Progress({ value }: { value: number }) {
 function canConvert(item: LocalConversionItem, progress?: LocalConversionProgressEvent) {
   const state = progress?.status ?? item.state;
   return item.source_exists && state !== "queued" && state !== "running" && state !== "already_aiff";
+}
+
+function regenerationUnavailableReason(item: LocalConversionItem, progress?: LocalConversionProgressEvent) {
+  if (!item.source_exists) return "Falta el archivo original";
+  if (["aif", "aiff"].includes(item.extension.toLowerCase())) return "El original ya es AIFF";
+  const state = progress?.status ?? item.state;
+  if (state === "queued" || state === "running") return "Archivo en procesamiento";
+  if (!item.target_exists && !item.completed_at && state !== "converted" && state !== "already_converted") return "Primero convierte este archivo";
+  return null;
 }
 
 function isDoneState(state: LocalConversionState) {

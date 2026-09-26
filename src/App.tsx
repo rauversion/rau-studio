@@ -46,6 +46,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { HashRouter, Navigate, NavLink, Outlet, Route, Routes, useLocation, useOutletContext } from "react-router-dom";
 import { Button } from "./components/ui/button";
 import { CatalogPage } from "./CatalogPage";
+import { DuplicatesPage } from "./DuplicatesPage";
 import { BroadcastPage } from "./BroadcastPage";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { GlobalAudioPlayerProvider, SidebarAudioPlayer, useGlobalAudioPlayer } from "./components/audio/GlobalAudioPlayer";
@@ -318,6 +319,7 @@ export default function App() {
             <Route path="/file-conversion/rekordbox-convert" element={<RekordboxConvertPage />} />
             <Route path="/playlists" element={<PlaylistIndexPage />} />
             <Route path="/playlists/catalog" element={<CatalogPage />} />
+            <Route path="/playlists/duplicates" element={<DuplicatesPage />} />
             <Route path="/playlists/copilot" element={<PlaylistCopilotPage />} />
             <Route path="/playlists/artists" element={<PlaylistBrowserPage kind="artist" />} />
             <Route path="/playlists/albums" element={<PlaylistBrowserPage kind="album" />} />

@@ -349,6 +349,24 @@ export function PlaylistIndexPage() {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void listen("conversion-catalog-updated", () => {
+      if (activeLibraryId && activePlaylistPath) {
+        void invoke<PlaylistIndexTrack[]>("playlist_index_playlist_tracks", { libraryId: activeLibraryId, playlistPath: activePlaylistPath })
+          .then((tracks) => { if (!disposed) setPlaylistTracks(tracks); })
+          .catch((error) => { if (!disposed) setErrorMessage(translateBackendMessage(locale, String(error))); });
+      }
+      if (activeDraftId) {
+        void invoke<PlaylistIndexTrack[]>("playlist_index_draft_tracks", { draftId: activeDraftId })
+          .then((tracks) => { if (!disposed) setDraftTracks(tracks); })
+          .catch((error) => { if (!disposed) setErrorMessage(translateBackendMessage(locale, String(error))); });
+      }
+    }).then((unlisten) => { if (disposed) unlisten(); else cleanup = unlisten; });
+    return () => { disposed = true; cleanup?.(); };
+  }, [activeLibraryId, activePlaylistPath, activeDraftId, locale]);
+
   function toggleTrackTableColumn(column: TrackTableColumnKey) {
     setVisibleTrackTableColumns((current) => {
       const next = new Set(current);
@@ -853,7 +871,7 @@ export function PlaylistIndexPage() {
   }
 
   async function addSelectedDraftTracks(targetDraftId: string) {
-    if (!activeDraftId || !targetDraftId || selectedDraftTracks.length === 0) return;
+    if (!activeDraft || !activeDraftId || !targetDraftId || selectedDraftTracks.length === 0) return;
     setBusy(true);
     setErrorMessage("");
 
