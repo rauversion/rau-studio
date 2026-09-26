@@ -2,8 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Bookmark,
   BookmarkPlus,
-  ChevronLeft,
-  ChevronRight,
   Columns3,
   Database,
   ListFilter,
@@ -22,6 +20,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
+import { useCatalogTracks } from "./components/catalog/useCatalogTracks";
+import { CatalogValueFacet } from "./components/catalog/CatalogValueFacet";
+import { CatalogDeleteTracksDialog, type CatalogTrackDeletion } from "./components/catalog/CatalogDeleteTracksDialog";
+import type { CatalogFacetValue, CatalogFilters } from "./components/catalog/types";
 import { PlaylistAddDialog, type PlaylistDraftOption } from "./components/tracks/PlaylistAddDialog";
 import { TrackDetailSheet } from "./components/tracks/TrackDetailSheet";
 import { TrackTable } from "./components/tracks/TrackList";
@@ -37,48 +39,6 @@ type PlaylistIndexLibrary = {
   source_path: string;
   track_count: number;
   playlist_count: number;
-};
-
-type CatalogFacetValue = {
-  value: string;
-  name: string;
-  count: number;
-};
-
-type CatalogFacets = {
-  genres: CatalogFacetValue[];
-  artists: CatalogFacetValue[];
-  albums: CatalogFacetValue[];
-  keys: CatalogFacetValue[];
-  years: CatalogFacetValue[];
-  formats: CatalogFacetValue[];
-  ratings: CatalogFacetValue[];
-  metadata_gaps: CatalogFacetValue[];
-  availability: CatalogFacetValue[];
-};
-
-type CatalogResponse = {
-  items: TrackListItem[];
-  total: number;
-  page: number;
-  page_size: number;
-  total_pages: number;
-  facets: CatalogFacets;
-  query_terms: string[];
-};
-
-type CatalogFilters = {
-  genres: string[];
-  artists: string[];
-  albums: string[];
-  keys: string[];
-  years: string[];
-  formats: string[];
-  bpmMin?: number;
-  bpmMax?: number;
-  ratingMin?: number;
-  metadataGaps: string[];
-  availability: string[];
 };
 
 type EnrichmentRunResult = {
@@ -126,6 +86,7 @@ function emptyFilters(): CatalogFilters {
   return {
     genres: [],
     artists: [],
+    playlists: [],
     albums: [],
     keys: [],
     years: [],
@@ -139,16 +100,14 @@ export function CatalogPage() {
   const { locale, t } = useI18n();
   const navigate = useNavigate();
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const requestSequence = useRef(0);
+  const loadMoreSentinel = useRef<HTMLElement>(null);
   const [libraries, setLibraries] = useState<PlaylistIndexLibrary[]>([]);
   const [activeLibraryId, setActiveLibraryId] = useState("");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [filters, setFilters] = useState<CatalogFilters>(() => emptyFilters());
   const [sort, setSort] = useState("relevance");
-  const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
-  const [response, setResponse] = useState<CatalogResponse | null>(null);
   const [selectedTracks, setSelectedTracks] = useState<Map<string, TrackListItem>>(() => new Map());
   const [detailTrack, setDetailTrack] = useState<TrackListItem | null>(null);
   const [drafts, setDrafts] = useState<PlaylistDraftOption[]>([]);
@@ -160,7 +119,9 @@ export function CatalogPage() {
   const [playlistDialogOpen, setPlaylistDialogOpen] = useState(false);
   const [saveSearchDialogOpen, setSaveSearchDialogOpen] = useState(false);
   const [deleteSearchDialogOpen, setDeleteSearchDialogOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [deleteTracksRequest, setDeleteTracksRequest] = useState<CatalogTrackDeletion | null>(null);
+  const [deleteTracksBusy, setDeleteTracksBusy] = useState(false);
+  const [deleteTracksError, setDeleteTracksError] = useState("");
   const [bootLoading, setBootLoading] = useState(true);
   const [playlistBusy, setPlaylistBusy] = useState(false);
   const [enrichmentBusy, setEnrichmentBusy] = useState(false);
@@ -171,6 +132,9 @@ export function CatalogPage() {
   const [message, setMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const trackPlayer = useTrackPlayer({ t, onError: setErrorMessage });
+  const { response, loading, error: tracksError, hasMore, loadMore, retry, setResponse, invalidate } = useCatalogTracks({
+    libraryId: activeLibraryId, query: debouncedQuery, filters, sort, pageSize
+  }, refreshToken);
 
   const activeLibrary = libraries.find((library) => library.id === activeLibraryId) ?? null;
   const activeSavedSearch = savedSearches.find((savedSearch) => savedSearch.id === activeSavedSearchId) ?? null;
@@ -184,7 +148,8 @@ export function CatalogPage() {
   const visibleTracksSelected = Boolean(
     response?.items.length && response.items.every((track) => selectedTracks.has(track.track_id))
   );
-  const filterChips = useMemo(() => buildFilterChips(filters), [filters]);
+  const playlistNames = useMemo(() => Object.fromEntries(drafts.map((playlist) => [playlist.id, playlist.playlist_path ?? playlist.name])), [drafts]);
+  const filterChips = useMemo(() => buildFilterChips(filters, playlistNames), [filters, playlistNames]);
   const savedSearchDirty = Boolean(
     activeSavedSearch && activeSavedSearchBaseline !== catalogDefinitionKey(query, filters, sort)
   );
@@ -199,12 +164,26 @@ export function CatalogPage() {
   }, [query]);
 
   useEffect(() => {
-    if (!activeLibraryId) {
-      setResponse(null);
-      return;
-    }
-    void searchCatalog();
-  }, [activeLibraryId, debouncedQuery, filters, page, pageSize, refreshToken, sort]);
+    if (!response) return;
+    setSelectedTracks((current) => {
+      if (current.size === 0) return current;
+      const next = new Map(current);
+      for (const track of response.items) {
+        if (next.has(track.track_id)) next.set(track.track_id, track);
+      }
+      return next;
+    });
+  }, [response]);
+
+  useEffect(() => {
+    const sentinel = loadMoreSentinel.current;
+    if (!sentinel || !hasMore || loading || tracksError || query !== debouncedQuery || deleteTracksRequest || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadMore();
+    }, { rootMargin: "240px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, loading, tracksError, query, debouncedQuery, deleteTracksRequest, loadMore]);
 
   useEffect(() => {
     function focusSearch(event: KeyboardEvent) {
@@ -240,41 +219,6 @@ export function CatalogPage() {
     }
   }
 
-  async function searchCatalog() {
-    const requestId = ++requestSequence.current;
-    setLoading(true);
-    setErrorMessage("");
-    try {
-      const nextResponse = await invoke<CatalogResponse>("playlist_catalog_search", {
-        request: {
-          libraryId: activeLibraryId,
-          query: debouncedQuery,
-          filters,
-          sort,
-          page,
-          pageSize
-        }
-      });
-      if (requestId !== requestSequence.current) return;
-      setResponse(nextResponse);
-      if (nextResponse.page !== page) setPage(nextResponse.page);
-      setSelectedTracks((current) => {
-        if (current.size === 0) return current;
-        const next = new Map(current);
-        for (const track of nextResponse.items) {
-          if (next.has(track.track_id)) next.set(track.track_id, track);
-        }
-        return next;
-      });
-    } catch (error) {
-      if (requestId === requestSequence.current) {
-        setErrorMessage(translateBackendMessage(locale, String(error)));
-      }
-    } finally {
-      if (requestId === requestSequence.current) setLoading(false);
-    }
-  }
-
   async function loadDrafts(libraryId = activeLibraryId) {
     if (!libraryId) return;
     const nextDrafts = await invoke<PlaylistDraftOption[]>("playlist_index_playlist_targets");
@@ -289,9 +233,10 @@ export function CatalogPage() {
 
   async function changeLibrary(libraryId: string) {
     setActiveLibraryId(libraryId);
-    setPage(1);
+    setFilters((current) => ({ ...current, playlists: [] }));
     setSelectedTracks(new Map());
     setDetailTrack(null);
+    setDeleteTracksRequest(null);
     setActiveSavedSearchId("");
     setActiveSavedSearchBaseline("");
     setPlaylistDialogOpen(false);
@@ -326,11 +271,10 @@ export function CatalogPage() {
 
   function updateQuery(value: string) {
     setQuery(value);
-    setPage(1);
     setSelectedTracks(new Map());
   }
 
-  function toggleArrayFilter(field: "genres" | "artists" | "albums" | "keys" | "years" | "formats" | "metadataGaps" | "availability", value: string) {
+  function toggleArrayFilter(field: "genres" | "artists" | "playlists" | "albums" | "keys" | "years" | "formats" | "metadataGaps" | "availability", value: string) {
     setFilters((current) => {
       const values = current[field];
       return {
@@ -338,19 +282,16 @@ export function CatalogPage() {
         [field]: values.includes(value) ? values.filter((item) => item !== value) : [...values, value]
       };
     });
-    setPage(1);
     setSelectedTracks(new Map());
   }
 
   function setNumericFilter(field: "bpmMin" | "bpmMax" | "ratingMin", value?: number) {
     setFilters((current) => ({ ...current, [field]: value }));
-    setPage(1);
     setSelectedTracks(new Map());
   }
 
   function clearFilters() {
     setFilters(emptyFilters());
-    setPage(1);
     setSelectedTracks(new Map());
   }
 
@@ -409,12 +350,46 @@ export function CatalogPage() {
     }
   }
 
+  async function deleteSelectedTracks() {
+    if (!deleteTracksRequest || deleteTracksBusy) return;
+    const { libraryId, tracks } = deleteTracksRequest;
+    const deletedIds = new Set(uniqueTrackIds(tracks));
+    setDeleteTracksBusy(true);
+    setDeleteTracksError("");
+    setMessage("");
+    setErrorMessage("");
+    try {
+      const result = await invoke<{ library: PlaylistIndexLibrary; deleted_total: number }>("playlist_index_delete_tracks", {
+        libraryId,
+        trackIds: Array.from(deletedIds)
+      });
+      // Ignore searches started before deletion so they cannot restore deleted rows.
+      invalidate();
+      setLibraries((current) => current.map((library) => library.id === libraryId ? result.library : library));
+      setSelectedTracks((current) => new Map(Array.from(current).filter(([id]) => !deletedIds.has(id))));
+      setResponse((current) => current ? { ...current, items: current.items.filter((track) => !deletedIds.has(track.track_id)) } : current);
+      setDetailTrack((current) => current && deletedIds.has(current.track_id) ? null : current);
+      setDeleteTracksRequest(null);
+      setRefreshToken((current) => current + 1);
+      setMessage(t("Tracks borrados del catalogo: {count}", { count: result.deleted_total }));
+      // Refresh playlist counts without treating a refresh failure as a failed deletion.
+      try {
+        await Promise.all([loadDrafts(libraryId), loadSavedSearches(libraryId)]);
+      } catch (error) {
+        setErrorMessage(translateBackendMessage(locale, String(error)));
+      }
+    } catch (error) {
+      setDeleteTracksError(translateBackendMessage(locale, String(error)));
+    } finally {
+      setDeleteTracksBusy(false);
+    }
+  }
+
   function openSavedSearch(savedSearch: CatalogSavedSearch) {
     setQuery(savedSearch.query);
     setDebouncedQuery(savedSearch.query);
     setFilters(normalizeCatalogFilters(savedSearch.filters));
     setSort(savedSearch.sort);
-    setPage(1);
     setSelectedTracks(new Map());
     setDetailTrack(null);
     setActiveSavedSearchId(savedSearch.id);
@@ -515,6 +490,7 @@ export function CatalogPage() {
         trackIds
       });
       await loadDrafts(activeLibraryId);
+      setRefreshToken((current) => current + 1);
       setPlaylistDialogOpen(false);
       setMessage(t("{count} tracks agregados a la playlist.", { count: updated.length }));
     } catch (error) {
@@ -834,15 +810,16 @@ export function CatalogPage() {
 
       {activeLibrary ? (
         <div className="grid grid-cols-[250px_minmax(0,1fr)] items-start gap-4 max-xl:grid-cols-1">
-          <Card className="sticky top-4 max-h-[calc(100vh-32px)] overflow-hidden max-xl:static max-xl:max-h-none">
-            <CardHeader>
+          <Card className="sticky top-4 flex max-h-[calc(100vh-32px)] flex-col overflow-hidden max-xl:static max-xl:max-h-none">
+            <CardHeader className="shrink-0">
               <CardTitle className="flex items-center gap-2"><ListFilter className="h-4 w-4" />{t("Filtros")}</CardTitle>
               {filterChips.length > 0 ? <Button variant="ghost" size="sm" onClick={clearFilters}>{t("Limpiar")}</Button> : null}
             </CardHeader>
             <CardContent className="grid divide-y divide-border overflow-y-auto">
               <BpmFacet filters={filters} onChange={setNumericFilter} />
               <FacetSection title={t("Genero")} items={response?.facets.genres ?? []} selected={filters.genres} onToggle={(value) => toggleArrayFilter("genres", value)} />
-              <FacetSection title={t("Artista")} items={response?.facets.artists ?? []} selected={filters.artists} onToggle={(value) => toggleArrayFilter("artists", value)} />
+              <CatalogValueFacet key={`artists:${activeLibraryId}`} facet="artists" libraryId={activeLibraryId} catalogQuery={debouncedQuery} filters={filters} refreshToken={refreshToken} onToggle={(value) => toggleArrayFilter("artists", value)} />
+              <CatalogValueFacet key={`playlists:${activeLibraryId}`} facet="playlists" libraryId={activeLibraryId} catalogQuery={debouncedQuery} filters={filters} refreshToken={refreshToken} labels={playlistNames} onToggle={(value) => toggleArrayFilter("playlists", value)} />
               <FacetSection title="Key" items={response?.facets.keys ?? []} selected={filters.keys} onToggle={(value) => toggleArrayFilter("keys", value)} />
               <RatingFacet items={response?.facets.ratings ?? []} selected={filters.ratingMin} onChange={(value) => setNumericFilter("ratingMin", value)} />
               <FacetSection title={t("Metadata faltante")} items={response?.facets.metadata_gaps ?? []} selected={filters.metadataGaps} onToggle={(value) => toggleArrayFilter("metadataGaps", value)} />
@@ -862,7 +839,7 @@ export function CatalogPage() {
                     type="button"
                     className="inline-flex h-7 items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2.5 text-xs font-semibold text-primary hover:bg-primary/15"
                     onClick={() => {
-                      removeFilterChip(chip, filters, setFilters, setPage);
+                      removeFilterChip(chip, filters, setFilters);
                       setSelectedTracks(new Map());
                     }}
                   >
@@ -882,7 +859,7 @@ export function CatalogPage() {
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button variant="secondary" size="sm" disabled={!response?.items.length} onClick={toggleVisibleSelection}>
-                    {visibleTracksSelected ? t("Quitar pagina") : t("Seleccionar pagina")}
+                    {visibleTracksSelected ? t("Deseleccionar cargados") : t("Seleccionar cargados")}
                   </Button>
                   <Button
                     variant="secondary"
@@ -893,12 +870,24 @@ export function CatalogPage() {
                     {selectionBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Layers3 className="h-3.5 w-3.5" />}
                     {t("Seleccionar todos ({count})", { count: Math.min(response?.total ?? 0, 5000) })}
                   </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={selectedTrackList.length === 0 || deleteTracksBusy || selectionBusy || enrichmentBusy || ratingBusy || playlistBusy}
+                    onClick={() => {
+                      setDeleteTracksError("");
+                      setDeleteTracksRequest({ libraryId: activeLibraryId, libraryName: activeLibrary.source_name, tracks: selectedTrackList });
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {selectedTrackList.length ? t("Borrar ({count})", { count: selectedTrackList.length }) : t("Borrar")}
+                  </Button>
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <span>{t("Orden")}</span>
                     <select
                       className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none"
                       value={sort}
-                      onChange={(event) => { setSort(event.currentTarget.value); setPage(1); }}
+                      onChange={(event) => { setSort(event.currentTarget.value); }}
                     >
                       <option value="relevance">{t("Relevancia")}</option>
                       <option value="recent">{t("Mas recientes")}</option>
@@ -921,7 +910,7 @@ export function CatalogPage() {
                   columns={orderedColumns}
                   selectedTrackIds={selectedTrackIds}
                   isPlaying={trackPlayer.isPlaying}
-                  playbackContext={{ id: `catalog-${activeLibraryId}-${page}`, label: t("Catalogo") }}
+                  playbackContext={{ id: `catalog-${activeLibraryId}`, label: t("Catalogo") }}
                   onDetails={setDetailTrack}
                   onOpenFolder={openFolder}
                   onPlay={trackPlayer.toggleTrackPlayback}
@@ -930,6 +919,8 @@ export function CatalogPage() {
                     <div className="grid min-h-72 place-items-center p-8 text-center">
                       {loading ? (
                         <LoaderCircle className="h-7 w-7 animate-spin text-primary" />
+                      ) : tracksError ? (
+                        <p className="text-sm text-muted-foreground">{t("No se pudieron cargar los tracks.")}</p>
                       ) : (
                         <div>
                           <Search className="mx-auto h-8 w-8 text-muted-foreground" />
@@ -941,28 +932,33 @@ export function CatalogPage() {
                   }
                 />
               </CardContent>
-              <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-3 py-2">
+              <footer ref={loadMoreSentinel} className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-3 py-3">
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <span>{t("Por pagina")}</span>
+                  <span>{t("Por carga")}</span>
                   <select
                     className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground"
                     value={pageSize}
-                    onChange={(event) => { setPageSize(Number(event.currentTarget.value)); setPage(1); }}
+                    onChange={(event) => setPageSize(Number(event.currentTarget.value))}
                   >
                     {[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
                   </select>
                 </label>
-                <div className="flex items-center gap-2">
-                  <Button variant="secondary" size="icon" disabled={(response?.page ?? 1) <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>
-                    <ChevronLeft className="h-4 w-4" />
+                <span className="text-xs text-muted-foreground" role="status">
+                  {t("{count} de {total} tracks", { count: response?.items.length ?? 0, total: response?.total ?? 0 })}
+                  {loading ? <span className="ml-2 inline-flex items-center gap-1"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />{t("Cargando tracks")}</span> : null}
+                </span>
+                {tracksError ? (
+                  <div className="flex items-center gap-2 text-xs" role="alert">
+                    <span className="text-destructive">{translateBackendMessage(locale, tracksError)}</span>
+                    <Button variant="secondary" size="sm" disabled={loading} onClick={retry}>{t("Reintentar")}</Button>
+                  </div>
+                ) : hasMore ? (
+                  <Button variant="secondary" size="sm" disabled={loading || query !== debouncedQuery || deleteTracksBusy} onClick={loadMore}>
+                    {t("Cargar mas")}
                   </Button>
-                  <span className="min-w-24 text-center text-xs text-muted-foreground">
-                    {t("Pagina {page} de {total}", { page: response?.page ?? 1, total: response?.total_pages ?? 1 })}
-                  </span>
-                  <Button variant="secondary" size="icon" disabled={(response?.page ?? 1) >= (response?.total_pages ?? 1) || loading} onClick={() => setPage((current) => current + 1)}>
-                    <ChevronRight className="h-4 w-4" />
-                  </Button>
-                </div>
+                ) : response && response.total > 0 && !loading ? (
+                  <span className="text-xs text-muted-foreground">{t("Todos los tracks cargados")}</span>
+                ) : null}
               </footer>
             </Card>
           </section>
@@ -1000,6 +996,13 @@ export function CatalogPage() {
         name={activeSavedSearch?.name ?? ""}
         onClose={() => setDeleteSearchDialogOpen(false)}
         onConfirm={() => void deleteActiveSavedSearch()}
+      />
+      <CatalogDeleteTracksDialog
+        request={deleteTracksRequest}
+        busy={deleteTracksBusy}
+        error={deleteTracksError}
+        onClose={() => { if (!deleteTracksBusy) setDeleteTracksRequest(null); }}
+        onConfirm={() => void deleteSelectedTracks()}
       />
     </main>
   );
@@ -1267,11 +1270,12 @@ function ColumnChooser({ columns, onToggle }: { columns: Set<TrackListColumn>; o
 
 type FilterChip = { key: string; field: keyof CatalogFilters; value?: string; label: string };
 
-function buildFilterChips(filters: CatalogFilters): FilterChip[] {
+function buildFilterChips(filters: CatalogFilters, playlistNames: Record<string, string>): FilterChip[] {
   const chips: FilterChip[] = [];
   const fields: Array<[keyof CatalogFilters, string, string[]]> = [
     ["genres", "Genero", filters.genres],
     ["artists", "Artista", filters.artists],
+    ["playlists", "Playlist", filters.playlists],
     ["albums", "Album", filters.albums],
     ["keys", "Key", filters.keys],
     ["years", "Ano", filters.years],
@@ -1280,7 +1284,7 @@ function buildFilterChips(filters: CatalogFilters): FilterChip[] {
     ["availability", "Archivo", filters.availability]
   ];
   for (const [field, label, values] of fields) {
-    for (const value of values) chips.push({ key: `${field}:${value}`, field, value, label: `${label}: ${humanizeFilter(value)}` });
+    for (const value of values) chips.push({ key: `${field}:${value}`, field, value, label: `${label}: ${field === "playlists" ? playlistNames[value] ?? "Playlist no disponible" : humanizeFilter(value)}` });
   }
   if (filters.bpmMin !== undefined || filters.bpmMax !== undefined) {
     chips.push({ key: "bpm", field: "bpmMin", label: `BPM: ${filters.bpmMin ?? "…"}–${filters.bpmMax ?? "…"}` });
@@ -1292,18 +1296,16 @@ function buildFilterChips(filters: CatalogFilters): FilterChip[] {
 function removeFilterChip(
   chip: FilterChip,
   filters: CatalogFilters,
-  setFilters: (value: CatalogFilters) => void,
-  setPage: (value: number) => void
+  setFilters: (value: CatalogFilters) => void
 ) {
   if (chip.key === "bpm") {
     setFilters({ ...filters, bpmMin: undefined, bpmMax: undefined });
   } else if (chip.field === "ratingMin") {
     setFilters({ ...filters, ratingMin: undefined });
   } else {
-    const field = chip.field as "genres" | "artists" | "albums" | "keys" | "years" | "formats" | "metadataGaps" | "availability";
+    const field = chip.field as "genres" | "artists" | "playlists" | "albums" | "keys" | "years" | "formats" | "metadataGaps" | "availability";
     setFilters({ ...filters, [field]: filters[field].filter((value) => value !== chip.value) });
   }
-  setPage(1);
 }
 
 function humanizeFilter(value: string) {
@@ -1325,6 +1327,7 @@ function normalizeCatalogFilters(filters?: Partial<CatalogFilters> | null): Cata
   return {
     genres: filters?.genres ?? [],
     artists: filters?.artists ?? [],
+    playlists: filters?.playlists ?? [],
     albums: filters?.albums ?? [],
     keys: filters?.keys ?? [],
     years: filters?.years ?? [],
@@ -1346,6 +1349,7 @@ function catalogDefinitionKey(query: string, filters: CatalogFilters, sort: stri
       ...normalized,
       genres: [...normalized.genres].sort(),
       artists: [...normalized.artists].sort(),
+      playlists: [...normalized.playlists].sort(),
       albums: [...normalized.albums].sort(),
       keys: [...normalized.keys].sort(),
       years: [...normalized.years].sort(),

@@ -69,6 +69,24 @@ The **Playlist** tab manages local draft playlists:
 
 Drafts do not modify the original XML until the user explicitly exports.
 
+## Catalog Artist Facet
+
+In **Catalog**, the artist sidebar facet has its own search field. It searches all artists matching the current catalog query and other filters, with a 250 ms typing delay. **Show more** loads another page of 12 artists, ordered by track count and then name. Searching the facet does not change the track results until an artist is selected. Selecting or deselecting an artist updates its checkbox in place, preserving the loaded pages and scroll position without fetching the artist list again. Selected artists outside the loaded results remain in a separate list so they can always be removed. Changing the query or other filters restarts pagination; changing libraries also clears the facet search.
+
+## Catalog Playlist Facet
+
+The **Playlists** facet loads 200 playlists per page with its own search field and **Show more** control, preserving loaded pages and scroll when selecting. It includes imported playlists (displayed by their full folder path) and local playlists in the active library. Folder nodes and playlists with no matching tracks are omitted; selected playlists remain removable at zero matches.
+
+Selecting multiple playlists matches tracks in **any** of them, combined with the catalog query and other filters. Counts reflect those other filters and count each track once per playlist, even if it appears repeatedly. Artist and other facet counts also respect the selected playlists. Playlist filters are retained in saved smart collections and bulk selections, and are cleared when switching libraries. Adding tracks to a playlist from Catalog refreshes the counts.
+
+## Catalog Track Scrolling
+
+Catalog results append as the user approaches the end of the list. **Load more** provides the same action manually, with 25, 50 (default), or 100 tracks per load. Previously loaded rows and checkbox selections stay in place; **Select loaded** selects those rows, while **Select all** still applies to all matching results up to the existing 5,000-track limit. The footer reports loaded and total tracks. Search, filter, library, sort, or load-size changes start a fresh list. Refreshing after edits or deletions reloads the entire loaded range, preserving its extent while correcting page offsets. Failed loads keep existing rows and offer an explicit retry without retrying continuously.
+
+## Catalog Track Deletion
+
+Track checkboxes in **Catalog** enable **Delete**, including selections across pages. The confirmation lists the selected tracks and library. Deletion removes the track records, indexed and local playlist memberships, source mappings, embeddings, enrichment data, search entries, and Copilot candidate references in that library. It updates playlist, library, and saved smart collection counts in the same transaction. The catalog and facets refresh after success; an error keeps the selection available to retry. Audio files and the original XML are preserved.
+
 ## Artist and Album Browser
 
 Paths:

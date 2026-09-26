@@ -18,6 +18,7 @@ export type PlaylistDraftOption = {
   target_kind?: "draft" | "indexed" | string;
   library_id?: string;
   library_name?: string;
+  playlist_path?: string | null;
   name: string;
   track_count: number;
 };

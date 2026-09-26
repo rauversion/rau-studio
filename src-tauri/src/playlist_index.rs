@@ -170,6 +170,7 @@ pub struct TaxonomyCount {
 pub struct PlaylistCatalogFilters {
     genres: Vec<String>,
     artists: Vec<String>,
+    playlists: Vec<String>,
     albums: Vec<String>,
     keys: Vec<String>,
     years: Vec<String>,
@@ -197,6 +198,16 @@ pub struct PlaylistCatalogFacetValue {
     value: String,
     name: String,
     count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaylistCatalogFacetPage {
+    items: Vec<PlaylistCatalogFacetValue>,
+    selected: Vec<PlaylistCatalogFacetValue>,
+    total: usize,
+    page: usize,
+    page_size: usize,
+    total_pages: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -310,7 +321,7 @@ pub struct PlaylistIndexImportResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PlaylistMissingFilesCleanupResponse {
+pub struct PlaylistTracksDeletionResponse {
     library: PlaylistIndexLibrary,
     playlists: Vec<PlaylistIndexPlaylist>,
     deleted_total: usize,
@@ -1151,7 +1162,7 @@ pub fn playlist_index_delete_tracks(
     app: AppHandle,
     library_id: String,
     track_ids: Vec<String>,
-) -> Result<PlaylistIndexImportResponse, String> {
+) -> Result<PlaylistTracksDeletionResponse, String> {
     let mut conn = open_db(&app)?;
     if get_library(&conn, &library_id)?.is_none() {
         return Err(format!("Libreria indexada no encontrada: {library_id}"));
@@ -1168,7 +1179,6 @@ pub fn playlist_index_delete_tracks(
 
     let deleted_total = delete_index_tracks(&mut conn, &library_id, &ids)?;
 
-    rebuild_fts(&conn)?;
     emit_progress(
         &app,
         "info",
@@ -1182,14 +1192,18 @@ pub fn playlist_index_delete_tracks(
     let library = get_library(&conn, &library_id)?
         .ok_or_else(|| "No se pudo leer libreria indexada.".to_string())?;
     let playlists = list_playlists(&conn, &library_id)?;
-    Ok(PlaylistIndexImportResponse { library, playlists })
+    Ok(PlaylistTracksDeletionResponse {
+        library,
+        playlists,
+        deleted_total,
+    })
 }
 
 #[tauri::command]
 pub fn playlist_index_clean_missing_files(
     app: AppHandle,
     library_id: String,
-) -> Result<PlaylistMissingFilesCleanupResponse, String> {
+) -> Result<PlaylistTracksDeletionResponse, String> {
     let mut conn = open_db(&app)?;
     if get_library(&conn, &library_id)?.is_none() {
         return Err(format!("Libreria indexada no encontrada: {library_id}"));
@@ -1202,9 +1216,6 @@ pub fn playlist_index_clean_missing_files(
         delete_index_tracks(&mut conn, &library_id, &ids)?
     };
 
-    if deleted_total > 0 {
-        rebuild_fts(&conn)?;
-    }
     emit_progress(
         &app,
         "info",
@@ -1218,7 +1229,7 @@ pub fn playlist_index_clean_missing_files(
     let library = get_library(&conn, &library_id)?
         .ok_or_else(|| "No se pudo leer libreria indexada.".to_string())?;
     let playlists = list_playlists(&conn, &library_id)?;
-    Ok(PlaylistMissingFilesCleanupResponse {
+    Ok(PlaylistTracksDeletionResponse {
         library,
         playlists,
         deleted_total,
@@ -1260,6 +1271,20 @@ fn delete_index_tracks(
             .map_err(|error| format!("No se pudo eliminar track indexado {track_id}: {error}"))?;
     }
 
+    // These references have no foreign key to tracks, so remove them explicitly.
+    tx.execute(
+        "UPDATE playlist_drafts SET updated_at = ?2
+         WHERE library_id = ?1 AND EXISTS (
+           SELECT 1 FROM playlist_draft_tracks dt
+           WHERE dt.draft_id = playlist_drafts.id AND NOT EXISTS (
+             SELECT 1 FROM playlist_index_tracks t
+             WHERE t.library_id = ?1 AND t.track_id = dt.track_id
+           )
+         )",
+        params![library_id, &now],
+    )
+    .map_err(|error| format!("No se pudieron actualizar playlists locales: {error}"))?;
+
     tx.execute(
         "DELETE FROM playlist_draft_tracks
          WHERE draft_id IN (SELECT id FROM playlist_drafts WHERE library_id = ?1)
@@ -1270,6 +1295,29 @@ fn delete_index_tracks(
         params![library_id],
     )
     .map_err(|error| format!("No se pudieron limpiar drafts huerfanos: {error}"))?;
+
+    tx.execute(
+        "DELETE FROM playlist_copilot_candidate_tracks
+         WHERE candidate_set_id IN (
+           SELECT cs.id FROM playlist_copilot_candidate_sets cs
+           JOIN playlist_copilot_sessions s ON s.id = cs.session_id
+           WHERE s.library_id = ?1
+         ) AND NOT EXISTS (
+           SELECT 1 FROM playlist_index_tracks t
+           WHERE t.library_id = ?1 AND t.track_id = playlist_copilot_candidate_tracks.track_id
+         )",
+        params![library_id],
+    )
+    .map_err(|error| format!("No se pudieron limpiar referencias de Copilot: {error}"))?;
+
+    tx.execute(
+        "DELETE FROM playlist_track_fts WHERE library_id = ?1 AND NOT EXISTS (
+           SELECT 1 FROM playlist_index_tracks t
+           WHERE t.library_id = ?1 AND t.track_id = playlist_track_fts.track_id
+         )",
+        params![library_id],
+    )
+    .map_err(|error| format!("No se pudieron limpiar referencias de busqueda: {error}"))?;
 
     tx.execute(
         "UPDATE playlist_index_playlists
@@ -1298,6 +1346,23 @@ fn delete_index_tracks(
         params![library_id, &now],
     )
     .map_err(|error| format!("No se pudieron actualizar contadores de libreria: {error}"))?;
+
+    let saved_searches = list_catalog_saved_searches(&tx, library_id)?;
+    if !saved_searches.is_empty() {
+        let tracks = list_taxonomy_tracks(&tx, library_id)?;
+        for saved_search in saved_searches {
+            let criteria =
+                catalog_criteria(&tx, library_id, saved_search.filters, &saved_search.query)?;
+            let count = tracks
+                .iter()
+                .filter(|track| catalog_track_matches(track, &criteria, None))
+                .count();
+            tx.execute(
+                "UPDATE playlist_catalog_saved_searches SET result_count = ?2, last_evaluated_at = ?3 WHERE id = ?1",
+                params![saved_search.id, count as i64, &now],
+            ).map_err(|error| format!("No se pudieron actualizar conteos de smart collections: {error}"))?;
+        }
+    }
 
     tx.commit()
         .map_err(|error| format!("No se pudo confirmar eliminacion de tracks: {error}"))?;
@@ -1424,6 +1489,73 @@ pub fn playlist_catalog_search(
 ) -> Result<PlaylistCatalogResponse, String> {
     let conn = open_db(&app)?;
     catalog_search(&conn, request)
+}
+
+#[tauri::command]
+pub async fn playlist_catalog_artist_facets(
+    app: AppHandle,
+    request: PlaylistCatalogRequest,
+    search: Option<String>,
+) -> Result<PlaylistCatalogFacetPage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if request.library_id.trim().is_empty() {
+            return Err("Selecciona una libreria para buscar artistas.".to_string());
+        }
+        let conn = open_db(&app)?;
+        let tracks = list_taxonomy_tracks(&conn, request.library_id.trim())?;
+        let filters = request.filters.unwrap_or_default();
+        let selected = filters.artists.clone();
+        let criteria = catalog_criteria(
+            &conn,
+            request.library_id.trim(),
+            filters,
+            request.query.as_deref().unwrap_or_default(),
+        )?;
+        Ok(catalog_artist_facets(
+            &tracks,
+            &criteria,
+            &selected,
+            search.as_deref().unwrap_or_default(),
+            request.page.unwrap_or(1),
+            request.page_size.unwrap_or(12),
+        ))
+    })
+    .await
+    .map_err(|error| format!("No se pudieron buscar artistas: {error}"))?
+}
+
+#[tauri::command]
+pub async fn playlist_catalog_playlist_facets(
+    app: AppHandle,
+    request: PlaylistCatalogRequest,
+    search: Option<String>,
+) -> Result<PlaylistCatalogFacetPage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let library_id = request.library_id.trim();
+        if library_id.is_empty() {
+            return Err("Selecciona una libreria para buscar playlists.".to_string());
+        }
+        let conn = open_db(&app)?;
+        let tracks = list_taxonomy_tracks(&conn, library_id)?;
+        let mut criteria = catalog_criteria(
+            &conn,
+            library_id,
+            request.filters.unwrap_or_default(),
+            request.query.as_deref().unwrap_or_default(),
+        )?;
+        if criteria.filters.playlists.is_empty() {
+            criteria.playlists = catalog_playlists(&conn, library_id)?;
+        }
+        Ok(catalog_playlist_facets(
+            &tracks,
+            &criteria,
+            search.as_deref().unwrap_or_default(),
+            request.page.unwrap_or(1),
+            request.page_size.unwrap_or(200),
+        ))
+    })
+    .await
+    .map_err(|error| format!("No se pudieron buscar playlists: {error}"))?
 }
 
 #[tauri::command]
@@ -3904,10 +4036,84 @@ fn list_taxonomy_tracks(
         .map_err(|error| format!("No se pudieron mapear tracks de taxonomia: {error}"))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+struct CatalogPlaylists {
+    names: BTreeMap<String, String>,
+    track_ids: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn catalog_playlists(conn: &Connection, library_id: &str) -> Result<CatalogPlaylists, String> {
+    let mut result = CatalogPlaylists::default();
+    let mut indexed = conn.prepare(
+        "SELECT p.path, m.track_id FROM playlist_index_playlists p
+         LEFT JOIN playlist_index_memberships m ON m.library_id = p.library_id AND m.playlist_path = p.path
+         WHERE p.library_id = ?1 AND p.node_type = '1'"
+    ).map_err(|error| format!("No se pudieron preparar playlists del catalogo: {error}"))?;
+    let rows = indexed
+        .query_map(params![library_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| format!("No se pudieron leer playlists del catalogo: {error}"))?;
+    for row in rows {
+        let (path, track_id) = row.map_err(|error| error.to_string())?;
+        let id = indexed_playlist_target_id(library_id, &path);
+        result.names.insert(id.clone(), path);
+        if let Some(track_id) = track_id {
+            result.track_ids.entry(id).or_default().insert(track_id);
+        }
+    }
+    let mut drafts = conn
+        .prepare(
+            "SELECT d.id, d.name, dt.track_id FROM playlist_drafts d
+         LEFT JOIN playlist_draft_tracks dt ON dt.draft_id = d.id
+         WHERE d.library_id = ?1",
+        )
+        .map_err(|error| {
+            format!("No se pudieron preparar playlists locales del catalogo: {error}")
+        })?;
+    let rows = drafts
+        .query_map(params![library_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|error| format!("No se pudieron leer playlists locales del catalogo: {error}"))?;
+    for row in rows {
+        let (id, name, track_id) = row.map_err(|error| error.to_string())?;
+        result.names.insert(id.clone(), name);
+        if let Some(track_id) = track_id {
+            result.track_ids.entry(id).or_default().insert(track_id);
+        }
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone, Default)]
 struct CatalogCriteria {
     filters: PlaylistCatalogFilters,
     query_terms: Vec<String>,
+    playlists: CatalogPlaylists,
+}
+
+fn catalog_criteria(
+    conn: &Connection,
+    library_id: &str,
+    mut filters: PlaylistCatalogFilters,
+    query: &str,
+) -> Result<CatalogCriteria, String> {
+    let query_terms = parse_catalog_query(query, &mut filters);
+    let playlists = if filters.playlists.is_empty() {
+        CatalogPlaylists::default()
+    } else {
+        catalog_playlists(conn, library_id)?
+    };
+    Ok(CatalogCriteria {
+        filters,
+        query_terms,
+        playlists,
+    })
 }
 
 fn catalog_search(
@@ -3919,13 +4125,12 @@ fn catalog_search(
     }
 
     let tracks = list_taxonomy_tracks(conn, request.library_id.trim())?;
-    let mut filters = request.filters.unwrap_or_default();
-    let query_terms =
-        parse_catalog_query(request.query.as_deref().unwrap_or_default(), &mut filters);
-    let criteria = CatalogCriteria {
-        filters,
-        query_terms,
-    };
+    let criteria = catalog_criteria(
+        conn,
+        request.library_id.trim(),
+        request.filters.unwrap_or_default(),
+        request.query.as_deref().unwrap_or_default(),
+    )?;
 
     let facets = catalog_facets(&tracks, &criteria);
     let mut matches = tracks
@@ -3967,13 +4172,12 @@ fn catalog_select_all(
     }
 
     let tracks = list_taxonomy_tracks(conn, request.library_id.trim())?;
-    let mut filters = request.filters.unwrap_or_default();
-    let query_terms =
-        parse_catalog_query(request.query.as_deref().unwrap_or_default(), &mut filters);
-    let criteria = CatalogCriteria {
-        filters,
-        query_terms,
-    };
+    let criteria = catalog_criteria(
+        conn,
+        request.library_id.trim(),
+        request.filters.unwrap_or_default(),
+        request.query.as_deref().unwrap_or_default(),
+    )?;
     let mut matches = tracks
         .into_iter()
         .filter(|track| catalog_track_matches(track, &criteria, None))
@@ -4033,12 +4237,7 @@ fn save_catalog_search(
     let filters = request.filters.unwrap_or_default();
     let sort = normalize_catalog_sort(request.sort.as_deref());
     let tracks = list_taxonomy_tracks(conn, library_id)?;
-    let mut evaluated_filters = filters.clone();
-    let query_terms = parse_catalog_query(&query, &mut evaluated_filters);
-    let criteria = CatalogCriteria {
-        filters: evaluated_filters,
-        query_terms,
-    };
+    let criteria = catalog_criteria(conn, library_id, filters.clone(), &query)?;
     let result_count = tracks
         .iter()
         .filter(|track| catalog_track_matches(track, &criteria, None))
@@ -4359,6 +4558,18 @@ fn catalog_track_matches(
     skip_facet: Option<&str>,
 ) -> bool {
     let filters = &criteria.filters;
+    if skip_facet != Some("playlists")
+        && !filters.playlists.is_empty()
+        && !filters.playlists.iter().any(|id| {
+            criteria
+                .playlists
+                .track_ids
+                .get(id)
+                .is_some_and(|ids| ids.contains(&track.track_id))
+        })
+    {
+        return false;
+    }
     if !criteria
         .query_terms
         .iter()
@@ -4577,11 +4788,10 @@ fn catalog_facets(
     }
 }
 
-fn catalog_value_facets(
+fn catalog_facet_values(
     tracks: &[PlaylistIndexTrack],
     criteria: &CatalogCriteria,
     facet: &str,
-    limit: usize,
 ) -> Vec<PlaylistCatalogFacetValue> {
     let mut counts = BTreeMap::<String, usize>::new();
     for track in tracks {
@@ -4618,6 +4828,114 @@ fn catalog_value_facets(
             .cmp(&left.count)
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
+    values
+}
+
+fn catalog_artist_facets(
+    tracks: &[PlaylistIndexTrack],
+    criteria: &CatalogCriteria,
+    selected_artists: &[String],
+    search: &str,
+    page: usize,
+    page_size: usize,
+) -> PlaylistCatalogFacetPage {
+    let values = catalog_facet_values(tracks, criteria, "artists");
+    catalog_facet_page(values, selected_artists, search, page, page_size.min(50))
+}
+
+fn catalog_playlist_facets(
+    tracks: &[PlaylistIndexTrack],
+    criteria: &CatalogCriteria,
+    search: &str,
+    page: usize,
+    page_size: usize,
+) -> PlaylistCatalogFacetPage {
+    let matching_tracks = tracks
+        .iter()
+        .filter(|track| catalog_track_matches(track, criteria, Some("playlists")))
+        .map(|track| track.track_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut values = criteria
+        .playlists
+        .names
+        .iter()
+        .map(|(id, name)| PlaylistCatalogFacetValue {
+            value: id.clone(),
+            name: name.clone(),
+            count: criteria
+                .playlists
+                .track_ids
+                .get(id)
+                .map(|ids| ids.intersection(&matching_tracks).count())
+                .unwrap_or(0),
+        })
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.value.cmp(&right.value))
+    });
+    catalog_facet_page(values, &criteria.filters.playlists, search, page, page_size)
+}
+
+fn catalog_facet_page(
+    values: Vec<PlaylistCatalogFacetValue>,
+    selected_values: &[String],
+    search: &str,
+    page: usize,
+    page_size: usize,
+) -> PlaylistCatalogFacetPage {
+    // Keep selections removable even when another filter reduces their count to zero.
+    let selected = selected_values
+        .iter()
+        .map(|value| PlaylistCatalogFacetValue {
+            value: value.clone(),
+            name: values
+                .iter()
+                .find(|item| item.value.eq_ignore_ascii_case(value))
+                .map(|item| item.name.clone())
+                .unwrap_or_else(|| value.clone()),
+            count: values
+                .iter()
+                .filter(|item| item.value.eq_ignore_ascii_case(value))
+                .map(|item| item.count)
+                .sum(),
+        })
+        .collect();
+    let search = search.trim().to_lowercase();
+    let matches = values
+        .into_iter()
+        // Selections must not shift page boundaries while the user is browsing.
+        .filter(|item| item.count > 0 && item.name.to_lowercase().contains(&search))
+        .collect::<Vec<_>>();
+    let total = matches.len();
+    let page_size = page_size.clamp(1, 200);
+    let total_pages = total.div_ceil(page_size).max(1);
+    let page = page.max(1).min(total_pages);
+    let items = matches
+        .into_iter()
+        .skip((page - 1) * page_size)
+        .take(page_size)
+        .collect();
+    PlaylistCatalogFacetPage {
+        items,
+        selected,
+        total,
+        page,
+        page_size,
+        total_pages,
+    }
+}
+
+fn catalog_value_facets(
+    tracks: &[PlaylistIndexTrack],
+    criteria: &CatalogCriteria,
+    facet: &str,
+    limit: usize,
+) -> Vec<PlaylistCatalogFacetValue> {
+    let values = catalog_facet_values(tracks, criteria, facet);
     let selected = match facet {
         "genres" => &criteria.filters.genres,
         "artists" => &criteria.filters.artists,
@@ -9889,6 +10207,474 @@ mod playlist_index_tests {
     }
 
     #[test]
+    fn catalog_deletion_is_atomic_and_cleans_track_relations_in_its_library() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        init_db(&conn).unwrap();
+        let now = timestamp();
+        for library in ["delete-library", "other-library"] {
+            conn.execute("INSERT INTO playlist_index_libraries (id, source_path, source_name, track_count, playlist_count, indexed_at, updated_at) VALUES (?1, ?1, ?1, 2, 2, ?2, ?2)", params![library, &now]).unwrap();
+            for path in ["ROOT/Set", "ROOT/Only deleted"] {
+                conn.execute("INSERT INTO playlist_index_playlists (library_id, path, name, node_type, track_count, created_at, updated_at) VALUES (?1, ?2, ?2, '1', 2, ?3, ?3)", params![library, path, &now]).unwrap();
+            }
+            conn.execute("INSERT INTO playlist_index_sources (library_id, source_path, source_name, indexed_at, updated_at) VALUES (?1, 'source.xml', 'source.xml', ?2, ?2)", params![library, &now]).unwrap();
+            conn.execute("INSERT INTO playlist_index_source_playlists (library_id, source_path, path, name, node_type) VALUES (?1, 'source.xml', 'ROOT/Set', 'Set', '1')", params![library]).unwrap();
+            conn.execute("INSERT INTO playlist_drafts (id, library_id, name, created_at, updated_at) VALUES (?1, ?1, 'Local set', ?2, ?2)", params![library, &now]).unwrap();
+            conn.execute("INSERT INTO playlist_copilot_sessions (id, library_id, title, created_at, updated_at) VALUES (?1, ?1, 'Set', ?2, ?2)", params![library, &now]).unwrap();
+            conn.execute("INSERT INTO playlist_copilot_candidate_sets (id, session_id, prompt, interpretation_json, reasoning_json, coverage_json, created_at) VALUES (?1, ?1, 'Set', '{}', '[]', '{}', ?2)", params![library, &now]).unwrap();
+            conn.execute("INSERT INTO playlist_enrichment_runs (id, library_id, status, created_at, started_at) VALUES (?1, ?1, 'completed', ?2, ?2)", params![library, &now]).unwrap();
+            for (position, track) in ["remove-me", "keep-me"].into_iter().enumerate() {
+                let relation_id = format!("{library}-{track}");
+                conn.execute("INSERT INTO playlist_index_tracks (library_id, track_id, name, source_exists, search_text, attributes_json, created_at, updated_at) VALUES (?1, ?2, ?2, 1, ?2, '{\"Genre\":\"House\"}', ?3, ?3)", params![library, track, &now]).unwrap();
+                conn.execute("INSERT INTO playlist_index_memberships (library_id, playlist_path, track_id, position) VALUES (?1, 'ROOT/Set', ?2, ?3)", params![library, track, position]).unwrap();
+                conn.execute("INSERT INTO playlist_index_playlist_additions (library_id, playlist_path, track_id, position, created_at) VALUES (?1, 'ROOT/Set', ?2, ?3, ?4)", params![library, track, position, &now]).unwrap();
+                conn.execute("INSERT INTO playlist_index_source_tracks (library_id, source_path, source_track_id, track_id) VALUES (?1, 'source.xml', ?2, ?2)", params![library, track]).unwrap();
+                conn.execute("INSERT INTO playlist_index_source_memberships (library_id, source_path, playlist_path, track_id, position) VALUES (?1, 'source.xml', 'ROOT/Set', ?2, ?3)", params![library, track, position]).unwrap();
+                conn.execute("INSERT INTO playlist_draft_tracks (draft_id, track_id, position, created_at) VALUES (?1, ?2, ?3, ?4)", params![library, track, position, &now]).unwrap();
+                conn.execute("INSERT INTO playlist_copilot_candidate_tracks (candidate_set_id, track_id, position, score, reasons_json) VALUES (?1, ?2, ?3, 1, '[]')", params![library, track, position]).unwrap();
+                conn.execute("INSERT INTO playlist_track_embeddings (library_id, track_id, model, dimensions, text_hash, embedding_json, updated_at) VALUES (?1, ?2, 'test', 1, 'test', '[1]', ?3)", params![library, track, &now]).unwrap();
+                conn.execute("INSERT INTO playlist_track_enrichments (id, library_id, track_id, provider, status, created_at, updated_at) VALUES (?1, ?2, ?3, 'test', 'matched', ?4, ?4)", params![&relation_id, library, track, &now]).unwrap();
+                conn.execute("INSERT INTO playlist_enrichment_tasks (id, run_id, library_id, track_id, provider, status, started_at) VALUES (?1, ?2, ?2, ?3, 'test', 'matched', ?4)", params![&relation_id, library, track, &now]).unwrap();
+                conn.execute("INSERT INTO playlist_enrichment_observations (id, task_id, run_id, library_id, track_id, provider, field, value, observed_at) VALUES (?1, ?1, ?2, ?2, ?3, 'test', 'genre', 'House', ?4)", params![&relation_id, library, track, &now]).unwrap();
+            }
+            conn.execute("INSERT INTO playlist_index_memberships (library_id, playlist_path, track_id, position) VALUES (?1, 'ROOT/Only deleted', 'remove-me', 0)", params![library]).unwrap();
+            save_catalog_search(
+                &conn,
+                PlaylistCatalogSaveRequest {
+                    id: None,
+                    library_id: library.to_string(),
+                    name: "Set".to_string(),
+                    description: None,
+                    query: None,
+                    sort: None,
+                    filters: Some(PlaylistCatalogFilters {
+                        playlists: vec![indexed_playlist_target_id(library, "ROOT/Set")],
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+        }
+        rebuild_fts(&conn).unwrap();
+        let scoped_tables = [
+            ("playlist_index_tracks", "library_id"),
+            ("playlist_index_memberships", "library_id"),
+            ("playlist_index_playlist_additions", "library_id"),
+            ("playlist_index_source_tracks", "library_id"),
+            ("playlist_index_source_memberships", "library_id"),
+            ("playlist_track_embeddings", "library_id"),
+            ("playlist_track_enrichments", "library_id"),
+            ("playlist_enrichment_tasks", "library_id"),
+            ("playlist_enrichment_observations", "library_id"),
+            ("playlist_track_fts", "library_id"),
+            ("playlist_draft_tracks", "draft_id"),
+            ("playlist_copilot_candidate_tracks", "candidate_set_id"),
+        ];
+        let count =
+            |conn: &Connection, table: &str, scope: &str, library: &str, track: &str| -> i64 {
+                conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {scope} = ?1 AND track_id = ?2"),
+                    params![library, track],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+        let ids = BTreeSet::from(["remove-me".to_string(), "unknown".to_string()]);
+        conn.execute_batch("CREATE TRIGGER fail_track_deletion BEFORE UPDATE ON playlist_index_libraries BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        assert!(delete_index_tracks(&mut conn, "delete-library", &ids).is_err());
+        for (table, scope) in scoped_tables {
+            assert!(
+                count(&conn, table, scope, "delete-library", "remove-me") > 0,
+                "{table} must roll back"
+            );
+        }
+        conn.execute_batch("DROP TRIGGER fail_track_deletion;")
+            .unwrap();
+
+        assert_eq!(
+            delete_index_tracks(&mut conn, "delete-library", &ids).unwrap(),
+            1
+        );
+        for (table, scope) in scoped_tables {
+            assert_eq!(
+                count(&conn, table, scope, "delete-library", "remove-me"),
+                0,
+                "{table} must be cleaned"
+            );
+            assert_eq!(
+                count(&conn, table, scope, "delete-library", "keep-me"),
+                1,
+                "{table} must keep unselected tracks"
+            );
+            assert!(
+                count(&conn, table, scope, "other-library", "remove-me") > 0,
+                "{table} must preserve other libraries"
+            );
+        }
+        let library = get_library(&conn, "delete-library").unwrap().unwrap();
+        assert_eq!((library.track_count, library.playlist_count), (1, 2));
+        let playlists = list_playlists(&conn, "delete-library").unwrap();
+        assert_eq!(
+            playlists
+                .iter()
+                .find(|p| p.path == "ROOT/Set")
+                .unwrap()
+                .track_count,
+            1
+        );
+        assert_eq!(
+            playlists
+                .iter()
+                .find(|p| p.path == "ROOT/Only deleted")
+                .unwrap()
+                .track_count,
+            0
+        );
+        assert_eq!(
+            list_drafts(&conn, Some("delete-library")).unwrap()[0].track_count,
+            1
+        );
+        assert_eq!(
+            list_catalog_saved_searches(&conn, "delete-library").unwrap()[0].result_count,
+            1
+        );
+        assert_eq!(
+            list_catalog_saved_searches(&conn, "other-library").unwrap()[0].result_count,
+            2
+        );
+        assert_eq!(
+            delete_index_tracks(&mut conn, "delete-library", &ids).unwrap(),
+            0
+        );
+        assert!(conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn catalog_playlist_facets_filter_tracks_and_preserve_saved_searches() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        init_db(&conn).expect("initialize schema");
+        let now = timestamp();
+        for library in ["library-1", "library-2"] {
+            conn.execute("INSERT INTO playlist_index_libraries (id, source_path, source_name, indexed_at, updated_at) VALUES (?1, ?1, ?1, ?2, ?2)", params![library, &now]).unwrap();
+            for (id, artist, genre) in [
+                ("one", "Ada", "House"),
+                ("two", "Bea", "Techno"),
+                ("three", "Bea", "House"),
+                ("four", "Unaffiliated", "House"),
+            ] {
+                conn.execute("INSERT INTO playlist_index_tracks (library_id, track_id, name, artist, source_exists, search_text, attributes_json, created_at, updated_at) VALUES (?1, ?2, ?2, ?3, 1, ?3, ?4, ?5, ?5)", params![library, id, artist, json!({"Genre": genre}).to_string(), &now]).unwrap();
+            }
+        }
+        let paths = ["ROOT/Warmup", "ROOT/Night/Warmup"]
+            .into_iter()
+            .map(str::to_string)
+            .chain((0..213).map(|index| format!("ROOT/Extra {index:03}")))
+            .collect::<Vec<_>>();
+        for (index, path) in paths.iter().enumerate() {
+            conn.execute("INSERT INTO playlist_index_playlists (library_id, path, name, node_type, created_at, updated_at) VALUES ('library-1', ?1, 'Warmup', '1', ?2, ?2)", params![path, &now]).unwrap();
+            let ids = if index == 0 {
+                vec!["one", "one", "two"]
+            } else {
+                vec!["three"]
+            };
+            for (position, id) in ids.into_iter().enumerate() {
+                conn.execute("INSERT INTO playlist_index_memberships (library_id, playlist_path, track_id, position) VALUES ('library-1', ?1, ?2, ?3)", params![path, id, position]).unwrap();
+            }
+        }
+        conn.execute("INSERT INTO playlist_index_playlists (library_id, path, name, node_type, created_at, updated_at) VALUES ('library-1', 'ROOT', 'Folder', '0', ?1, ?1)", params![&now]).unwrap();
+        for (draft, library) in [("local-set", "library-1"), ("foreign-set", "library-2")] {
+            conn.execute("INSERT INTO playlist_drafts (id, library_id, name, created_at, updated_at) VALUES (?1, ?2, 'Local set', ?3, ?3)", params![draft, library, &now]).unwrap();
+            for (position, id) in ["one", "three"].into_iter().enumerate() {
+                conn.execute("INSERT INTO playlist_draft_tracks (draft_id, track_id, position, created_at) VALUES (?1, ?2, ?3, ?4)", params![draft, id, position, &now]).unwrap();
+            }
+        }
+        let tracks = list_taxonomy_tracks(&conn, "library-1").unwrap();
+        let mut criteria = CatalogCriteria {
+            playlists: catalog_playlists(&conn, "library-1").unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(criteria.playlists.names.len(), 216);
+        assert!(!criteria.playlists.names.contains_key("foreign-set"));
+        let warmup = indexed_playlist_target_id("library-1", "ROOT/Warmup");
+        let night = indexed_playlist_target_id("library-1", "ROOT/Night/Warmup");
+        let first = catalog_playlist_facets(&tracks, &criteria, "", 1, 200);
+        let second = catalog_playlist_facets(&tracks, &criteria, "", 2, 200);
+        assert_eq!(
+            (first.total, first.items.len(), second.items.len()),
+            (216, 200, 16)
+        );
+        let all = first
+            .items
+            .iter()
+            .chain(second.items.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            all.iter()
+                .map(|item| &item.value)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            216
+        );
+        assert_eq!(
+            all.iter().find(|item| item.value == warmup).unwrap().count,
+            2,
+            "duplicate memberships must count once"
+        );
+        assert_eq!(
+            catalog_playlist_facets(&tracks, &criteria, "night/WARMUP", 1, 12).items[0].value,
+            night
+        );
+
+        criteria.filters.playlists = vec![warmup.clone(), "local-set".to_string()];
+        assert_eq!(
+            catalog_playlist_facets(&tracks, &criteria, "", 2, 200)
+                .items
+                .iter()
+                .map(|item| &item.value)
+                .collect::<Vec<_>>(),
+            second
+                .items
+                .iter()
+                .map(|item| &item.value)
+                .collect::<Vec<_>>(),
+            "selection must not shift pages"
+        );
+        let request = || PlaylistCatalogRequest {
+            library_id: "library-1".to_string(),
+            query: None,
+            filters: Some(criteria.filters.clone()),
+            sort: None,
+            page: None,
+            page_size: None,
+        };
+        let results = catalog_search(&conn, request()).unwrap();
+        assert_eq!(
+            results.total, 3,
+            "playlists use OR without duplicating tracks"
+        );
+        assert_eq!(catalog_select_all(&conn, request(), 100).unwrap().total, 3);
+        assert_eq!(
+            results
+                .facets
+                .genres
+                .iter()
+                .find(|item| item.value == "House")
+                .unwrap()
+                .count,
+            2
+        );
+
+        criteria.filters.artists = vec!["Ada".to_string()];
+        criteria.filters.playlists = vec![night.clone(), "local-set".to_string()];
+        let filtered = catalog_search(
+            &conn,
+            PlaylistCatalogRequest {
+                library_id: "library-1".to_string(),
+                query: None,
+                filters: Some(criteria.filters.clone()),
+                sort: None,
+                page: None,
+                page_size: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            filtered.total, 1,
+            "artist and playlist filters combine with AND"
+        );
+        assert_eq!(filtered.items[0].track_id, "one");
+        let facets = catalog_playlist_facets(&tracks, &criteria, "", 1, 12);
+        assert_eq!(facets.total, 2);
+        assert_eq!(
+            facets
+                .selected
+                .iter()
+                .find(|item| item.value == night)
+                .unwrap()
+                .count,
+            0
+        );
+        let artists = catalog_artist_facets(&tracks, &criteria, &[], "", 1, 12);
+        assert_eq!(
+            artists.items.iter().map(|item| item.count).sum::<usize>(),
+            2
+        );
+
+        criteria.filters.artists.clear();
+        criteria.filters.playlists = vec!["local-set".to_string()];
+        let saved = save_catalog_search(
+            &conn,
+            PlaylistCatalogSaveRequest {
+                id: None,
+                library_id: "library-1".to_string(),
+                name: "Local only".to_string(),
+                description: None,
+                query: None,
+                filters: Some(criteria.filters.clone()),
+                sort: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.result_count, 2);
+        let reloaded = list_catalog_saved_searches(&conn, "library-1")
+            .unwrap()
+            .remove(0);
+        assert_eq!(reloaded.filters.playlists, vec!["local-set"]);
+        conn.execute(
+            "DELETE FROM playlist_draft_tracks WHERE draft_id = 'local-set' AND track_id = 'three'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_search(
+                &conn,
+                PlaylistCatalogRequest {
+                    library_id: "library-1".to_string(),
+                    query: None,
+                    filters: Some(reloaded.filters),
+                    sort: None,
+                    page: None,
+                    page_size: None
+                }
+            )
+            .unwrap()
+            .total,
+            1
+        );
+        let legacy: PlaylistCatalogFilters =
+            serde_json::from_value(json!({"artists": ["Ada"]})).unwrap();
+        assert!(legacy.playlists.is_empty());
+    }
+
+    #[test]
+    fn catalog_artist_facets_page_and_search_beyond_the_original_limit() {
+        let tracks = (0..30)
+            .map(|index| {
+                let mut track = test_track();
+                track.artist = Some(format!("Artist {index:02}"));
+                track
+            })
+            .collect::<Vec<_>>();
+        let criteria = CatalogCriteria {
+            filters: PlaylistCatalogFilters::default(),
+            query_terms: vec![],
+            ..Default::default()
+        };
+        let mut artists = BTreeSet::new();
+        for page in 1..=3 {
+            let result = catalog_artist_facets(&tracks, &criteria, &[], "", page, 12);
+            assert_eq!(result.total, 30);
+            assert_eq!(result.total_pages, 3);
+            assert_eq!(result.page, page);
+            assert_eq!(result.items.len(), if page == 3 { 6 } else { 12 });
+            for item in result.items {
+                assert!(artists.insert(item.value), "pages must not overlap");
+            }
+        }
+        assert_eq!(artists.len(), 30);
+        let found = catalog_artist_facets(&tracks, &criteria, &[], " aRTist 29 ", 1, 12);
+        assert_eq!(found.total, 1);
+        assert_eq!(found.items[0].value, "Artist 29");
+        let empty = catalog_artist_facets(&tracks, &criteria, &[], "unknown", usize::MAX, 0);
+        assert!(empty.items.is_empty());
+        assert_eq!(
+            (empty.total, empty.page, empty.page_size, empty.total_pages),
+            (0, 1, 1, 1)
+        );
+        let oversized = catalog_artist_facets(&tracks, &criteria, &[], "", usize::MAX, usize::MAX);
+        assert_eq!(oversized.page_size, 50);
+        assert_eq!(oversized.items.len(), 30);
+    }
+
+    #[test]
+    fn catalog_artist_facets_keep_page_boundaries_when_selection_changes() {
+        let tracks = (0..40)
+            .map(|index| {
+                let mut track = test_track();
+                track.artist = Some(format!("Artist {index:02}"));
+                track
+            })
+            .collect::<Vec<_>>();
+        let mut criteria = CatalogCriteria {
+            filters: PlaylistCatalogFilters::default(),
+            query_terms: vec![],
+            ..Default::default()
+        };
+        let before = (1..=4)
+            .map(|page| catalog_artist_facets(&tracks, &criteria, &[], "", page, 12))
+            .collect::<Vec<_>>();
+        let selected = vec!["Artist 00".to_string(), "Artist 19".to_string()];
+        criteria.filters.artists = selected.clone();
+        for (index, previous) in before.iter().enumerate() {
+            let after = catalog_artist_facets(&tracks, &criteria, &selected, "", index + 1, 12);
+            assert_eq!(after.total, previous.total);
+            assert_eq!(after.total_pages, previous.total_pages);
+            assert_eq!(
+                after
+                    .items
+                    .iter()
+                    .map(|item| (&item.value, item.count))
+                    .collect::<Vec<_>>(),
+                previous
+                    .items
+                    .iter()
+                    .map(|item| (&item.value, item.count))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_artist_facets_keep_selections_and_respect_other_filters() {
+        let mut first = test_track();
+        first.artist = Some("Selected".to_string());
+        first.genre = Some("Techno".to_string());
+        let mut second = test_track();
+        second.artist = Some("Other".to_string());
+        let mut third = second.clone();
+        third.name = Some("Excluded by query".to_string());
+        third.search_text = "Excluded".to_string();
+        third.artist = Some("Hidden".to_string());
+        let tracks = vec![first, second.clone(), second, third];
+        let selected = vec!["Selected".to_string()];
+        let criteria = CatalogCriteria {
+            filters: PlaylistCatalogFilters {
+                genres: vec!["House".to_string()],
+                artists: selected.clone(),
+                ..Default::default()
+            },
+            query_terms: vec!["Test".to_string()],
+            ..Default::default()
+        };
+        let result = catalog_artist_facets(&tracks, &criteria, &selected, "other", 1, 12);
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].value, "Other");
+        assert_eq!(result.items[0].count, 2);
+        assert_eq!(result.selected[0].value, "Selected");
+        assert_eq!(result.selected[0].count, 0);
+        let selected = vec!["Other".to_string()];
+        let result = catalog_artist_facets(&tracks, &criteria, &selected, "", 1, 12);
+        assert_eq!(
+            result.total, 1,
+            "selected artists stay in the paginated list"
+        );
+        assert_eq!(result.items[0].value, "Other");
+        assert_eq!(result.selected[0].count, 2);
+        assert_eq!(
+            criteria.filters.artists,
+            vec!["Selected"],
+            "facet search must not change track filters"
+        );
+    }
+
+    #[test]
     fn catalog_query_parses_operators_and_quoted_values() {
         let mut filters = PlaylistCatalogFilters::default();
         let terms = parse_catalog_query(
@@ -9917,6 +10703,7 @@ mod playlist_index_tests {
         let criteria = CatalogCriteria {
             filters,
             query_terms,
+            ..Default::default()
         };
 
         assert!(catalog_track_matches(&track, &criteria, None));
