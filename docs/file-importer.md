@@ -19,6 +19,8 @@ File Importer converts local audio files to AIFF without requiring a Rekordbox X
 4. Select files or use the header checkbox.
 5. Adjust concurrency if needed.
 6. Run **Convert Selected** or convert a single row.
+   To recreate previous conversions with the current profile, use **Regenerate selected**
+   or the **Regenerate AIFF** action on a row.
 7. Use **Add to playlist** to create a playlist or add the checked files to an existing local playlist.
 8. Watch the bottom terminal for events and errors.
 9. Open **Groups** to revisit a previous import.
@@ -48,6 +50,29 @@ AIFF files are written inside a `converted/` folder next to the source file.
 If the source is already AIFF/AIF, it is marked `already_aiff` and not duplicated. If the target AIFF already exists, **Convert** checks for missing text metadata and recovers it from the original before marking it `already_converted`. Existing nonempty tags take precedence, and audio and existing artwork streams are copied without re-encoding. A temporary file is verified before replacing the existing AIFF; a failure leaves the existing file intact. Files with complete metadata are reused without rewriting.
 
 This also repairs AIFF files created by older versions that omitted ID3 tags. Select the original files again and click **Convert Selected**. To refresh metadata already indexed in Playlist Library, use **Add to playlist** again after recovery; this refreshes the same track IDs without duplicating them.
+
+### Regeneration
+
+**Regenerate AIFF** rebuilds the audio from the original, keeping the existing output
+path, conversion item ID and group memberships. It is available for an existing output
+or a previously completed conversion whose output has disappeared. Original AIFF/AIF
+files and missing originals are excluded; selections show the eligible count.
+
+The original's nonempty text tags take priority. Tags found only in the previous AIFF
+and its attached artwork are retained. The new file is generated in a temporary file
+beside the destination and checked for the audio profile, duration, tags, artwork and
+successful decoding before publication. A failure before publication leaves the
+previous AIFF untouched. Regeneration never modifies the original.
+
+The backend reserves each destination across conversion requests, checks known source
+collisions and limits active writers to four. A persisted publication checkpoint lets
+the next refresh reconcile interrupted regenerations. Files already indexed in Playlist
+Library are refreshed without recreating their IDs, memberships or ratings; failed
+catalog refreshes can be retried with **Refresh**, without re-encoding. Regenerating a
+file stops its local playback; the next play loads the new version.
+
+Rekordbox Convert does not expose regeneration yet. An external application may need
+to reload metadata even though the output path is unchanged.
 
 New conversions preserve embedded text tags such as title, artist, album, album artist, genre, date, track/disc numbers, comments, composer, BPM and key using ID3v2.3. Metadata must exist in the source file; tags stored only in another application's database are not available to File Importer. New conversions remain audio-only and do not copy cover art.
 
@@ -169,4 +194,7 @@ The backend also clamps concurrency between `1` and `4`.
 
 - `src/FileConversionPage.tsx`
 - `src-tauri/src/local_conversion.rs`
+- `src-tauri/src/local_conversion/regeneration.rs`
+- `src-tauri/src/local_conversion/jobs.rs`
+- `src-tauri/src/playlist_index/conversion_refresh.rs`
 - `crates/aifficator-core/src/conversion.rs`

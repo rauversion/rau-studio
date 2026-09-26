@@ -3,7 +3,7 @@ use aifficator_core::conversion::{ffmpeg_args, ConversionSettings};
 use aifficator_core::validation::default_target_path;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -16,6 +16,28 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 const DB_FILE: &str = "aifficator.sqlite3";
+
+pub(crate) mod regeneration;
+use regeneration::{DestinationLease, Fingerprint, Regeneration};
+mod jobs;
+use jobs::{conflicting_destinations, reconcile_regenerations, regenerate_item};
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversionMode {
+    #[default]
+    Convert,
+    Regenerate,
+}
+
+impl ConversionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Convert => "convert",
+            Self::Regenerate => "regenerate",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalConversionItem {
@@ -34,6 +56,8 @@ pub struct LocalConversionItem {
     completed_at: Option<String>,
     source_exists: bool,
     target_exists: bool,
+    last_operation: ConversionMode,
+    operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +85,7 @@ pub struct LocalConversionImportResponse {
 pub struct LocalConversionBatchResult {
     items: Vec<LocalConversionItem>,
     converted_total: usize,
+    regenerated_total: usize,
     already_converted_total: usize,
     already_aiff_total: usize,
     failed_total: usize,
@@ -77,6 +102,9 @@ struct LocalConversionProgressEvent {
     percent: Option<f64>,
     elapsed_seconds: Option<f64>,
     speed: Option<String>,
+    operation_id: Option<String>,
+    mode: ConversionMode,
+    phase: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -88,9 +116,16 @@ struct LocalConversionLogEvent {
 }
 
 #[tauri::command]
-pub fn local_conversion_list_items(app: AppHandle) -> Result<Vec<LocalConversionItem>, String> {
-    let conn = open_db(&app)?;
-    list_items(&conn)
+pub async fn local_conversion_list_items(
+    app: AppHandle,
+) -> Result<Vec<LocalConversionItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app)?;
+        reconcile_regenerations(&app, &conn)?;
+        list_items(&conn)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -100,12 +135,17 @@ pub fn local_conversion_list_groups(app: AppHandle) -> Result<Vec<LocalConversio
 }
 
 #[tauri::command]
-pub fn local_conversion_group_items(
+pub async fn local_conversion_group_items(
     app: AppHandle,
     group_id: String,
 ) -> Result<Vec<LocalConversionItem>, String> {
-    let conn = open_db(&app)?;
-    list_group_items(&conn, &group_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app)?;
+        reconcile_regenerations(&app, &conn)?;
+        list_group_items(&conn, &group_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -248,10 +288,18 @@ pub async fn local_conversion_convert_items(
     app: AppHandle,
     item_ids: Vec<String>,
     max_concurrency: Option<usize>,
+    mode: Option<ConversionMode>,
+    request_id: Option<String>,
 ) -> Result<LocalConversionBatchResult, String> {
     let app_for_error = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        convert_items_blocking(app, item_ids, max_concurrency)
+        convert_items_blocking(
+            app,
+            item_ids,
+            max_concurrency,
+            mode.unwrap_or_default(),
+            request_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+        )
     })
     .await
     .map_err(|error| {
@@ -266,6 +314,8 @@ pub async fn local_conversion_convert_items(
 #[tauri::command]
 pub fn local_conversion_delete_item(app: AppHandle, item_id: String) -> Result<String, String> {
     let conn = open_db(&app)?;
+    let item = get_item(&conn, &item_id)?.ok_or("Conversion item not found")?;
+    let _lease = DestinationLease::acquire(Path::new(&item.target_path))?;
     conn.execute(
         "DELETE FROM local_conversion_events WHERE item_id = ?1",
         params![&item_id],
@@ -288,8 +338,11 @@ fn convert_items_blocking(
     app: AppHandle,
     item_ids: Vec<String>,
     max_concurrency: Option<usize>,
+    mode: ConversionMode,
+    request_id: String,
 ) -> Result<LocalConversionBatchResult, String> {
     let conn = open_db(&app)?;
+    reconcile_regenerations(&app, &conn)?;
     let max_concurrency = max_concurrency.unwrap_or(1).clamp(1, 4);
     let mut seen = BTreeSet::new();
     let ordered_ids = item_ids
@@ -342,14 +395,20 @@ fn convert_items_blocking(
         }
     }
 
+    let collisions = conflicting_destinations(&conn)?;
     for chunk in input_items.chunks(max_concurrency) {
         let mut handles = Vec::new();
 
         for item in chunk.iter().cloned() {
             let app_handle = app.clone();
+            let operation_id = format!("{request_id}:{}", item.id);
+            let conflict = regeneration::destination_key(Path::new(&item.target_path))
+                .is_ok_and(|key| collisions.contains(&key));
             handles.push((
                 item.id.clone(),
-                thread::spawn(move || convert_item(&app_handle, item)),
+                thread::spawn(move || {
+                    convert_item(&app_handle, item, mode, operation_id, conflict)
+                }),
             ));
         }
 
@@ -385,7 +444,11 @@ fn convert_items_blocking(
     let result = LocalConversionBatchResult {
         converted_total: output_items
             .iter()
-            .filter(|item| item.state == "converted")
+            .filter(|item| item.state == "converted" && mode == ConversionMode::Convert)
+            .count(),
+        regenerated_total: output_items
+            .iter()
+            .filter(|item| item.state == "converted" && mode == ConversionMode::Regenerate)
             .count(),
         already_converted_total: output_items
             .iter()
@@ -415,15 +478,17 @@ fn convert_items_blocking(
             message: settings::localized(
                 &app,
                 &format!(
-                    "Conversion local terminada: {} convertidos, {} existentes, {} AIFF originales, {} errores",
+                    "Conversion local terminada: {} convertidos, {} regenerados, {} existentes, {} AIFF originales, {} errores",
                     result.converted_total,
+                    result.regenerated_total,
                     result.already_converted_total,
                     result.already_aiff_total,
                     result.failed_total
                 ),
                 &format!(
-                    "Local conversion finished: {} converted, {} existing, {} original AIFF, {} errors",
+                    "Local conversion finished: {} converted, {} regenerated, {} existing, {} original AIFF, {} errors",
                     result.converted_total,
+                    result.regenerated_total,
                     result.already_converted_total,
                     result.already_aiff_total,
                     result.failed_total
@@ -435,7 +500,43 @@ fn convert_items_blocking(
     Ok(result)
 }
 
-fn convert_item(app: &AppHandle, mut item: LocalConversionItem) -> LocalConversionItem {
+fn convert_item(
+    app: &AppHandle,
+    mut item: LocalConversionItem,
+    mode: ConversionMode,
+    operation_id: String,
+    conflict: bool,
+) -> LocalConversionItem {
+    let _lease = match DestinationLease::acquire(Path::new(&item.target_path)) {
+        Ok(lease) => lease,
+        Err(error) => {
+            // A rejected request must not overwrite the active writer's persisted state.
+            item.state = "failed".into();
+            item.message = Some(error);
+            return item;
+        }
+    };
+    item.last_operation = mode;
+    item.operation_id = Some(operation_id);
+    let started = (|| {
+        let conn = open_db(app)?;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute("UPDATE local_conversion_items SET last_operation = ?2, operation_id = ?3 WHERE id = ?1",
+            params![item.id, mode.as_str(), item.operation_id]).map_err(|e| e.to_string())?;
+        if mode == ConversionMode::Regenerate && !is_aiff_path(Path::new(&item.source_path)) {
+            tx.execute("INSERT INTO local_conversion_attempts (id, item_id, phase, temporary_path) VALUES (?1, ?2, 'preparing', '')",
+                params![item.operation_id, item.id]).map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        if conflict && !is_aiff_path(Path::new(&item.source_path)) {
+            Err(settings::localized(app, "Dos originales distintos comparten este destino AIFF. Cambia el nombre de uno antes de convertir.", "Different originals share this AIFF destination. Rename one before converting."))
+        } else {
+            Ok(())
+        }
+    })();
+    if let Err(error) = started {
+        return fail_item(app, item, &error);
+    }
     let queued_message = settings::localized(app, "En cola", "Queued");
     let _ = update_item_state(app, &item.id, "queued", Some(&queued_message), None);
     item.state = "queued".to_string();
@@ -493,6 +594,10 @@ fn convert_item(app: &AppHandle, mut item: LocalConversionItem) -> LocalConversi
             },
         );
         return item;
+    }
+
+    if mode == ConversionMode::Regenerate {
+        return regenerate_item(app, item);
     }
 
     if target_path.exists() {
@@ -636,9 +741,14 @@ fn convert_item(app: &AppHandle, mut item: LocalConversionItem) -> LocalConversi
 }
 
 fn fail_item(app: &AppHandle, mut item: LocalConversionItem, message: &str) -> LocalConversionItem {
+    if let Ok(conn) = open_db(app) {
+        let _ = conn.execute("UPDATE local_conversion_attempts SET phase = 'failed' WHERE id = ?1 AND fingerprint_json IS NULL", params![item.operation_id]);
+    }
     let _ = update_item_state(app, &item.id, "failed", Some(message), None);
     item.state = "failed".to_string();
     item.message = Some(message.to_string());
+    item.target_exists = Path::new(&item.target_path).is_file();
+    item.source_exists = Path::new(&item.source_path).is_file();
     emit_progress(app, item_progress_event(&item, None, None, None));
     emit_log(
         app,
@@ -660,6 +770,16 @@ fn run_ffmpeg_conversion(
 ) -> Result<(), String> {
     let settings = ConversionSettings::default();
     let args = ffmpeg_args(source_path, target_path, &settings);
+    run_ffmpeg_with_args(app, item, source_path, target_path, args)
+}
+
+fn run_ffmpeg_with_args(
+    app: &AppHandle,
+    item: &LocalConversionItem,
+    source_path: &Path,
+    target_path: &Path,
+    args: Vec<String>,
+) -> Result<(), String> {
     let mut child = system::ffmpeg_command(app)
         .args(args)
         .stdout(Stdio::piped())
@@ -742,10 +862,15 @@ fn run_ffmpeg_conversion(
                         item_id: item.id.clone(),
                         name: item.source_name.clone(),
                         source_path: source_path.to_string_lossy().into_owned(),
-                        target_path: target_path.to_string_lossy().into_owned(),
+                        target_path: item.target_path.clone(),
                         status: "running".to_string(),
+                        operation_id: item.operation_id.clone(),
+                        mode: item.last_operation,
+                        phase: "encoding".into(),
                         message: Some(if value == "end" {
                             settings::localized(app, "Finalizando", "Finalizing")
+                        } else if item.last_operation == ConversionMode::Regenerate {
+                            settings::localized(app, "Regenerando AIFF", "Regenerating AIFF")
                         } else {
                             settings::localized(
                                 app,
@@ -802,7 +927,10 @@ fn run_ffmpeg_conversion(
     Ok(())
 }
 
-fn read_audio_tags(mut ffprobe: Command, path: &Path) -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn read_audio_tags(
+    mut ffprobe: Command,
+    path: &Path,
+) -> Result<BTreeMap<String, String>, String> {
     let output = ffprobe
         .args(["-v", "error", "-show_entries", "format_tags", "-of", "json"])
         .arg(path)
@@ -1056,6 +1184,33 @@ fn init_db(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|error| format!("No se pudo migrar estados locales pendientes: {error}"))?;
 
+    let columns = conn
+        .prepare("PRAGMA table_info(local_conversion_items)")
+        .map_err(|e| e.to_string())?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (column, definition) in [
+        ("last_operation", "TEXT NOT NULL DEFAULT 'convert'"),
+        ("operation_id", "TEXT"),
+    ] {
+        if !columns.contains(column) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE local_conversion_items ADD COLUMN {column} {definition}"
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS local_conversion_attempts (
+        id TEXT PRIMARY KEY, item_id TEXT NOT NULL, phase TEXT NOT NULL,
+        temporary_path TEXT NOT NULL, fingerprint_json TEXT,
+        FOREIGN KEY(item_id) REFERENCES local_conversion_items(id) ON DELETE CASCADE
+    );",
+    )
+    .map_err(|e| e.to_string())?;
+
     cleanup_appledouble_items(conn)?;
 
     Ok(())
@@ -1255,7 +1410,7 @@ fn list_group_items(conn: &Connection, group_id: &str) -> Result<Vec<LocalConver
     let mut stmt = conn
         .prepare(
             "SELECT i.id, i.source_path, i.source_name, i.source_parent, i.extension, i.target_path, i.state,
-                    i.size_bytes, i.modified_ms, i.message, i.created_at, i.updated_at, i.completed_at
+                    i.size_bytes, i.modified_ms, i.message, i.created_at, i.updated_at, i.completed_at, i.last_operation, i.operation_id
              FROM local_conversion_items i
              INNER JOIN local_conversion_group_items gi ON gi.item_id = i.id
              WHERE gi.group_id = ?1
@@ -1289,7 +1444,7 @@ fn list_items(conn: &Connection) -> Result<Vec<LocalConversionItem>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, source_path, source_name, source_parent, extension, target_path, state,
-                    size_bytes, modified_ms, message, created_at, updated_at, completed_at
+                    size_bytes, modified_ms, message, created_at, updated_at, completed_at, last_operation, operation_id
              FROM local_conversion_items
              ORDER BY updated_at DESC",
         )
@@ -1305,7 +1460,7 @@ fn list_items(conn: &Connection) -> Result<Vec<LocalConversionItem>, String> {
 fn get_item(conn: &Connection, item_id: &str) -> Result<Option<LocalConversionItem>, String> {
     conn.query_row(
         "SELECT id, source_path, source_name, source_parent, extension, target_path, state,
-                size_bytes, modified_ms, message, created_at, updated_at, completed_at
+                size_bytes, modified_ms, message, created_at, updated_at, completed_at, last_operation, operation_id
          FROM local_conversion_items
          WHERE id = ?1",
         params![item_id],
@@ -1321,7 +1476,7 @@ fn get_item_by_source(
 ) -> Result<Option<LocalConversionItem>, String> {
     conn.query_row(
         "SELECT id, source_path, source_name, source_parent, extension, target_path, state,
-                size_bytes, modified_ms, message, created_at, updated_at, completed_at
+                size_bytes, modified_ms, message, created_at, updated_at, completed_at, last_operation, operation_id
          FROM local_conversion_items
          WHERE source_path = ?1",
         params![source_path],
@@ -1353,6 +1508,12 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalConversionItem>
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
         completed_at: row.get(12)?,
+        last_operation: if row.get::<_, String>(13)? == "regenerate" {
+            ConversionMode::Regenerate
+        } else {
+            ConversionMode::Convert
+        },
+        operation_id: row.get(14)?,
     })
 }
 
@@ -1403,10 +1564,24 @@ fn item_progress_event(
         percent,
         elapsed_seconds,
         speed,
+        operation_id: item.operation_id.clone(),
+        mode: item.last_operation,
+        phase: item.state.clone(),
     }
 }
 
 fn emit_progress(app: &AppHandle, event: LocalConversionProgressEvent) {
+    if event.phase != "encoding" {
+        if let Ok(conn) = open_db(app) {
+            let _ = conn.execute(
+                "INSERT INTO local_conversion_events (id, item_id, level, message, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![Uuid::new_v4().to_string(), event.item_id,
+                    if event.status == "failed" { "error" } else { "info" },
+                    event.message.as_deref().unwrap_or(&event.status),
+                    serde_json::to_string(&event).unwrap_or_default(), timestamp()],
+            );
+        }
+    }
     let _ = app.emit("local-conversion-progress", event);
 }
 
@@ -1420,7 +1595,10 @@ fn emit_log(app: &AppHandle, event: LocalConversionLogEvent) {
                 event.item_id.clone(),
                 event.level.clone(),
                 event.message.clone(),
-                json!({ "name": event.name }).to_string(),
+                json!({ "name": event.name,
+                    "operation_id": event.item_id.as_deref().and_then(|id| get_item(&conn, id).ok().flatten()).and_then(|item| item.operation_id),
+                    "mode": event.item_id.as_deref().and_then(|id| get_item(&conn, id).ok().flatten()).map(|item| item.last_operation)
+                }).to_string(),
                 timestamp()
             ],
         );

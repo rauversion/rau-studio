@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, FolderOpen, Music2, Pause, Play, SkipBack, SkipForward, Square, Volume2, X } from "lucide-react";
 import {
   createContext,
@@ -50,6 +51,7 @@ type GlobalAudioPlayerContextValue = {
   player: AudioPlayerState | null;
   playing: boolean;
   stop: () => void;
+  setPathProcessing: (path: string, processing: boolean) => void;
   togglePathPlayback: (path?: string | null, label?: string | null, onError?: PlaybackErrorHandler) => Promise<void>;
   toggleTrackListPlayback: (
     tracks: TrackListItem[],
@@ -102,6 +104,9 @@ export function GlobalAudioPlayerProvider({ children }: { children: ReactNode })
   const { t } = useI18n();
   const audioElement = useRef<HTMLAudioElement | null>(null);
   const errorHandler = useRef<PlaybackErrorHandler | null>(null);
+  const blockedPaths = useRef(new Set<string>());
+  const fileRevisions = useRef(new Map<string, number>());
+  const activePath = useRef<string | null>(null);
   const [player, setPlayer] = useState<AudioPlayerState | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -167,6 +172,10 @@ export function GlobalAudioPlayerProvider({ children }: { children: ReactNode })
 
   const beginPlayback = useCallback(
     (nextPlayer: AudioPlayerState, onError?: PlaybackErrorHandler | null) => {
+      if (blockedPaths.current.has(nextPlayer.path)) return;
+      activePath.current = nextPlayer.path;
+      const revision = fileRevisions.current.get(nextPlayer.path);
+      if (revision) nextPlayer = { ...nextPlayer, url: `${nextPlayer.url}?revision=${revision}` };
       errorHandler.current = onError ?? null;
       setPlayer(nextPlayer);
       setPlaying(false);
@@ -202,6 +211,9 @@ export function GlobalAudioPlayerProvider({ children }: { children: ReactNode })
 
   const clear = useCallback(() => {
     audioElement.current?.pause();
+    audioElement.current?.removeAttribute("src");
+    audioElement.current?.load();
+    activePath.current = null;
     setPlaying(false);
     setCurrentTime(0);
     setDuration(0);
@@ -210,8 +222,28 @@ export function GlobalAudioPlayerProvider({ children }: { children: ReactNode })
     errorHandler.current = null;
   }, [setPlaybackQueue]);
 
+  const setPathProcessing = useCallback((path: string, processing: boolean) => {
+    if (processing) {
+      blockedPaths.current.add(path);
+      if (activePath.current === path) clear();
+    } else {
+      blockedPaths.current.delete(path);
+      fileRevisions.current.set(path, Date.now());
+    }
+  }, [clear]);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void listen<{ target_path: string; mode: string; status: string }>("local-conversion-progress", ({ payload }) => {
+      if (payload.mode === "regenerate") setPathProcessing(payload.target_path, payload.status === "queued" || payload.status === "running");
+    }).then((unlisten) => { if (disposed) unlisten(); else cleanup = unlisten; });
+    return () => { disposed = true; cleanup?.(); };
+  }, [setPathProcessing]);
+
   const togglePlayer = useCallback(async () => {
     if (!audioElement.current || !player) return;
+    if (blockedPaths.current.has(player.path)) return;
 
     try {
       if (audioElement.current.paused) {
@@ -343,6 +375,7 @@ export function GlobalAudioPlayerProvider({ children }: { children: ReactNode })
       player,
       playing,
       stop,
+      setPathProcessing,
       togglePathPlayback,
       toggleTrackListPlayback,
       toggleTrackPlayback
@@ -352,6 +385,7 @@ export function GlobalAudioPlayerProvider({ children }: { children: ReactNode })
       player,
       playing,
       stop,
+      setPathProcessing,
       togglePathPlayback,
       toggleTrackListPlayback,
       toggleTrackPlayback

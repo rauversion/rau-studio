@@ -1,9 +1,11 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Bookmark,
   BookmarkPlus,
   Columns3,
+  Copy,
   Database,
   ListFilter,
   ListMusic,
@@ -160,6 +162,14 @@ export function CatalogPage() {
 
   useEffect(() => {
     void loadInitialData();
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void listen("conversion-catalog-updated", () => setRefreshToken((current) => current + 1))
+      .then((unlisten) => { if (disposed) unlisten(); else cleanup = unlisten; });
+    return () => { disposed = true; cleanup?.(); };
   }, []);
 
   useEffect(() => {
@@ -641,6 +651,10 @@ export function CatalogPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" disabled={!activeLibraryId} onClick={() => navigate(`/playlists/duplicates?library=${encodeURIComponent(activeLibraryId)}`)}>
+            <Copy className="h-4 w-4" />
+            {t("Duplicados")}
+          </Button>
           <Button disabled={bootLoading} onClick={() => setCreatePlaylistDialogOpen(true)}>
             <ListPlus className="h-4 w-4" />
             {t("Crear playlist")}

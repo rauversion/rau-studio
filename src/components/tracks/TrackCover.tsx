@@ -125,7 +125,7 @@ function loadTrackCover(sourcePath: string): CoverRequestSubscription {
 
   let request = coverPending.get(sourcePath);
   if (!request) {
-    let resolveRequest = (_path: string | null) => undefined;
+    let resolveRequest: (path: string | null) => void = () => undefined;
     const promise = new Promise<string | null>((resolve) => {
       resolveRequest = resolve;
     });

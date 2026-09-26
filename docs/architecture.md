@@ -41,7 +41,8 @@ The main file-safety rules are:
 - source audio is never overwritten;
 - source Rekordbox XML is never edited;
 - converted AIFF files are written into sibling `converted/` folders;
-- existing target AIFF files are reused or reported, not overwritten;
+- normal conversion reuses existing target AIFF files; explicit File Conversion
+  regeneration replaces them only after a temporary output passes verification;
 - exports are written as new XML files.
 
 Example:
