@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -939,19 +940,22 @@ function RemoteCatalogPanel({
       <CardContent className="grid gap-3 p-3">
         <form className="grid gap-2" onSubmit={onSearch}>
           <Field label={t("Dispositivo remoto")}>
-            <select
-              className={fieldClass}
+            <Select
               value={selectedPeer}
               disabled={!networkRunning || peers.length === 0}
-              onChange={(event) => onPeer(event.target.value)}
+              onValueChange={(nextValue) => onPeer(nextValue)}
             >
-              {peers.length === 0 ? <option value="">{t("Sin peers con ticket de retorno")}</option> : null}
-              {peers.map((peer) => (
-                <option key={peer.endpoint_id} value={peer.endpoint_id}>
-                  {peer.display_name} · {shortEndpoint(peer.endpoint_id)}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger className={fieldClass} aria-label={t("Dispositivo remoto")}>
+                <SelectValue placeholder={t("Sin peers con ticket de retorno")} />
+              </SelectTrigger>
+              <SelectContent>
+                {peers.map((peer) => (
+                  <SelectItem key={peer.endpoint_id} value={peer.endpoint_id}>
+                    {peer.display_name} · {shortEndpoint(peer.endpoint_id)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
           <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
             <input
@@ -1098,16 +1102,18 @@ function ChatPanel({
       </CardHeader>
       <CardContent className="grid gap-3 p-3">
         {room === "private" ? (
-          <select
-            className={fieldClass}
+          <Select
             value={selectedPeer}
             disabled={!networkRunning || peers.length === 0}
-            aria-label={t("Destinatario del chat privado")}
-            onChange={(event) => onPeer(event.target.value)}
+            onValueChange={(nextValue) => onPeer(nextValue)}
           >
-            {peers.length === 0 ? <option value="">{t("Sin peers con ticket de retorno")}</option> : null}
-            {peers.map((peer) => <option key={peer.endpoint_id} value={peer.endpoint_id}>{peer.display_name}</option>)}
-          </select>
+            <SelectTrigger className={fieldClass} aria-label={t("Destinatario del chat privado")}>
+              <SelectValue placeholder={t("Sin peers con ticket de retorno")} />
+            </SelectTrigger>
+            <SelectContent>
+              {peers.map((peer) => <SelectItem key={peer.endpoint_id} value={peer.endpoint_id}>{peer.display_name}</SelectItem>)}
+            </SelectContent>
+          </Select>
         ) : (
           <p className="rounded-md bg-secondary/50 px-3 py-2 text-xs leading-5 text-muted-foreground">
             {t("El chat general se difunde a todos tus peers conocidos; todavía no es una sala pública global.")}
@@ -1515,12 +1521,20 @@ function ShareFolderForm({
             <input className={fieldClass} value={shareName} maxLength={80} required disabled={!selectedPath} onChange={(event) => onName(event.target.value)} />
           </Field>
           <Field label={t("Visibilidad")}>
-            <select className={fieldClass} value={visibility} onChange={(event) => onVisibility(event.target.value as SharedFolder["visibility"])}>
-              <option value="contacts">{t("Todos mis contactos")}</option>
-              <option value="selected_contacts">{t("Contactos seleccionados")}</option>
-              <option value="community">{t("Comunidad general")}</option>
-              <option value="ticket">{t("Solo mediante invitación")}</option>
-            </select>
+            <Select
+              value={visibility}
+              onValueChange={(nextValue) => onVisibility(nextValue as SharedFolder["visibility"])}
+            >
+              <SelectTrigger className={fieldClass} aria-label={t("Visibilidad")}>
+                <SelectValue placeholder={t("Seleccionar opción")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="contacts">{t("Todos mis contactos")}</SelectItem>
+                <SelectItem value="selected_contacts">{t("Contactos seleccionados")}</SelectItem>
+                <SelectItem value="community">{t("Comunidad general")}</SelectItem>
+                <SelectItem value="ticket">{t("Solo mediante invitación")}</SelectItem>
+              </SelectContent>
+            </Select>
           </Field>
           <p className="text-xs leading-5 text-muted-foreground">
             {t("Solo se publica una ruta virtual. Las rutas absolutas y los archivos ocultos no entran al catálogo.")}

@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -888,14 +889,18 @@ function SettingsPage() {
 
             <label className="grid max-w-xs gap-1 text-sm font-medium">
               {t("Idioma")}
-              <select
-                className="h-10 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring"
+              <Select
                 value={locale}
-                onChange={(event) => void changeLocale(event.currentTarget.value as Locale)}
+                onValueChange={(nextValue) => void changeLocale(nextValue as Locale)}
               >
-                <option value="es">{t("Español")}</option>
-                <option value="en">{t("Inglés")}</option>
-              </select>
+                <SelectTrigger className="h-10 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring" aria-label={t("Idioma")}>
+                  <SelectValue placeholder={t("Seleccionar opción")} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="es">{t("Español")}</SelectItem>
+                  <SelectItem value="en">{t("Inglés")}</SelectItem>
+                </SelectContent>
+              </Select>
             </label>
           </CardContent>
         </Card>

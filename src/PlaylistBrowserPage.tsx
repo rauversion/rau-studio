@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Album,
@@ -380,18 +381,22 @@ export function PlaylistBrowserPage({ kind }: { kind: BrowserKind }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            className="h-10 min-w-[240px] rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          <Select
             value={activeLibraryId}
-            onChange={(event) => void changeLibrary(event.currentTarget.value)}
+            onValueChange={(nextValue) => void changeLibrary(nextValue)}
+            disabled={libraries.length === 0}
           >
-            {libraries.length === 0 ? <option value="">{t("Sin libreria activa")}</option> : null}
-            {libraries.map((library) => (
-              <option key={library.id} value={library.id}>
-                {library.source_name}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger className="w-auto h-10 min-w-[240px] rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={t("Librería")}>
+              <SelectValue placeholder={t("Sin libreria activa")} />
+            </SelectTrigger>
+            <SelectContent>
+              {libraries.map((library) => (
+                <SelectItem key={library.id} value={library.id}>
+                  {library.source_name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button variant="secondary" disabled={busy} onClick={() => void loadLibraries(activeLibraryId)}>
             <RefreshCcw className="h-4 w-4" />
             {t("Refrescar")}

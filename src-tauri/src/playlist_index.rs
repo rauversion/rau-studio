@@ -1492,6 +1492,138 @@ pub fn playlist_catalog_search(
 }
 
 #[tauri::command]
+pub async fn playlist_catalog_create_playlist_from_files(
+    app: AppHandle,
+    library_id: Option<String>,
+    name: String,
+    paths: Vec<String>,
+) -> Result<PlaylistDraft, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if name.trim().is_empty() {
+            return Err("Ingresa un nombre para la playlist.".to_string());
+        }
+        let paths = validate_playlist_audio_paths(paths)?;
+        let mut conn = open_db(&app)?;
+        if let Some(id) = &library_id {
+            if get_library(&conn, id)?.is_none() {
+                return Err(format!("Libreria indexada no encontrada: {id}"));
+            }
+        }
+
+        // Reuse indexed files by their canonical path, preserving metadata and ratings.
+        let mut track_ids = Vec::with_capacity(paths.len());
+        let mut missing = Vec::new();
+        for path in paths {
+            let existing = conn.query_row(
+                "SELECT track_id FROM playlist_index_tracks WHERE library_id = ?1 AND source_path = ?2 LIMIT 1",
+                params![LOCAL_CONVERSION_LIBRARY_ID, &path],
+                |row| row.get::<_, String>(0),
+            ).optional().map_err(|error| format!("No se pudo buscar el archivo local: {error}"))?;
+            if let Some(track_id) = existing {
+                track_ids.push(track_id);
+            } else {
+                let item_id = format!("catalog-{}", stable_hash(&path));
+                track_ids.push(format!("local-{item_id}"));
+                missing.push(LocalPlaylistTrackInput { item_id, path });
+            }
+        }
+        if !missing.is_empty() {
+            let expected = missing.len();
+            let prepared = prepare_local_tracks(&app, &conn, missing)?;
+            if prepared.track_ids.len() != expected {
+                return Err("Algunos archivos ya no están disponibles. Revisa la selección e intenta de nuevo.".to_string());
+            }
+        }
+        create_playlist_with_tracks(
+            &mut conn,
+            library_id.as_deref().unwrap_or(LOCAL_CONVERSION_LIBRARY_ID),
+            &name,
+            LOCAL_CONVERSION_LIBRARY_ID,
+            &track_ids,
+        )
+    })
+    .await
+    .map_err(|error| format!("No se pudo crear la playlist: {error}"))?
+}
+
+fn validate_playlist_audio_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+    for path in paths {
+        let canonical = playlist_path_match_key(&path)
+            .ok_or_else(|| "Selecciona archivos de audio para la playlist.".to_string())?;
+        let file = Path::new(&canonical);
+        if !file.is_file() {
+            return Err(format!("Archivo de audio no encontrado: {path}"));
+        }
+        let extension = file
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if is_appledouble_path(file)
+            || !matches!(
+                extension.as_str(),
+                "wav" | "wave" | "aif" | "aiff" | "flac" | "mp3" | "m4a" | "aac" | "alac"
+            )
+        {
+            return Err(format!("Archivo de audio no compatible: {path}"));
+        }
+        if seen.insert(canonical.clone()) {
+            result.push(canonical);
+        }
+    }
+    if result.is_empty() {
+        return Err("Selecciona archivos de audio para la playlist.".to_string());
+    }
+    Ok(result)
+}
+
+fn create_playlist_with_tracks(
+    conn: &mut Connection,
+    library_id: &str,
+    name: &str,
+    source_library_id: &str,
+    track_ids: &[String],
+) -> Result<PlaylistDraft, String> {
+    let name = name.trim();
+    if name.is_empty() || track_ids.is_empty() {
+        return Err("Ingresa un nombre y selecciona archivos para la playlist.".to_string());
+    }
+    if get_library(conn, library_id)?.is_none() {
+        return Err(format!("Libreria indexada no encontrada: {library_id}"));
+    }
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("No se pudo iniciar la playlist: {error}"))?;
+    let id = Uuid::new_v4().to_string();
+    let now = timestamp();
+    tx.execute(
+        "INSERT INTO playlist_drafts (id, library_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![&id, library_id, name, &now],
+    ).map_err(|error| format!("No se pudo crear la playlist: {error}"))?;
+    let mut seen = BTreeSet::new();
+    for source_track_id in track_ids {
+        let track_id =
+            copy_track_to_library(&tx, source_library_id, source_track_id, library_id, &now)?
+                .ok_or_else(|| format!("Track indexado no encontrado: {source_track_id}"))?;
+        if !seen.insert(track_id.clone()) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO playlist_draft_tracks (draft_id, track_id, position, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![&id, &track_id, seen.len() as i64, &now],
+        ).map_err(|error| format!("No se pudo agregar el track a la playlist: {error}"))?;
+    }
+    rebuild_fts(&tx)?;
+    let draft =
+        get_draft(&tx, &id)?.ok_or_else(|| "No se pudo leer la playlist creada.".to_string())?;
+    tx.commit()
+        .map_err(|error| format!("No se pudo guardar la playlist: {error}"))?;
+    Ok(draft)
+}
+
+#[tauri::command]
 pub async fn playlist_catalog_artist_facets(
     app: AppHandle,
     request: PlaylistCatalogRequest,
@@ -9542,6 +9674,125 @@ fn option_i64_to_u8(value: Option<i64>) -> Option<u8> {
 #[cfg(test)]
 mod playlist_index_tests {
     use super::*;
+
+    #[test]
+    fn catalog_file_playlist_preserves_order_metadata_and_rolls_back_on_failure() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        init_db(&conn).unwrap();
+        let now = timestamp();
+        for library in ["local", "catalog", "empty"] {
+            conn.execute(
+                "INSERT INTO playlist_index_libraries (id, source_path, source_name, indexed_at, updated_at) VALUES (?1, ?1, ?1, ?2, ?2)",
+                params![library, &now],
+            ).unwrap();
+        }
+        for (library, id, path, artist, rating) in [
+            ("local", "first", "/music/one.mp3", "File artist", 0),
+            ("local", "second", "/music/two.flac", "Second artist", 4),
+            ("catalog", "existing", "/music/one.mp3", "Edited artist", 5),
+        ] {
+            conn.execute(
+                "INSERT INTO playlist_index_tracks (library_id, track_id, name, artist, source_path, source_exists, search_text, attributes_json, user_rating, created_at, updated_at) VALUES (?1, ?2, ?2, ?3, ?4, 1, ?3, '{\"Genre\":\"House\"}', ?5, ?6, ?6)",
+                params![library, id, artist, path, rating, &now],
+            ).unwrap();
+        }
+        let ids = vec![
+            "second".to_string(),
+            "first".to_string(),
+            "second".to_string(),
+        ];
+        let playlist =
+            create_playlist_with_tracks(&mut conn, "catalog", "  New set  ", "local", &ids)
+                .unwrap();
+        assert_eq!(playlist.name, "New set");
+        assert_eq!(playlist.track_count, 2);
+        let tracks = draft_tracks(&conn, &playlist.id).unwrap();
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.track_id.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "existing"]
+        );
+        assert_eq!(tracks[0].artist.as_deref(), Some("Second artist"));
+        assert_eq!(tracks[0].genre.as_deref(), Some("House"));
+        assert_eq!(tracks[1].artist.as_deref(), Some("Edited artist"));
+        assert_eq!(tracks[1].user_rating, Some(5));
+        assert_eq!(
+            get_library(&conn, "catalog").unwrap().unwrap().track_count,
+            2
+        );
+        let indexed: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_track_fts WHERE library_id = 'catalog'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 2);
+        assert!(list_playlist_targets(&conn)
+            .unwrap()
+            .iter()
+            .any(|target| target.id == playlist.id));
+
+        let failed = create_playlist_with_tracks(
+            &mut conn,
+            "empty",
+            "Broken set",
+            "local",
+            &["first".into(), "missing".into()],
+        );
+        assert!(failed.is_err());
+        assert!(list_drafts(&conn, Some("empty")).unwrap().is_empty());
+        assert_eq!(get_library(&conn, "empty").unwrap().unwrap().track_count, 0);
+        let copied: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_index_tracks WHERE library_id = 'empty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(copied, 0);
+        assert!(create_playlist_with_tracks(&mut conn, "catalog", " ", "local", &ids).is_err());
+        assert!(create_playlist_with_tracks(&mut conn, "catalog", "Empty", "local", &[]).is_err());
+    }
+
+    #[test]
+    fn catalog_file_playlist_validates_files_and_deduplicates_paths() {
+        let folder = std::env::temp_dir().join(format!("rau-playlist-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&folder).unwrap();
+        let audio = folder.join("track.MP3");
+        let unsupported = folder.join("notes.txt");
+        let sidecar = folder.join("._track.mp3");
+        for path in [&audio, &unsupported, &sidecar] {
+            fs::write(path, b"test").unwrap();
+        }
+        let path = audio.to_string_lossy().into_owned();
+        let alternate = folder
+            .join(".")
+            .join("track.MP3")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            validate_playlist_audio_paths(vec![path.clone(), alternate]).unwrap(),
+            vec![audio.canonicalize().unwrap().to_string_lossy().into_owned()]
+        );
+        for invalid in [
+            unsupported,
+            sidecar,
+            folder.clone(),
+            folder.join("missing.wav"),
+        ] {
+            assert!(validate_playlist_audio_paths(vec![
+                path.clone(),
+                invalid.to_string_lossy().into_owned()
+            ])
+            .is_err());
+        }
+        assert!(validate_playlist_audio_paths(vec![]).is_err());
+        fs::remove_dir_all(folder).unwrap();
+    }
 
     #[test]
     fn local_metadata_prefers_track_artist_and_uses_album_artist_as_fallback() {

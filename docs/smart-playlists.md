@@ -87,6 +87,12 @@ Catalog results append as the user approaches the end of the list. **Load more**
 
 Track checkboxes in **Catalog** enable **Delete**, including selections across pages. The confirmation lists the selected tracks and library. Deletion removes the track records, indexed and local playlist memberships, source mappings, embeddings, enrichment data, search entries, and Copilot candidate references in that library. It updates playlist, library, and saved smart collection counts in the same transaction. The catalog and facets refresh after success; an error keeps the selection available to retry. Audio files and the original XML are preserved.
 
+## Create a Playlist from Local Files
+
+**Create playlist** in the Catalog header opens a modal with a name field, a multi-file picker, and a drop area for WAV/WAVE, AIFF/AIF, FLAC, MP3, M4A, AAC and ALAC files. Selections accumulate without repeating paths, and files can be removed before pressing **Create**. Cancelling leaves the catalog unchanged. Unsupported files are reported; the backend also checks that every submitted path is an available audio file and deduplicates canonical paths.
+
+Creation reads embedded metadata through the existing local-file indexer and saves an editable playlist in the active library, falling back to the local File Conversion library when the catalog is empty. Files already indexed are reused. Creating the playlist and attaching its tracks uses one transaction, so a failed attachment does not leave an empty or partial playlist. Audio files are not converted or modified. After success, the catalog refreshes its libraries and facets and selects the new playlist to show its tracks.
+
 ## Artist and Album Browser
 
 Paths:

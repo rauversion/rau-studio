@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Bookmark,
@@ -6,6 +7,7 @@ import {
   Database,
   ListFilter,
   ListMusic,
+  ListPlus,
   LoaderCircle,
   Layers3,
   Play,
@@ -22,6 +24,7 @@ import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { useCatalogTracks } from "./components/catalog/useCatalogTracks";
 import { CatalogValueFacet } from "./components/catalog/CatalogValueFacet";
+import { CatalogCreatePlaylistDialog } from "./components/catalog/CatalogCreatePlaylistDialog";
 import { CatalogDeleteTracksDialog, type CatalogTrackDeletion } from "./components/catalog/CatalogDeleteTracksDialog";
 import type { CatalogFacetValue, CatalogFilters } from "./components/catalog/types";
 import { PlaylistAddDialog, type PlaylistDraftOption } from "./components/tracks/PlaylistAddDialog";
@@ -117,6 +120,7 @@ export function CatalogPage() {
   const [activeSavedSearchBaseline, setActiveSavedSearchBaseline] = useState("");
   const [visibleColumns, setVisibleColumns] = useState<Set<TrackListColumn>>(() => new Set(defaultColumns));
   const [playlistDialogOpen, setPlaylistDialogOpen] = useState(false);
+  const [createPlaylistDialogOpen, setCreatePlaylistDialogOpen] = useState(false);
   const [saveSearchDialogOpen, setSaveSearchDialogOpen] = useState(false);
   const [deleteSearchDialogOpen, setDeleteSearchDialogOpen] = useState(false);
   const [deleteTracksRequest, setDeleteTracksRequest] = useState<CatalogTrackDeletion | null>(null);
@@ -189,7 +193,7 @@ export function CatalogPage() {
     function focusSearch(event: KeyboardEvent) {
       if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+      if (target?.closest("input, textarea, select, [role='combobox'], [role='listbox'], [contenteditable='true']")) return;
       event.preventDefault();
       searchInputRef.current?.focus();
     }
@@ -527,6 +531,28 @@ export function CatalogPage() {
     }
   }
 
+  async function playlistCreatedFromFiles(playlist: PlaylistDraftOption & { library_id: string }) {
+    setCreatePlaylistDialogOpen(false);
+    setActiveLibraryId(playlist.library_id);
+    setQuery("");
+    setDebouncedQuery("");
+    setFilters({ ...emptyFilters(), playlists: [playlist.id] });
+    setSelectedTracks(new Map());
+    setActiveSavedSearchId("");
+    setActiveSavedSearchBaseline("");
+    setErrorMessage("");
+    setMessage(t("Playlist creada: {name} con {count} tracks.", { name: playlist.name, count: playlist.track_count }));
+    setDrafts((current) => [...current.filter((draft) => draft.id !== playlist.id), playlist]);
+    setRefreshToken((current) => current + 1);
+    try {
+      const nextLibraries = await invoke<PlaylistIndexLibrary[]>("playlist_index_libraries");
+      setLibraries(nextLibraries);
+      await Promise.all([loadDrafts(playlist.library_id), loadSavedSearches(playlist.library_id)]);
+    } catch (error) {
+      setErrorMessage(translateBackendMessage(locale, String(error)));
+    }
+  }
+
   async function enrichSelection() {
     if (!activeLibraryId || selectedTrackList.length === 0) return;
     if (readyProviders.length === 0) {
@@ -615,18 +641,26 @@ export function CatalogPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            className="h-9 max-w-72 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          <Button disabled={bootLoading} onClick={() => setCreatePlaylistDialogOpen(true)}>
+            <ListPlus className="h-4 w-4" />
+            {t("Crear playlist")}
+          </Button>
+          <Select
             value={activeLibraryId}
-            onChange={(event) => void changeLibrary(event.currentTarget.value)}
+            onValueChange={(nextValue) => void changeLibrary(nextValue)}
             disabled={libraries.length === 0}
           >
-            {libraries.map((library) => (
-              <option key={library.id} value={library.id}>
-                {library.source_name} · {library.track_count} tracks
-              </option>
-            ))}
-          </select>
+            <SelectTrigger className="w-auto h-9 max-w-72 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={t("Librería")}>
+              <SelectValue placeholder={t("Seleccionar opción")} />
+            </SelectTrigger>
+            <SelectContent>
+              {libraries.map((library) => (
+                <SelectItem key={library.id} value={library.id}>
+                  {library.source_name} · {library.track_count} tracks
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button variant="secondary" size="icon" title={t("Actualizar")} onClick={() => void refreshCatalog()}>
             <RefreshCcw className={cn("h-4 w-4", loading && "animate-spin")} />
           </Button>
@@ -884,17 +918,21 @@ export function CatalogPage() {
                   </Button>
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <span>{t("Orden")}</span>
-                    <select
-                      className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none"
+                    <Select
                       value={sort}
-                      onChange={(event) => { setSort(event.currentTarget.value); }}
+                      onValueChange={(nextValue) => { setSort(nextValue); }}
                     >
-                      <option value="relevance">{t("Relevancia")}</option>
-                      <option value="recent">{t("Mas recientes")}</option>
-                      <option value="rating">{t("Mejor rating")}</option>
-                      <option value="bpm">BPM</option>
-                      <option value="title">{t("Titulo")}</option>
-                    </select>
+                      <SelectTrigger className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none" aria-label={t("Orden")}>
+                        <SelectValue placeholder={t("Seleccionar opción")} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="relevance">{t("Relevancia")}</SelectItem>
+                        <SelectItem value="recent">{t("Mas recientes")}</SelectItem>
+                        <SelectItem value="rating">{t("Mejor rating")}</SelectItem>
+                        <SelectItem value="bpm">BPM</SelectItem>
+                        <SelectItem value="title">{t("Titulo")}</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </label>
                   <ColumnChooser columns={visibleColumns} onToggle={toggleColumn} />
                 </div>
@@ -935,13 +973,17 @@ export function CatalogPage() {
               <footer ref={loadMoreSentinel} className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-3 py-3">
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   <span>{t("Por carga")}</span>
-                  <select
-                    className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground"
-                    value={pageSize}
-                    onChange={(event) => setPageSize(Number(event.currentTarget.value))}
+                  <Select
+                    value={String(pageSize)}
+                    onValueChange={(nextValue) => setPageSize(Number(nextValue))}
                   >
-                    {[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
-                  </select>
+                    <SelectTrigger className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground" aria-label={t("Por carga")}>
+                      <SelectValue placeholder={t("Seleccionar opción")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[25, 50, 100].map((size) => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
                 </label>
                 <span className="text-xs text-muted-foreground" role="status">
                   {t("{count} de {total} tracks", { count: response?.items.length ?? 0, total: response?.total ?? 0 })}
@@ -982,6 +1024,11 @@ export function CatalogPage() {
         onAddExisting={(draftId) => void addTracksToDraft(draftId)}
         onCreate={(name, description) => void createPlaylist(name, description)}
       />
+      {createPlaylistDialogOpen ? <CatalogCreatePlaylistDialog
+        libraryId={activeLibraryId}
+        onClose={() => setCreatePlaylistDialogOpen(false)}
+        onCreated={(playlist) => void playlistCreatedFromFiles(playlist)}
+      /> : null}
       <SaveSearchDialog
         open={saveSearchDialogOpen}
         busy={savedSearchBusy}

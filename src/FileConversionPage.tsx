@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -681,17 +682,21 @@ export function FileConversionPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <label className="grid gap-1 text-xs font-semibold text-muted-foreground">
                   {t("Concurrencia")}
-                  <select
-                    className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground"
-                    value={maxConcurrency}
-                    onChange={(event) => setMaxConcurrency(Number(event.currentTarget.value))}
+                  <Select
+                    value={String(maxConcurrency)}
+                    onValueChange={(nextValue) => setMaxConcurrency(Number(nextValue))}
                   >
-                    {concurrencyOptionsForCores(detectLogicalCores()).map((value) => (
-                      <option key={value} value={value}>
-                        {value}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground" aria-label={t("Concurrencia")}>
+                      <SelectValue placeholder={t("Seleccionar opción")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {concurrencyOptionsForCores(detectLogicalCores()).map((value) => (
+                        <SelectItem key={value} value={String(value)}>
+                          {value}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </label>
                 <Button disabled={busy || selectedConvertibleIds.length === 0} onClick={() => void convertIds(selectedConvertibleIds)}>
                   {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileAudio2 className="h-4 w-4" />}

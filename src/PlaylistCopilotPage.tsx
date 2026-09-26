@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -535,19 +536,22 @@ export function PlaylistCopilotPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            className="h-10 max-w-80 rounded-md border border-input bg-background px-3 text-sm"
+          <Select
             value={activeLibraryId}
-            onChange={(event) => void changeLibrary(event.currentTarget.value)}
+            onValueChange={(nextValue) => void changeLibrary(nextValue)}
             disabled={loading || libraries.length === 0}
           >
-            {libraries.length === 0 ? <option value="">{t("Sin librerias indexadas")}</option> : null}
-            {libraries.map((library) => (
-              <option key={library.id} value={library.id}>
-                {library.source_name}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger className="w-auto h-10 max-w-80 rounded-md border border-input bg-background px-3 text-sm" aria-label={t("Librería")}>
+              <SelectValue placeholder={t("Sin librerias indexadas")} />
+            </SelectTrigger>
+            <SelectContent>
+              {libraries.map((library) => (
+                <SelectItem key={library.id} value={library.id}>
+                  {library.source_name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button variant="secondary" disabled={loading} onClick={() => void loadLibraries(activeLibraryId)}>
             <RefreshCcw className={cn("h-4 w-4", loading && "animate-spin")} />
             {t("Refrescar")}
@@ -638,17 +642,21 @@ export function PlaylistCopilotPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <label className="flex items-center gap-2 text-sm">
                         <span className="font-semibold">{t("Cantidad")}</span>
-                        <select
-                          className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-                          value={targetCount}
-                          onChange={(event) => setTargetCount(Number(event.currentTarget.value))}
+                        <Select
+                          value={String(targetCount)}
+                          onValueChange={(nextValue) => setTargetCount(Number(nextValue))}
                         >
-                          {[10, 20, 30, 40, 60, 90, 120].map((value) => (
-                            <option key={value} value={value}>
-                              {value}
-                            </option>
-                          ))}
-                        </select>
+                          <SelectTrigger className="h-9 rounded-md border border-input bg-background px-2 text-sm" aria-label={t("Cantidad")}>
+                            <SelectValue placeholder={t("Seleccionar opción")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[10, 20, 30, 40, 60, 90, 120].map((value) => (
+                              <SelectItem key={value} value={String(value)}>
+                                {value}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </label>
                       <div className="flex rounded-md border border-border bg-card p-1">
                         <Button

@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -1369,9 +1370,18 @@ export function BroadcastPage() {
                   {microphoneEnabled ? (
                     <>
                       <Field label={t("Dispositivo de entrada")}>
-                        <select className={fieldClass} value={microphoneDevice} disabled={running} onChange={(event) => setMicrophoneDevice(event.target.value)}>
-                          {microphoneDevices.map((device) => <option key={device.id} value={device.id}>{device.is_default ? t(device.label) : device.label}</option>)}
-                        </select>
+                        <Select
+                          value={microphoneDevice}
+                          disabled={running}
+                          onValueChange={(nextValue) => setMicrophoneDevice(nextValue)}
+                        >
+                          <SelectTrigger className={fieldClass} aria-label={t("Dispositivo de entrada")}>
+                            <SelectValue placeholder={t("Seleccionar opción")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {microphoneDevices.map((device) => <SelectItem key={device.id} value={device.id}>{device.is_default ? t(device.label) : device.label}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
                       </Field>
                       <Field label={t("Ganancia del micrófono: {gain}%", { gain: microphoneGain })}>
                         <input
@@ -1430,35 +1440,50 @@ export function BroadcastPage() {
                   {lineInputEnabled ? (
                     <>
                       <Field label={t("Dispositivo de línea")}>
-                        <select className={fieldClass} value={lineInputDevice} disabled={running} onChange={(event) => changeLineInputDevice(event.target.value)}>
-                          {microphoneDevices.map((device) => <option key={device.id} value={device.id}>{device.is_default ? t(device.label) : device.label} · {device.input_channels} ch</option>)}
-                        </select>
+                        <Select
+                          value={lineInputDevice}
+                          disabled={running}
+                          onValueChange={(nextValue) => changeLineInputDevice(nextValue)}
+                        >
+                          <SelectTrigger className={fieldClass} aria-label={t("Dispositivo de línea")}>
+                            <SelectValue placeholder={t("Seleccionar opción")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {microphoneDevices.map((device) => <SelectItem key={device.id} value={device.id}>{device.is_default ? t(device.label) : device.label} · {device.input_channels} ch</SelectItem>)}
+                          </SelectContent>
+                        </Select>
                       </Field>
                       <Field label={t("Canal de entrada")}>
-                        <select
-                          className={fieldClass}
+                        <Select
                           value={`${lineInputStereo ? "stereo" : "mono"}:${lineInputChannel}`}
                           disabled={running}
-                          onChange={(event) => {
+                          onValueChange={(nextValue) => {
                             if (lineInputPreview?.active) void stopLineInputPreview();
-                            const [mode, channel] = event.target.value.split(":");
+                            const [mode, channel] = nextValue.split(":");
                             setLineInputStereo(mode === "stereo");
                             setLineInputChannel(channel);
                           }}
                         >
-                          <optgroup label={t("Mono")}>
-                            {Array.from({ length: lineInputChannels }, (_, index) => index + 1).map((channel) => (
-                              <option key={`mono:${channel}`} value={`mono:${channel}`}>{t("Canal {channel} mono", { channel })}</option>
-                            ))}
-                          </optgroup>
-                          {lineInputChannels > 1 ? (
-                            <optgroup label={t("Estéreo")}>
-                              {Array.from({ length: lineInputChannels - 1 }, (_, index) => index + 1).map((channel) => (
-                                <option key={`stereo:${channel}`} value={`stereo:${channel}`}>{t("Canales {left}–{right} estéreo", { left: channel, right: channel + 1 })}</option>
+                          <SelectTrigger className={fieldClass} aria-label={t("Canal de entrada")}>
+                            <SelectValue placeholder={t("Seleccionar opción")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectLabel>{t("Mono")}</SelectLabel>
+                              {Array.from({ length: lineInputChannels }, (_, index) => index + 1).map((channel) => (
+                                <SelectItem key={`mono:${channel}`} value={`mono:${channel}`}>{t("Canal {channel} mono", { channel })}</SelectItem>
                               ))}
-                            </optgroup>
-                          ) : null}
-                        </select>
+                            </SelectGroup>
+                            {lineInputChannels > 1 ? (
+                              <SelectGroup>
+                                <SelectLabel>{t("Estéreo")}</SelectLabel>
+                                {Array.from({ length: lineInputChannels - 1 }, (_, index) => index + 1).map((channel) => (
+                                  <SelectItem key={`stereo:${channel}`} value={`stereo:${channel}`}>{t("Canales {left}–{right} estéreo", { left: channel, right: channel + 1 })}</SelectItem>
+                                ))}
+                              </SelectGroup>
+                            ) : null}
+                          </SelectContent>
+                        </Select>
                       </Field>
                       <Field label={t("Ganancia de línea: {gain}%", { gain: lineInputGain })}>
                         <input
@@ -1572,19 +1597,29 @@ export function BroadcastPage() {
                   ) : applicationAudioEnabled ? (
                     <>
                       <Field label={t("Fuente de audio") }>
-                        <select className={fieldClass} value={applicationAudioBundleId} disabled={running} onChange={(event) => setApplicationAudioBundleId(event.target.value)}>
-                          <option value={SYSTEM_AUDIO_TARGET_ID}>{t("Toda la salida del Mac")}</option>
-                          {applicationAudioBundleId && applicationAudioBundleId !== SYSTEM_AUDIO_TARGET_ID && !applicationAudioDevices.some((application) => application.id === applicationAudioBundleId) ? (
-                            <option value={applicationAudioBundleId}>{applicationAudioBundleId} · {t("no está abierta")}</option>
-                          ) : null}
-                          {applicationAudioDevices.length > 0 ? (
-                            <optgroup label={t("Aplicación específica (opcional)")}>
-                              {applicationAudioDevices.map((application) => (
-                                <option key={`${application.id}:${application.process_id}`} value={application.id}>{application.label}</option>
-                              ))}
-                            </optgroup>
-                          ) : null}
-                        </select>
+                        <Select
+                          value={applicationAudioBundleId}
+                          disabled={running}
+                          onValueChange={(nextValue) => setApplicationAudioBundleId(nextValue)}
+                        >
+                          <SelectTrigger className={fieldClass} aria-label={t("Fuente de audio") }>
+                            <SelectValue placeholder={t("Seleccionar opción")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={SYSTEM_AUDIO_TARGET_ID}>{t("Toda la salida del Mac")}</SelectItem>
+                            {applicationAudioBundleId && applicationAudioBundleId !== SYSTEM_AUDIO_TARGET_ID && !applicationAudioDevices.some((application) => application.id === applicationAudioBundleId) ? (
+                              <SelectItem value={applicationAudioBundleId}>{applicationAudioBundleId} · {t("no está abierta")}</SelectItem>
+                            ) : null}
+                            {applicationAudioDevices.length > 0 ? (
+                              <SelectGroup>
+                                <SelectLabel>{t("Aplicación específica (opcional)")}</SelectLabel>
+                                {applicationAudioDevices.map((application) => (
+                                  <SelectItem key={`${application.id}:${application.process_id}`} value={application.id}>{application.label}</SelectItem>
+                                ))}
+                              </SelectGroup>
+                            ) : null}
+                          </SelectContent>
+                        </Select>
                       </Field>
                       <Field label={t("Ganancia de salida: {gain}%", { gain: applicationAudioGain })}>
                         <input
@@ -1741,10 +1776,19 @@ export function BroadcastPage() {
                   />
                 </Field>
                 <Field label={t("Tipo de destino")}>
-                  <select className={fieldClass} value={outputKind} disabled={running} onChange={(event) => setOutputKind(event.target.value as BroadcastOutputKind)}>
-                    <option value="icecast">Icecast · MP3</option>
-                    <option value="rtmp">RTMP / RTMPS · {t("Video en vivo")}</option>
-                  </select>
+                  <Select
+                    value={outputKind}
+                    disabled={running}
+                    onValueChange={(nextValue) => setOutputKind(nextValue as BroadcastOutputKind)}
+                  >
+                    <SelectTrigger className={fieldClass} aria-label={t("Tipo de destino")}>
+                      <SelectValue placeholder={t("Seleccionar opción")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="icecast">Icecast · MP3</SelectItem>
+                      <SelectItem value="rtmp">RTMP / RTMPS · {t("Video en vivo")}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </Field>
                 {outputKind === "icecast" ? (
                   <>
@@ -1764,9 +1808,18 @@ export function BroadcastPage() {
                         <input className={fieldClass} value={username} required disabled={running} onChange={(event) => setUsername(event.target.value)} />
                       </Field>
                       <Field label={t("Bitrate MP3")}>
-                        <select className={fieldClass} value={bitrate} disabled={running} onChange={(event) => setBitrate(event.target.value)}>
-                          {[96, 128, 160, 192, 256, 320].map((value) => <option key={value} value={value}>{value} kbps</option>)}
-                        </select>
+                        <Select
+                          value={bitrate}
+                          disabled={running}
+                          onValueChange={(nextValue) => setBitrate(nextValue)}
+                        >
+                          <SelectTrigger className={fieldClass} aria-label={t("Bitrate MP3")}>
+                            <SelectValue placeholder={t("Seleccionar opción")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[96, 128, 160, 192, 256, 320].map((value) => <SelectItem key={value} value={String(value)}>{value} kbps</SelectItem>)}
+                          </SelectContent>
+                        </Select>
                       </Field>
                     </div>
                     <Field label={profile?.password_configured ? t("Nueva contraseña source (opcional)") : t("Contraseña source")}>
@@ -1800,10 +1853,19 @@ export function BroadcastPage() {
                 ) : (
                   <>
                     <Field label={t("Plataforma")}>
-                      <select className={fieldClass} value={rtmpPlatform} disabled={running} onChange={(event) => setRtmpPlatform(event.target.value as RtmpPlatform)}>
-                        <option value="instagram">Instagram Live</option>
-                        <option value="custom">{t("RTMP personalizado")}</option>
-                      </select>
+                      <Select
+                        value={rtmpPlatform}
+                        disabled={running}
+                        onValueChange={(nextValue) => setRtmpPlatform(nextValue as RtmpPlatform)}
+                      >
+                        <SelectTrigger className={fieldClass} aria-label={t("Plataforma")}>
+                          <SelectValue placeholder={t("Seleccionar opción")} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="instagram">Instagram Live</SelectItem>
+                          <SelectItem value="custom">{t("RTMP personalizado")}</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </Field>
                     <Field label={t("URL del servidor RTMP")}>
                       <input
@@ -1829,14 +1891,32 @@ export function BroadcastPage() {
                     </Field>
                     <div className="grid gap-3 sm:grid-cols-2">
                       <Field label={t("Bitrate de video")}>
-                        <select className={fieldClass} value={rtmpVideoBitrate} disabled={running} onChange={(event) => setRtmpVideoBitrate(event.target.value)}>
-                          {[2250, 3000, 3500, 4500, 6000].map((value) => <option key={value} value={value}>{value} kbps</option>)}
-                        </select>
+                        <Select
+                          value={rtmpVideoBitrate}
+                          disabled={running}
+                          onValueChange={(nextValue) => setRtmpVideoBitrate(nextValue)}
+                        >
+                          <SelectTrigger className={fieldClass} aria-label={t("Bitrate de video")}>
+                            <SelectValue placeholder={t("Seleccionar opción")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[2250, 3000, 3500, 4500, 6000].map((value) => <SelectItem key={value} value={String(value)}>{value} kbps</SelectItem>)}
+                          </SelectContent>
+                        </Select>
                       </Field>
                       <Field label={t("Bitrate AAC")}>
-                        <select className={fieldClass} value={rtmpAudioBitrate} disabled={running} onChange={(event) => setRtmpAudioBitrate(event.target.value)}>
-                          {[96, 128, 160, 192, 256].map((value) => <option key={value} value={value}>{value} kbps</option>)}
-                        </select>
+                        <Select
+                          value={rtmpAudioBitrate}
+                          disabled={running}
+                          onValueChange={(nextValue) => setRtmpAudioBitrate(nextValue)}
+                        >
+                          <SelectTrigger className={fieldClass} aria-label={t("Bitrate AAC")}>
+                            <SelectValue placeholder={t("Seleccionar opción")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[96, 128, 160, 192, 256].map((value) => <SelectItem key={value} value={String(value)}>{value} kbps</SelectItem>)}
+                          </SelectContent>
+                        </Select>
                       </Field>
                     </div>
                     <div className="rounded-md border border-violet-500/25 bg-violet-500/5 px-3 py-2 text-xs text-muted-foreground">
@@ -2190,18 +2270,20 @@ export function BroadcastPage() {
                       {t("Programado")}
                     </Button>
                   </div> : null}
-                  {workspaceTab === "control" ? <><select
-                    aria-label={t("Ordenar pistas")}
-                    className="h-8 max-w-36 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none disabled:opacity-50"
+                  {workspaceTab === "control" ? <><Select
                     value=""
                     disabled={queuedTotal === 0 || busy === "reordering"}
-                    onChange={(event) => void sortQueuedEntries(event.currentTarget.value as "title" | "artist" | "duration")}
+                    onValueChange={(nextValue) => void sortQueuedEntries(nextValue as "title" | "artist" | "duration")}
                   >
-                    <option value="" disabled>{t("Ordenar próximas...")}</option>
-                    <option value="title">{t("Título A–Z")}</option>
-                    <option value="artist">{t("Artista A–Z")}</option>
-                    <option value="duration">{t("Duración menor primero")}</option>
-                  </select>
+                    <SelectTrigger aria-label={t("Ordenar pistas")} className="h-8 w-auto max-w-36 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none disabled:opacity-50">
+                      <SelectValue placeholder={t("Ordenar próximas...")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="title">{t("Título A–Z")}</SelectItem>
+                      <SelectItem value="artist">{t("Artista A–Z")}</SelectItem>
+                      <SelectItem value="duration">{t("Duración menor primero")}</SelectItem>
+                    </SelectContent>
+                  </Select>
                   <Button size="sm" variant="ghost" disabled={queuedTotal === 0 || busy === "clearing"} onClick={() => void clearQueue()}>
                     <Trash2 className="h-4 w-4" />
                     {t("Limpiar")}
@@ -3988,19 +4070,23 @@ function VideoStudioModal({
 
             {activeLayer === "camera" ? <Field label={t("Cámara")}>
               <div className="flex gap-2">
-                <select
-                  className={cn(fieldClass, "border-white/15 bg-white/5 text-white")}
+                <Select
                   value={config.cameraDevice}
                   disabled={!config.enabled}
-                  onChange={(event) => {
-                    const cameraDevice = event.currentTarget.value;
+                  onValueChange={(nextValue) => {
+                    const cameraDevice = nextValue;
                     update({ cameraDevice, cameraEnabled: true, cameraRotationDegrees: 0 });
                     void startCamera(cameraDevice);
                   }}
                 >
-                  <option value="default">{t("Cámara predeterminada")}</option>
-                  {cameraDevices.map((device) => <option key={`${device.kind}:${device.id}`} value={device.label}>{device.label}</option>)}
-                </select>
+                  <SelectTrigger className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} aria-label={t("Cámara")}>
+                    <SelectValue placeholder={t("Seleccionar opción")} />
+                  </SelectTrigger>
+                  <SelectContent className="dark">
+                    <SelectItem value="default">{t("Cámara predeterminada")}</SelectItem>
+                    {cameraDevices.map((device) => <SelectItem key={`${device.kind}:${device.id}`} value={device.label}>{device.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
                 <Button type="button" size="icon" variant="secondary" onClick={() => void startCamera()} aria-label={t("Refrescar fuentes") }>
                   <RefreshCcw className="h-4 w-4" />
                 </Button>
@@ -4035,12 +4121,21 @@ function VideoStudioModal({
             </Field>}
 
             <Field label={t("Composición") }>
-              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.layout} disabled={!config.enabled} onChange={(event) => updateLayer({ layout: event.currentTarget.value })}>
-                <option value="card">{t("Tarjeta")}</option>
-                <option value="wide">{t("Ancho completo")}</option>
-                <option value="background">{t("Fondo")}</option>
-                <option value="free">{t("Libre · mover en Preview")}</option>
-              </select>
+              <Select
+                value={layer.layout}
+                disabled={!config.enabled}
+                onValueChange={(nextValue) => updateLayer({ layout: nextValue })}
+              >
+                <SelectTrigger className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} aria-label={t("Composición") }>
+                  <SelectValue placeholder={t("Seleccionar opción")} />
+                </SelectTrigger>
+                <SelectContent className="dark">
+                  <SelectItem value="card">{t("Tarjeta")}</SelectItem>
+                  <SelectItem value="wide">{t("Ancho completo")}</SelectItem>
+                  <SelectItem value="background">{t("Fondo")}</SelectItem>
+                  <SelectItem value="free">{t("Libre · mover en Preview")}</SelectItem>
+                </SelectContent>
+              </Select>
             </Field>
 
             <div className="flex items-center justify-between gap-2 rounded-md border border-white/10 bg-white/[.03] p-2">
@@ -4057,39 +4152,75 @@ function VideoStudioModal({
 
             <div className="grid grid-cols-2 gap-3">
               <Field label={t("Posición") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.position} disabled={!config.enabled || layer.layout !== "card"} onChange={(event) => updateLayer({ position: event.currentTarget.value })}>
-                  <option value="top_left">{t("Arriba izquierda")}</option>
-                  <option value="top_right">{t("Arriba derecha")}</option>
-                  <option value="center">{t("Centro")}</option>
-                  <option value="bottom_left">{t("Abajo izquierda")}</option>
-                  <option value="bottom_right">{t("Abajo derecha")}</option>
-                </select>
+                <Select
+                  value={layer.position}
+                  disabled={!config.enabled || layer.layout !== "card"}
+                  onValueChange={(nextValue) => updateLayer({ position: nextValue })}
+                >
+                  <SelectTrigger className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} aria-label={t("Posición") }>
+                    <SelectValue placeholder={t("Seleccionar opción")} />
+                  </SelectTrigger>
+                  <SelectContent className="dark">
+                    <SelectItem value="top_left">{t("Arriba izquierda")}</SelectItem>
+                    <SelectItem value="top_right">{t("Arriba derecha")}</SelectItem>
+                    <SelectItem value="center">{t("Centro")}</SelectItem>
+                    <SelectItem value="bottom_left">{t("Abajo izquierda")}</SelectItem>
+                    <SelectItem value="bottom_right">{t("Abajo derecha")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </Field>
               <Field label={t("Tamaño") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.size} disabled={!config.enabled || layer.layout !== "card"} onChange={(event) => updateLayer({ size: event.currentTarget.value })}>
-                  <option value="small">{t("Pequeña")}</option>
-                  <option value="medium">{t("Mediana")}</option>
-                  <option value="large">{t("Grande")}</option>
-                </select>
+                <Select
+                  value={layer.size}
+                  disabled={!config.enabled || layer.layout !== "card"}
+                  onValueChange={(nextValue) => updateLayer({ size: nextValue })}
+                >
+                  <SelectTrigger className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} aria-label={t("Tamaño") }>
+                    <SelectValue placeholder={t("Seleccionar opción")} />
+                  </SelectTrigger>
+                  <SelectContent className="dark">
+                    <SelectItem value="small">{t("Pequeña")}</SelectItem>
+                    <SelectItem value="medium">{t("Mediana")}</SelectItem>
+                    <SelectItem value="large">{t("Grande")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </Field>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <Field label={t("Efecto") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.effect} disabled={!config.enabled} onChange={(event) => updateLayer({ effect: event.currentTarget.value })}>
-                  <option value="clean">{t("Limpio")}</option>
-                  <option value="mono">{t("Monocromo")}</option>
-                  <option value="contrast">{t("Contraste editorial")}</option>
-                  <option value="dream">{t("Dream blur")}</option>
-                </select>
+                <Select
+                  value={layer.effect}
+                  disabled={!config.enabled}
+                  onValueChange={(nextValue) => updateLayer({ effect: nextValue })}
+                >
+                  <SelectTrigger className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} aria-label={t("Efecto") }>
+                    <SelectValue placeholder={t("Seleccionar opción")} />
+                  </SelectTrigger>
+                  <SelectContent className="dark">
+                    <SelectItem value="clean">{t("Limpio")}</SelectItem>
+                    <SelectItem value="mono">{t("Monocromo")}</SelectItem>
+                    <SelectItem value="contrast">{t("Contraste editorial")}</SelectItem>
+                    <SelectItem value="dream">{t("Dream blur")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </Field>
               <Field label={t("Orientación") }>
-                <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.rotationDegrees} disabled={!config.enabled} onChange={(event) => updateLayer({ rotationDegrees: Number(event.currentTarget.value) })}>
-                  <option value={0}>{t("Normal · 0°")}</option>
-                  <option value={90}>{t("Girar 90°")}</option>
-                  <option value={180}>{t("Girar 180°")}</option>
-                  <option value={270}>{t("Girar 270°")}</option>
-                </select>
+                <Select
+                  value={String(layer.rotationDegrees)}
+                  disabled={!config.enabled}
+                  onValueChange={(nextValue) => updateLayer({ rotationDegrees: Number(nextValue) })}
+                >
+                  <SelectTrigger className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} aria-label={t("Orientación") }>
+                    <SelectValue placeholder={t("Seleccionar opción")} />
+                  </SelectTrigger>
+                  <SelectContent className="dark">
+                    <SelectItem value="0">{t("Normal · 0°")}</SelectItem>
+                    <SelectItem value="90">{t("Girar 90°")}</SelectItem>
+                    <SelectItem value="180">{t("Girar 180°")}</SelectItem>
+                    <SelectItem value="270">{t("Girar 270°")}</SelectItem>
+                  </SelectContent>
+                </Select>
               </Field>
             </div>
 
@@ -4099,10 +4230,19 @@ function VideoStudioModal({
             </label>
 
             <Field label={t("Encuadre") }>
-              <select className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} value={layer.framing} disabled={!config.enabled} onChange={(event) => updateLayer({ framing: event.currentTarget.value })}>
-                <option value="contain">{t("Ajustar · mostrar imagen completa")}</option>
-                <option value="cover">{t("Rellenar · recortar bordes")}</option>
-              </select>
+              <Select
+                value={layer.framing}
+                disabled={!config.enabled}
+                onValueChange={(nextValue) => updateLayer({ framing: nextValue })}
+              >
+                <SelectTrigger className={cn(fieldClass, "border-white/15 bg-white/5 text-white")} aria-label={t("Encuadre") }>
+                  <SelectValue placeholder={t("Seleccionar opción")} />
+                </SelectTrigger>
+                <SelectContent className="dark">
+                  <SelectItem value="contain">{t("Ajustar · mostrar imagen completa")}</SelectItem>
+                  <SelectItem value="cover">{t("Rellenar · recortar bordes")}</SelectItem>
+                </SelectContent>
+              </Select>
             </Field>
 
             <Field label={t("Opacidad máxima: {value}%", { value: layer.opacityPercent })}>

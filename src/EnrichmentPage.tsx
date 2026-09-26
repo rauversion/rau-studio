@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -455,31 +456,38 @@ export function EnrichmentPage() {
             </CardHeader>
             <CardContent className="grid gap-3">
               <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_160px_140px]">
-                <select
-                  className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring"
+                <Select
                   value={activeLibraryId}
                   disabled={loading || running || libraries.length === 0}
-                  onChange={(event) => void changeLibrary(event.currentTarget.value)}
+                  onValueChange={(nextValue) => void changeLibrary(nextValue)}
                 >
-                  {libraries.length === 0 ? <option value="">{t("Sin librerias indexadas")}</option> : null}
-                  {libraries.map((library) => (
-                    <option key={library.id} value={library.id}>
-                      {library.source_name} · {library.track_count} tracks
-                    </option>
-                  ))}
-                </select>
-                <select
-                  className="h-10 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring"
+                  <SelectTrigger className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring" aria-label={t("Librería")}>
+                    <SelectValue placeholder={t("Sin librerias indexadas")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {libraries.map((library) => (
+                      <SelectItem key={library.id} value={library.id}>
+                        {library.source_name} · {library.track_count} tracks
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
                   value={gap}
                   disabled={loading || running}
-                  onChange={(event) => setGap(event.currentTarget.value as GapFilter)}
+                  onValueChange={(nextValue) => setGap(nextValue as GapFilter)}
                 >
-                  {gapOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {t(option.label)}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger className="h-10 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring" aria-label={t("Metadata faltante")}>
+                    <SelectValue placeholder={t("Seleccionar opción")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {gapOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {t(option.label)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <input
                   className="h-10 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background transition-shadow focus-visible:ring-2 focus-visible:ring-ring"
                   type="number"

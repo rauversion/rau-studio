@@ -1569,6 +1569,7 @@ pub fn run() {
             playlist_index::playlist_index_taxonomy_graph,
             playlist_index::playlist_index_taxonomy_tracks,
             playlist_index::playlist_catalog_search,
+            playlist_index::playlist_catalog_create_playlist_from_files,
             playlist_index::playlist_catalog_artist_facets,
             playlist_index::playlist_catalog_playlist_facets,
             playlist_index::playlist_catalog_select_all,

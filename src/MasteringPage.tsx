@@ -1,3 +1,4 @@
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -452,14 +453,18 @@ export function MasteringPage() {
                     <Tags className="h-4 w-4" />
                     <span className="text-sm font-semibold">{t("Formato y metadata")}</span>
                   </div>
-                  <select
-                    className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                  <Select
                     value={outputFormat}
-                    onChange={(event) => setOutputFormat(normalizeOutputFormat(event.currentTarget.value))}
+                    onValueChange={(nextValue) => setOutputFormat(normalizeOutputFormat(nextValue))}
                   >
-                    <option value="aiff_24">AIFF 24-bit</option>
-                    <option value="aiff_cdj16">AIFF CDJ safe 16-bit</option>
-                  </select>
+                    <SelectTrigger className="w-auto h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground" aria-label={t("Formato de salida")}>
+                      <SelectValue placeholder={t("Seleccionar opción")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="aiff_24">AIFF 24-bit</SelectItem>
+                      <SelectItem value="aiff_cdj16">AIFF CDJ safe 16-bit</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="grid gap-2 md:grid-cols-3">
