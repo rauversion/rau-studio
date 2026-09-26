@@ -864,6 +864,7 @@ export function FileConversionPage() {
             <CardContent className="grid gap-2 p-3 text-sm text-muted-foreground">
               <p>{t("Los AIFF se guardan al lado del original, dentro de una carpeta llamada converted.")}</p>
               <p>{t("No se reemplazan archivos fuente.")}</p>
+              <p>{t("Si el AIFF ya existe, Convertir recupera del original los metadatos faltantes sin recodificar el audio.")}</p>
             </CardContent>
           </Card>
         </aside>

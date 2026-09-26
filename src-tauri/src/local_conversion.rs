@@ -5,11 +5,11 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Emitter, Manager};
@@ -496,11 +496,43 @@ fn convert_item(app: &AppHandle, mut item: LocalConversionItem) -> LocalConversi
     }
 
     if target_path.exists() {
-        let already_converted_message = settings::localized(
+        let checking_message = settings::localized(
             app,
-            "AIFF convertido ya existe",
-            "Converted AIFF already exists",
+            "Revisando metadatos del AIFF existente",
+            "Checking existing AIFF metadata",
         );
+        item.state = "running".to_string();
+        item.message = Some(checking_message);
+        emit_progress(app, item_progress_event(&item, None, None, None));
+        let repaired = match restore_missing_aiff_metadata(
+            system::ffmpeg_command(app),
+            || system::ffprobe_command(app),
+            &source_path,
+            &target_path,
+        ) {
+            Ok(repaired) => repaired,
+            Err(error) => {
+                let message = settings::localized(
+                    app,
+                    &format!("No se pudieron recuperar los metadatos; el AIFF existente se conservo: {error}"),
+                    &format!("Could not recover metadata; the existing AIFF was preserved: {error}"),
+                );
+                return fail_item(app, item, &message);
+            }
+        };
+        let already_converted_message = if repaired {
+            settings::localized(
+                app,
+                "Metadatos recuperados del original; audio conservado",
+                "Metadata recovered from the original; audio preserved",
+            )
+        } else {
+            settings::localized(
+                app,
+                "AIFF convertido ya existe",
+                "Converted AIFF already exists",
+            )
+        };
         let _ = update_item_state(
             app,
             &item.id,
@@ -509,7 +541,7 @@ fn convert_item(app: &AppHandle, mut item: LocalConversionItem) -> LocalConversi
             Some(&target_path),
         );
         item.state = "already_converted".to_string();
-        item.message = Some(already_converted_message);
+        item.message = Some(already_converted_message.clone());
         item.target_exists = true;
         emit_progress(app, item_progress_event(&item, Some(100.0), None, None));
         emit_log(
@@ -518,11 +550,7 @@ fn convert_item(app: &AppHandle, mut item: LocalConversionItem) -> LocalConversi
                 level: "info".to_string(),
                 item_id: Some(item.id.clone()),
                 name: Some(item.source_name.clone()),
-                message: settings::localized(
-                    app,
-                    &format!("Reutilizando AIFF existente: {}", target_path.display()),
-                    &format!("Reusing existing AIFF: {}", target_path.display()),
-                ),
+                message: format!("{already_converted_message}: {}", target_path.display()),
             },
         );
         return item;
@@ -772,6 +800,104 @@ fn run_ffmpeg_conversion(
     }
 
     Ok(())
+}
+
+fn read_audio_tags(mut ffprobe: Command, path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let output = ffprobe
+        .args(["-v", "error", "-show_entries", "format_tags", "-of", "json"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("ffprobe: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| format!("ffprobe JSON: {error}"))?;
+    Ok(parsed["format"]["tags"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| {
+            let key = key.to_ascii_lowercase();
+            // These describe the source container/encoder, not the track.
+            if matches!(
+                key.as_str(),
+                "encoder" | "major_brand" | "minor_version" | "compatible_brands"
+            ) {
+                return None;
+            }
+            let value = value.as_str().filter(|value| !value.trim().is_empty())?;
+            Some((key, value.to_string()))
+        })
+        .collect())
+}
+
+fn restore_missing_aiff_metadata(
+    mut ffmpeg: Command,
+    ffprobe: impl Fn() -> Command,
+    source_path: &Path,
+    target_path: &Path,
+) -> Result<bool, String> {
+    let source_tags = read_audio_tags(ffprobe(), source_path)?;
+    let target_tags = read_audio_tags(ffprobe(), target_path)?;
+    let missing_tags = source_tags
+        .into_iter()
+        .filter(|(key, _)| !target_tags.contains_key(key))
+        .collect::<BTreeMap<_, _>>();
+    if missing_tags.is_empty() {
+        return Ok(false);
+    }
+
+    let original = fs::symlink_metadata(target_path).map_err(|error| error.to_string())?;
+    if !original.is_file() {
+        return Err("Metadata recovery requires a regular AIFF file".to_string());
+    }
+    let temporary_path =
+        target_path.with_file_name(format!(".rau-metadata-{}.aiff", Uuid::new_v4()));
+    let result = (|| {
+        ffmpeg
+            .args(["-hide_banner", "-nostdin", "-v", "error", "-n", "-i"])
+            .arg(target_path)
+            // Copy every existing stream, including any attached artwork.
+            .args(["-map", "0", "-c", "copy", "-map_metadata", "0"]);
+        for (key, value) in &missing_tags {
+            ffmpeg.args(["-metadata", &format!("{key}={value}")]);
+        }
+        let output = ffmpeg
+            .args(["-write_id3v2", "1", "-id3v2_version", "3", "-f", "aiff"])
+            .arg(&temporary_path)
+            .output()
+            .map_err(|error| format!("ffmpeg: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "ffmpeg: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let repaired_tags = read_audio_tags(ffprobe(), &temporary_path)?;
+        for (key, value) in target_tags.iter().chain(missing_tags.iter()) {
+            if repaired_tags.get(key) != Some(value) {
+                return Err(format!("Could not preserve metadata field: {key}"));
+            }
+        }
+        let current = fs::symlink_metadata(target_path).map_err(|error| error.to_string())?;
+        if !current.is_file()
+            || current.len() != original.len()
+            || current.modified().ok() != original.modified().ok()
+        {
+            return Err("AIFF changed during metadata recovery".to_string());
+        }
+        fs::set_permissions(&temporary_path, original.permissions())
+            .map_err(|error| error.to_string())?;
+        // Publish only a complete, verified file, on the same filesystem.
+        fs::rename(&temporary_path, target_path).map_err(|error| error.to_string())?;
+        Ok(true)
+    })();
+    let _ = fs::remove_file(&temporary_path);
+    result
 }
 
 fn register_source_path(
@@ -1518,6 +1644,146 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod local_conversion_tests {
     use super::*;
+
+    fn run_media_command(command: &mut Command) -> Vec<u8> {
+        let output = command.output().expect("run media tool");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn audio_hash(path: &Path) -> Vec<u8> {
+        run_media_command(
+            Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(path)
+                .args([
+                    "-map", "0:a:0", "-c", "copy", "-f", "hash", "-hash", "sha256", "-",
+                ]),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg and ffprobe on PATH"]
+    fn metadata_recovery_preserves_audio_existing_tags_and_files_on_failure() {
+        let root = std::env::temp_dir().join(format!("rau-metadata-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create fixtures");
+        let source = root.join("original.flac");
+        let target = root.join("converted.aiff");
+        run_media_command(
+            Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-t",
+                    "0.1",
+                    "-metadata",
+                    "title=Original title",
+                    "-metadata",
+                    "artist=Artista original",
+                    "-metadata",
+                    "album=Álbum",
+                    "-metadata",
+                    "album_artist=Album artist",
+                    "-metadata",
+                    "genre=House",
+                    "-metadata",
+                    "date=2024",
+                    "-metadata",
+                    "track=3/10",
+                    "-metadata",
+                    "BPM=125",
+                    "-metadata",
+                    "initial_key=Am",
+                ])
+                .arg(&source),
+        );
+        // Reproduce an older conversion with only native AIFF tags, at a different audio profile.
+        run_media_command(
+            Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&source)
+                .args([
+                    "-c:a",
+                    "pcm_s24be",
+                    "-ac",
+                    "1",
+                    "-map_metadata",
+                    "-1",
+                    "-metadata",
+                    "title=Edited title",
+                ])
+                .arg(&target),
+        );
+        let original_source = fs::read(&source).unwrap();
+        let original_target = fs::read(&target).unwrap();
+        let original_audio = audio_hash(&target);
+        let before_tags = read_audio_tags(Command::new("ffprobe"), &target).unwrap();
+        assert!(!before_tags.contains_key("artist"));
+
+        let mut failing_ffmpeg = Command::new("ffmpeg");
+        failing_ffmpeg.arg("-invalid-option-for-test");
+        assert!(restore_missing_aiff_metadata(
+            failing_ffmpeg,
+            || Command::new("ffprobe"),
+            &source,
+            &target
+        )
+        .is_err());
+        assert_eq!(fs::read(&target).unwrap(), original_target);
+        assert_eq!(
+            fs::read_dir(&root).unwrap().count(),
+            2,
+            "temporary output must be cleaned up"
+        );
+
+        assert!(restore_missing_aiff_metadata(
+            Command::new("ffmpeg"),
+            || Command::new("ffprobe"),
+            &source,
+            &target
+        )
+        .unwrap());
+        assert_eq!(
+            audio_hash(&target),
+            original_audio,
+            "audio packets must remain identical"
+        );
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            original_source,
+            "source must remain untouched"
+        );
+        let tags = read_audio_tags(Command::new("ffprobe"), &target).unwrap();
+        assert_eq!(tags.get("title").map(String::as_str), Some("Edited title"));
+        for (key, value) in read_audio_tags(Command::new("ffprobe"), &source).unwrap() {
+            if key != "title" {
+                assert_eq!(tags.get(&key), Some(&value), "recover {key}");
+            }
+        }
+        let repaired = fs::read(&target).unwrap();
+        assert!(!restore_missing_aiff_metadata(
+            Command::new("ffmpeg"),
+            || Command::new("ffprobe"),
+            &source,
+            &target
+        )
+        .unwrap());
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            repaired,
+            "complete files must not be rewritten"
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        fs::remove_dir_all(root).expect("remove fixtures");
+    }
 
     #[test]
     fn audio_detection_rejects_macos_appledouble_files() {

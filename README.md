@@ -24,7 +24,7 @@ Rau Studio uses Tauri 2, Rust, React, TypeScript, SQLite, OpenAI-compatible AI f
 
 - Original source files are never replaced.
 - The original Rekordbox XML is never modified.
-- Existing AIFF files are reused instead of overwritten.
+- Existing AIFF audio is reused; File Importer can recover missing metadata from the original without re-encoding.
 - Operational state is stored in local SQLite.
 - Long-running work reports realtime progress and terminal logs.
 - Conversion jobs use controlled concurrency to avoid saturating CPU, disk, and memory.

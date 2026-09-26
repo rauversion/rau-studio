@@ -986,6 +986,8 @@ const translations: Record<Locale, Record<string, string>> = {
     "No hay AIFF convertidos detectados para este XML.": "No converted AIFF files detected for this XML.",
     "No se encontraron archivos de audio originales.": "No original audio files found.",
     "No se reemplazan archivos fuente.": "Source files are not replaced.",
+    "Si el AIFF ya existe, Convertir recupera del original los metadatos faltantes sin recodificar el audio.":
+      "If the AIFF already exists, Convert recovers missing metadata from the original without re-encoding the audio.",
     "No soportados": "Unsupported",
     "Notas que quedaran embebidas en el AIFF...": "Notes that will be embedded in the AIFF...",
     "Nuevo master": "New master",

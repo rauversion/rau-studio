@@ -45,7 +45,11 @@ AIFF files are written inside a `converted/` folder next to the source file.
 /Music/Artist/converted/Track.aiff
 ```
 
-If the source is already AIFF/AIF, it is marked `already_aiff` and not duplicated. If the target AIFF already exists, it is marked `already_converted` and reused.
+If the source is already AIFF/AIF, it is marked `already_aiff` and not duplicated. If the target AIFF already exists, **Convert** checks for missing text metadata and recovers it from the original before marking it `already_converted`. Existing nonempty tags take precedence, and audio and existing artwork streams are copied without re-encoding. A temporary file is verified before replacing the existing AIFF; a failure leaves the existing file intact. Files with complete metadata are reused without rewriting.
+
+This also repairs AIFF files created by older versions that omitted ID3 tags. Select the original files again and click **Convert Selected**. To refresh metadata already indexed in Playlist Library, use **Add to playlist** again after recovery; this refreshes the same track IDs without duplicating them.
+
+New conversions preserve embedded text tags such as title, artist, album, album artist, genre, date, track/disc numbers, comments, composer, BPM and key using ID3v2.3. Metadata must exist in the source file; tags stored only in another application's database are not available to File Importer. New conversions remain audio-only and do not copy cover art.
 
 ## Supported Formats
 
@@ -70,16 +74,19 @@ ffmpeg \
   -n \
   -i input \
   -map 0:a:0 \
+  -map_metadata 0 \
   -vn \
   -ac 2 \
   -ar 44100 \
   -c:a pcm_s16be \
+  -write_id3v2 1 \
+  -id3v2_version 3 \
   -progress pipe:1 \
   -nostats \
   output.aiff
 ```
 
-The `-n` flag prevents overwriting existing files.
+The `-n` flag prevents conversion from overwriting existing files. Metadata recovery uses a separate stream-copy operation as described above and requires both `ffmpeg` and `ffprobe`.
 
 ## Tabs
 

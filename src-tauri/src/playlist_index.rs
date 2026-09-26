@@ -3226,7 +3226,7 @@ fn probe_local_track_metadata(app: &AppHandle, path: &std::path::Path) -> LocalT
             "-v",
             "error",
             "-show_entries",
-            "format=duration,bit_rate:format_tags=title,artist,album,genre,comment,date,year:stream=codec_type,sample_rate,bit_rate",
+            "format=duration,bit_rate:format_tags=title,artist,album_artist,album,genre,comment,comments,description,date,year:stream=codec_type,sample_rate,bit_rate",
             "-of",
             "json",
         ])
@@ -3279,18 +3279,18 @@ fn probe_local_track_metadata(app: &AppHandle, path: &std::path::Path) -> LocalT
 
 fn local_metadata_tag(tags: Option<&Value>, names: &[&str]) -> Option<String> {
     let values = tags?.as_object()?;
-    values.iter().find_map(|(key, value)| {
-        names
-            .iter()
-            .any(|name| key.eq_ignore_ascii_case(name))
-            .then(|| {
-                value
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            })
-            .flatten()
-            .map(str::to_string)
+    names.iter().find_map(|name| {
+        values.iter().find_map(|(key, value)| {
+            key.eq_ignore_ascii_case(name)
+                .then(|| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+                .flatten()
+                .map(str::to_string)
+        })
     })
 }
 
@@ -9224,6 +9224,25 @@ fn option_i64_to_u8(value: Option<i64>) -> Option<u8> {
 #[cfg(test)]
 mod playlist_index_tests {
     use super::*;
+
+    #[test]
+    fn local_metadata_prefers_track_artist_and_uses_album_artist_as_fallback() {
+        let tags = json!({"album_artist": "Various Artists", "ARTIST": "Track Artist"});
+        assert_eq!(
+            local_metadata_tag(Some(&tags), &["artist", "album_artist"]).as_deref(),
+            Some("Track Artist")
+        );
+        let fallback = json!({"album_artist": "Album Artist", "artist": "  "});
+        assert_eq!(
+            local_metadata_tag(Some(&fallback), &["artist", "album_artist"]).as_deref(),
+            Some("Album Artist")
+        );
+        let comments = json!({"comment": "Primary comment", "description": "Description"});
+        assert_eq!(
+            local_metadata_tag(Some(&comments), &["comment", "comments", "description"]).as_deref(),
+            Some("Primary comment")
+        );
+    }
 
     #[test]
     fn unified_track_identity_deduplicates_repeated_xml_tracks() {

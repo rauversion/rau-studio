@@ -57,6 +57,7 @@ Conversion uses `ffmpeg` with a conservative compatibility profile:
 - `pcm_s16be`;
 - 44.1 kHz;
 - stereo;
+- embedded text metadata copied from the source into ID3v2.3 tags;
 - no overwrite.
 
 Original files are not replaced.
