@@ -162,9 +162,18 @@ fn export_track_ratings_overrides_only_internal_ratings() {
     let parsed = parse_rekordbox_xml(&exported).expect("parse rated XML");
     let by_id = parsed.track_by_id();
 
-    assert_eq!(by_id["1"].attributes.get("Rating").map(String::as_str), Some("255"));
-    assert_eq!(by_id["2"].attributes.get("Rating").map(String::as_str), Some("0"));
-    assert_eq!(by_id["3"].attributes.get("Rating").map(String::as_str), Some("153"));
+    assert_eq!(
+        by_id["1"].attributes.get("Rating").map(String::as_str),
+        Some("255")
+    );
+    assert_eq!(
+        by_id["2"].attributes.get("Rating").map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        by_id["3"].attributes.get("Rating").map(String::as_str),
+        Some("153")
+    );
 }
 
 #[test]

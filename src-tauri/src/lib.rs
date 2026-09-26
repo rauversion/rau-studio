@@ -824,15 +824,16 @@ fn convert_track(app: &tauri::AppHandle, track: &Track) -> ConversionItemResult 
         return item;
     };
 
-    let _destination_lease = match local_conversion::regeneration::DestinationLease::acquire(&target_path) {
-        Ok(lease) => lease,
-        Err(error) => {
-            item.status = ConversionStatus::Failed;
-            item.message = Some(error);
-            emit_conversion_progress(app, item_progress_event(&item, None, None, None));
-            return item;
-        }
-    };
+    let _destination_lease =
+        match local_conversion::regeneration::DestinationLease::acquire(&target_path) {
+            Ok(lease) => lease,
+            Err(error) => {
+                item.status = ConversionStatus::Failed;
+                item.message = Some(error);
+                emit_conversion_progress(app, item_progress_event(&item, None, None, None));
+                return item;
+            }
+        };
 
     if target_path.exists() {
         item.status = ConversionStatus::AlreadyConverted;

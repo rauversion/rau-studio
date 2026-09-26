@@ -4415,7 +4415,7 @@ dependencies = [
 
 [[package]]
 name = "rau-studio"
-version = "0.1.30"
+version = "0.1.33"
 dependencies = [
  "aifficator-core",
  "argon2",

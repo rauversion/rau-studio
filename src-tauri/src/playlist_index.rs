@@ -24,8 +24,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-pub mod duplicates;
 mod conversion_refresh;
+pub mod duplicates;
 pub(crate) use conversion_refresh::refresh_converted_file;
 
 const DB_FILE: &str = "aifficator.sqlite3";
