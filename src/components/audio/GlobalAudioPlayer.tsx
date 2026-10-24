@@ -482,6 +482,11 @@ function useSidebarAudioPlayer() {
   return context;
 }
 
+export function useAudioTimeline() {
+  const { currentTime, duration, player, playing, seek, toggleTrackPlayback } = useSidebarAudioPlayer();
+  return { currentTime, duration, player, playing, seek, toggleTrackPlayback };
+}
+
 export function SidebarAudioPlayer() {
   const { t } = useI18n();
   const player = useSidebarAudioPlayer();

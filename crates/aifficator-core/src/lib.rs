@@ -1,7 +1,9 @@
 pub mod conversion;
 pub mod exporter;
+pub mod music_analysis;
 pub mod planner;
 pub mod rekordbox;
+pub mod usb_export;
 pub mod validation;
 
 pub use planner::{

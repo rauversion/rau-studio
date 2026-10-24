@@ -14,9 +14,11 @@ Rau Studio uses Tauri 2, Rust, React, TypeScript, SQLite, OpenAI-compatible AI f
 - [Turn](docs/turn.md): generate MP4 spinning-record mockups from local cover art and audio, with range preview and realtime progress.
 - [Smart Playlists](docs/smart-playlists.md): index Rekordbox XML into SQLite, run lexical/vector search, browse artists/albums, inspect taxonomies, and generate playlist suggestions with Playlist Copilot.
 - [Metadata Enrichment](docs/enrichment.md): fill metadata gaps through capability-aware providers, encrypted credentials, durable observations, and field-level resolution.
+- [Musical preparation](docs/music-analysis.md): analyze local audio for BPM, a constant-tempo 4/4 grid and key; listen, correct the grid and explicitly save preparation for both USB libraries. Initial detector accuracy and player alignment remain pending.
 - [P2P Sharing Foundation](docs/p2p-sharing.md): encrypted device identity, authenticated Iroh connectivity, peer presence, and read-only shared-folder catalogs for Rau Connect.
 - [Broadcast](docs/radio-broadcast.md): run an immediate queue or a persisted daily music schedule, fill idle gaps with a ducked looping music bed, mix local inputs, and publish either a persistent Icecast MP3 stream or a vertical RTMP video signal for Instagram Live.
 - [Import Rau Studio XML into Rekordbox](docs/rekordbox-import/README.md): visual guide for importing exported XML back into Rekordbox.
+- [USB export prototype](docs/usb-export.md): select playlists under **Playlists → Exportar a USB**, review the selection and export directly to the chosen folder or USB root with background progress. Groups files by artist and keeps their names: MP3/AIFF are copied unchanged; other formats become AIFF. Rau generates classic Device Library and encrypted OneLibrary, checks their consistency, and includes DAT/EXT/2EX waveforms, imported XML grids/cues and RGB USB display preferences. OneLibrary hardware acceptance is pending.
 - [macOS Signing and Notarization](docs/macos-signing.md): distribution notes for unsigned local builds and signed releases.
 - [Architecture](docs/architecture.md): technical notes about the desktop, Rust, SQLite, and UI structure.
 

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { MusicAnalysisPanel } from "./components/tracks/MusicAnalysisPanel";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -15,10 +16,12 @@ import {
   Square,
   Star,
   Trash2,
-  Upload
+  Upload,
+  Usb
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type * as React from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { useGlobalAudioPlayer } from "./components/audio/GlobalAudioPlayer";
@@ -186,6 +189,7 @@ const trackTableColumns: Array<{ key: TrackTableColumnKey; label: string; width:
 ];
 
 export function PlaylistIndexPage() {
+  const navigate = useNavigate();
   const { locale, t } = useI18n();
   const audioPlayer = useGlobalAudioPlayer();
   const [libraries, setLibraries] = useState<PlaylistIndexLibrary[]>([]);
@@ -1192,6 +1196,15 @@ export function PlaylistIndexPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" onClick={() => {
+            const selection = activeTab === "playlist" && activeDraftId
+              ? new URLSearchParams({ draft: activeDraftId })
+              : new URLSearchParams({ library: activeLibraryId, playlist: activePlaylistPath });
+            navigate(`/playlists/usb-export?${selection}`);
+          }}>
+            <Usb className="h-4 w-4" />
+            {t("Exportar a USB")}
+          </Button>
           <Button onClick={chooseXml} disabled={busy}>
             <Upload className="h-4 w-4" />
             {t("Agregar XML")}
@@ -1662,6 +1675,10 @@ export function PlaylistIndexPage() {
                       <Button variant="secondary" size="sm" disabled={!activeDraftId || draftTracks.length === 0 || busy} onClick={() => void exportDraft()}>
                         <FileOutput className="h-3.5 w-3.5" />
                         {t("Exportar")}
+                      </Button>
+                      <Button variant="secondary" size="sm" disabled={!activeDraftId || draftTracks.length === 0 || busy} onClick={() => navigate(`/playlists/usb-export?${new URLSearchParams({ draft: activeDraftId })}`)}>
+                        <Usb className="h-3.5 w-3.5" />
+                        {t("Exportar a USB")}
                       </Button>
                       <Button variant="secondary" size="icon" disabled={!activeDraftId || busy} title={t("Eliminar")} onClick={() => void deleteDraft()}>
                         <Trash2 className="h-3.5 w-3.5" />
@@ -2210,6 +2227,8 @@ function PlaylistTrackDetailSheet({
           </SheetBlock>
 
           <TrackPlaylistMemberships track={track} />
+          <MusicAnalysisPanel track={track} onSaved={(bpm, key) => onTrackUpdated({ ...track, bpm: bpm ?? track.bpm, key: key ?? track.key,
+            attributes: { ...track.attributes, ...(bpm ? { AverageBpm: bpm } : {}), ...(key ? { Tonality: key } : {}) } })} />
 
           <SheetBlock title={t("Metadata")}>
             <div className="grid gap-2">

@@ -28,6 +28,7 @@ Major domains:
 - Mastering jobs and events.
 - Turn jobs and events.
 - Indexed playlist libraries, memberships, draft playlists, and embeddings.
+- Musical analysis proposals and saved grid/key preparation, bound to source file identity.
 - Icecast/RTMP destination profiles and an ordered, durable broadcast queue.
 - Encrypted settings, including OpenAI and enrichment-provider credentials and audio tool paths.
 - Encrypted P2P device identity, trusted peers, presence observations, shared folders, and virtual file catalogs.

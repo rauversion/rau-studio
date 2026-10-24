@@ -178,6 +178,14 @@ export function CatalogPage() {
   }, [query]);
 
   useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void listen("track-analysis-saved", () => setRefreshToken((current) => current + 1))
+      .then((unlisten) => { if (disposed) unlisten(); else cleanup = unlisten; });
+    return () => { disposed = true; cleanup?.(); };
+  }, []);
+
+  useEffect(() => {
     if (!response) return;
     setSelectedTracks((current) => {
       if (current.size === 0) return current;

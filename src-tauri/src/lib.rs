@@ -32,6 +32,7 @@ mod playlist_index;
 mod settings;
 mod system;
 mod turn;
+mod usb_export;
 
 #[derive(Debug, Serialize)]
 struct ImportResponse {
@@ -1459,10 +1460,17 @@ pub fn run() {
     tauri::Builder::default()
         .manage(broadcast::BroadcastManager::default())
         .manage(playlist_index::duplicates::DuplicateManager::default())
+        .manage(usb_export::UsbExportManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             system_status,
+            usb_export::usb_export_prepare,
+            usb_export::usb_export_start,
+            usb_export::usb_export_status,
+            playlist_index::music_analysis::track_analysis_load,
+            playlist_index::music_analysis::track_analysis_run,
+            playlist_index::music_analysis::track_analysis_save,
             broadcast::broadcast_profile,
             broadcast::broadcast_control_settings,
             broadcast::broadcast_save_control_settings,
