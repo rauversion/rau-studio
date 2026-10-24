@@ -78,6 +78,29 @@ pub(super) struct Allocator {
 }
 
 impl Allocator {
+    pub(super) fn reserve_file(&mut self, path: &str) -> Result<()> {
+        self.audio_paths.insert(collision_key(path));
+        if let Ok(analysis) = anlz::path_for_audio(path) {
+            self.analysis_paths.insert(analysis);
+        }
+        Ok(())
+    }
+
+    pub(super) fn reserve(&mut self, path: &str, artist: &str, analysis: &str) -> Result<()> {
+        self.reserve_file(path)?;
+        self.analysis_paths.insert(analysis.to_owned());
+        if let Some((directory, _)) = path.strip_prefix(PREFIX).and_then(|p| p.split_once('/')) {
+            self.directories.insert(collision_key(directory));
+            self.artists
+                .entry(collision_key(if artist.trim().is_empty() {
+                    "Artista desconocido"
+                } else {
+                    artist.trim()
+                }))
+                .or_insert_with(|| directory.to_owned());
+        }
+        Ok(())
+    }
     fn artist_directory(&mut self, artist: &str) -> Result<String> {
         let artist = if artist.trim().is_empty() {
             "Artista desconocido"

@@ -5,12 +5,16 @@ pub mod analysis;
 pub mod anlz;
 mod audio;
 mod browse;
+mod cache;
 mod catalog;
 pub mod devicesql;
+pub mod incremental;
 mod media;
 pub mod onelibrary;
+mod parallel;
 mod paths;
 mod settings;
+mod source;
 
 use crate::rekordbox::{PlaylistNode, RekordboxLibrary};
 use serde::{Deserialize, Serialize};
@@ -22,6 +26,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub use audio::read_pcm_wave;
+pub use source::{check_source, SourceFailure, SourceIssueKind, UnavailableTrack};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -130,9 +135,11 @@ pub struct ExportTrack {
     pub track_number: u32,
     #[serde(default)]
     pub analysis: analysis::TrackAnalysis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_path: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExportPlaylist {
     pub id: u32,
     pub parent_id: u32,
@@ -147,9 +154,14 @@ pub struct ExportPlan {
     pub tracks: Vec<ExportTrack>,
     pub playlists: Vec<ExportPlaylist>,
     pub source_bytes: u64,
+    /// Excluded from all media/playlist references after explicit UI consent.
+    #[serde(default)]
+    pub omitted_tracks: Vec<UnavailableTrack>,
+    #[serde(default)]
+    pub playlist_sources: BTreeMap<u32, String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExportReport {
     pub schema_version: u32,
     pub format: String,
@@ -161,10 +173,14 @@ pub struct ExportReport {
     pub device_settings_sha256: String,
     pub tracks: Vec<ExportedTrack>,
     pub playlists: Vec<ExportPlaylist>,
+    #[serde(default)]
+    pub omitted_tracks: Vec<UnavailableTrack>,
+    #[serde(default)]
+    pub playlist_sources: BTreeMap<u32, String>,
     pub limitations: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExportedTrack {
     pub track: ExportTrack,
     pub audio: AudioInfo,
@@ -173,6 +189,18 @@ pub struct ExportedTrack {
     pub dat_sha256: String,
     pub ext_sha256: String,
     pub three_band_sha256: String,
+    #[serde(default)]
+    pub source_sha256: Option<String>,
+    #[serde(default)]
+    pub source_signature: Option<incremental::FileSignature>,
+    #[serde(default)]
+    pub device_signature: Option<incremental::FileSignature>,
+    #[serde(default)]
+    pub analysis_signatures: Option<Vec<incremental::FileSignature>>,
+    #[serde(default)]
+    pub source_metadata: Option<incremental::TrackMetadata>,
+    #[serde(default)]
+    pub source_preparation: Option<analysis::TrackAnalysis>,
 }
 
 fn invalid(message: impl Into<String>) -> UsbExportError {
@@ -300,6 +328,7 @@ pub fn plan_library(library: &RekordboxLibrary, selected: &[String]) -> Result<E
             track_number: attr("TrackNumber").parse().unwrap_or(0),
             analysis: analysis::from_xml(source)
                 .map_err(|e| invalid(format!("track {key}: {e}")))?,
+            analysis_path: None,
         });
     }
     let mut sibling_counts = BTreeMap::<u32, u32>::new();
@@ -323,6 +352,8 @@ pub fn plan_library(library: &RekordboxLibrary, selected: &[String]) -> Result<E
         tracks,
         playlists,
         source_bytes,
+        omitted_tracks: Vec::new(),
+        playlist_sources: BTreeMap::new(),
     };
     devicesql::validate_plan(&plan)?;
     Ok(plan)
@@ -352,6 +383,28 @@ pub struct ExportProgress {
     pub completed_tracks: usize,
     pub total_tracks: usize,
     pub current_track: Option<String>,
+    pub action: Option<String>,
+    pub detail: Option<String>,
+}
+
+impl ExportProgress {
+    pub fn event(
+        stage: ExportStage,
+        completed_tracks: usize,
+        total_tracks: usize,
+        current_track: Option<String>,
+        action: &str,
+        detail: &str,
+    ) -> Self {
+        Self {
+            stage,
+            completed_tracks,
+            total_tracks,
+            current_track,
+            action: Some(action.into()),
+            detail: Some(detail.into()),
+        }
+    }
 }
 
 /// Track-level progress; callers must not interpret this as byte/time progress.
@@ -405,6 +458,29 @@ pub fn write_classic_destination_with_progress(
     output: &Path,
     ffmpeg: &Path,
     ffprobe: &Path,
+    progress: impl FnMut(ExportProgress),
+) -> Result<ExportReport> {
+    write_destination_parallel(plan, output, ffmpeg, ffprobe, 2, progress)
+}
+
+pub fn write_destination_parallel(
+    plan: &ExportPlan,
+    output: &Path,
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    workers: usize,
+    progress: impl FnMut(ExportProgress),
+) -> Result<ExportReport> {
+    write_destination_cached(plan, output, ffmpeg, ffprobe, workers, None, progress)
+}
+
+pub fn write_destination_cached(
+    plan: &ExportPlan,
+    output: &Path,
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    workers: usize,
+    cache: Option<&Path>,
     mut progress: impl FnMut(ExportProgress),
 ) -> Result<ExportReport> {
     devicesql::validate_plan(plan)?;
@@ -419,88 +495,119 @@ pub fn write_classic_destination_with_progress(
     fs::create_dir(output.join("Contents"))?;
     fs::create_dir(output.join("PIONEER"))?;
     fs::create_dir(output.join("PIONEER/rekordbox"))?;
-    let mut exported = Vec::new();
-    for (index, track) in plan.tracks.iter().enumerate() {
-        progress(ExportProgress {
-            stage: ExportStage::Audio,
-            completed_tracks: index,
-            total_tracks: plan.tracks.len(),
-            current_track: Some(track.title.clone()),
-        });
-        let destination = output.join(track.device_path.trim_start_matches('/'));
-        fs::create_dir_all(destination.parent().unwrap())?;
-        let before = hash_file(&track.source_path)?;
-        if track.analysis.source_sha256.as_ref().is_some_and(|expected| expected != &before) {
-            return Err(invalid(format!("El audio de «{}» cambió desde su preparación musical. Vuelve a analizar y guardar la pista.", track.title)));
-        }
-        media::export(track, &destination, ffmpeg)?;
-        if before != hash_file(&track.source_path)? {
-            return Err(invalid(format!(
-                "source changed during export: {}",
-                track.source_path.display()
-            )));
-        }
-        if track.copy_source && before != hash_file(&destination)? {
-            return Err(invalid(format!(
-                "copied audio differs from source: {}",
-                track.title
-            )));
-        }
-        File::open(&destination)?.sync_all()?;
-        progress(ExportProgress {
-            stage: ExportStage::Analysis,
-            completed_tracks: index,
-            total_tracks: plan.tracks.len(),
-            current_track: Some(track.title.clone()),
-        });
-        // Waveforms use a temporary local decode. The USB retains the copied
-        // MP3/AIFF bytes or the converted AIFF; no analysis WAV is exported.
-        let prepared = media::analyze(&destination, ffmpeg, ffprobe)
-            .map_err(|e| invalid(format!("track {}: {e}", track.title)))?;
-        let audio = prepared.audio.clone();
-        if !track.copy_source
-            && (audio.channels != 2 || audio.sample_rate != 44_100 || audio.bit_depth != 16)
-        {
-            return Err(invalid(
-                "unexpected conversion output; expected stereo PCM16 at 44100 Hz",
-            ));
-        }
-        let bundle = anlz::encode(track, &prepared.wave_path, &prepared.wave_info)
-            .map_err(|e| invalid(format!("track {}: {e}", track.source_key)))?;
-        let dat_path = output.join(bundle.summary.dat_path.trim_start_matches('/'));
-        let ext_path = output.join(bundle.summary.ext_path.trim_start_matches('/'));
-        let three_band_path = output.join(bundle.summary.three_band_path.trim_start_matches('/'));
-        fs::create_dir_all(dat_path.parent().unwrap())?;
-        for (path, bytes) in [
-            (&dat_path, &bundle.dat),
-            (&ext_path, &bundle.ext),
-            (&three_band_path, &bundle.three_band),
-        ] {
-            write_new(path, bytes)?;
-            let reread = fs::read(path)?;
-            if &reread != bytes {
-                return Err(invalid("analysis read-back differs from prepared bytes"));
-            }
-            anlz::inspect(&reread)?;
-        }
-        exported.push(ExportedTrack {
-            track: track.clone(),
-            audio,
-            sha256: hash_file(&destination)?,
-            analysis: bundle.summary,
-            dat_sha256: hash_file(&dat_path)?,
-            ext_sha256: hash_file(&ext_path)?,
-            three_band_sha256: hash_file(&three_band_path)?,
-        });
+    let exported = parallel::prepare(
+        &plan.tracks,
+        workers,
+        |track, notify| {
+            notify(
+                if track.copy_source { "copy" } else { "convert" },
+                &format!("{} → {}", track.source_path.display(), track.device_path),
+            );
+            prepare_track(track, &output, ffmpeg, ffprobe, cache, notify)
+        },
+        &mut progress,
+    )?;
+    progress(ExportProgress::event(
+        ExportStage::Library,
+        plan.tracks.len(),
+        plan.tracks.len(),
+        None,
+        "library",
+        "Generando y comprobando ambas bibliotecas",
+    ));
+    let report = finish_report(plan, exported, LibraryIdentity::new(), &output)?;
+    fs::remove_file(marker)?;
+    Ok(report)
+}
+
+pub(super) fn prepare_track(
+    track: &ExportTrack,
+    output: &Path,
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    cache: Option<&Path>,
+    notify: &dyn Fn(&str, &str),
+) -> Result<ExportedTrack> {
+    let destination = output.join(track.device_path.trim_start_matches('/'));
+    fs::create_dir_all(destination.parent().unwrap())?;
+    let source_signature = incremental::FileSignature::read(&track.source_path)?;
+    let before = hash_file(&track.source_path)?;
+    if track
+        .analysis
+        .source_sha256
+        .as_ref()
+        .is_some_and(|expected| expected != &before)
+    {
+        return Err(invalid(format!("El audio de «{}» cambió desde su preparación musical. Vuelve a analizar y guardar la pista.", track.title)));
     }
-    progress(ExportProgress {
-        stage: ExportStage::Library,
-        completed_tracks: plan.tracks.len(),
-        total_tracks: plan.tracks.len(),
-        current_track: None,
-    });
+    media::export(track, &destination, ffmpeg)?;
+    if before != hash_file(&track.source_path)?
+        || source_signature != incremental::FileSignature::read(&track.source_path)?
+    {
+        return Err(invalid(format!(
+            "source changed during export: {}",
+            track.source_path.display()
+        )));
+    }
+    if track.copy_source && before != hash_file(&destination)? {
+        return Err(invalid(format!(
+            "copied audio differs from source: {}",
+            track.title
+        )));
+    }
+    File::open(&destination)?.sync_all()?;
+    let (audio, bundle) = cache::prepare(track, &destination, ffmpeg, ffprobe, cache, notify)?;
+    if !track.copy_source
+        && (audio.channels != 2 || audio.sample_rate != 44_100 || audio.bit_depth != 16)
+    {
+        return Err(invalid(
+            "unexpected conversion output; expected stereo PCM16 at 44100 Hz",
+        ));
+    }
+    let dat_path = output.join(bundle.summary.dat_path.trim_start_matches('/'));
+    let ext_path = output.join(bundle.summary.ext_path.trim_start_matches('/'));
+    let three_band_path = output.join(bundle.summary.three_band_path.trim_start_matches('/'));
+    fs::create_dir_all(dat_path.parent().unwrap())?;
+    for (path, bytes) in [
+        (&dat_path, &bundle.dat),
+        (&ext_path, &bundle.ext),
+        (&three_band_path, &bundle.three_band),
+    ] {
+        write_new(path, bytes)?;
+        let reread = fs::read(path)?;
+        if &reread != bytes {
+            return Err(invalid("analysis read-back differs from prepared bytes"));
+        }
+        anlz::inspect(&reread)?;
+    }
+    Ok(ExportedTrack {
+        track: track.clone(),
+        audio,
+        sha256: hash_file(&destination)?,
+        source_sha256: Some(before),
+        source_signature: Some(source_signature),
+        device_signature: Some(incremental::FileSignature::read(&destination)?),
+        analysis_signatures: Some(vec![
+            incremental::FileSignature::read(&dat_path)?,
+            incremental::FileSignature::read(&ext_path)?,
+            incremental::FileSignature::read(&three_band_path)?,
+        ]),
+        source_metadata: Some(incremental::TrackMetadata::from_track(track)),
+        source_preparation: Some(track.analysis.clone()),
+        analysis: bundle.summary,
+        dat_sha256: hash_file(&dat_path)?,
+        ext_sha256: hash_file(&ext_path)?,
+        three_band_sha256: hash_file(&three_band_path)?,
+    })
+}
+
+pub(super) fn finish_report(
+    plan: &ExportPlan,
+    exported: Vec<ExportedTrack>,
+    identity: LibraryIdentity,
+    output: &Path,
+) -> Result<ExportReport> {
     let created = chrono::Utc::now();
-    let identity = LibraryIdentity::new();
     let audio: Vec<_> = exported.iter().map(|track| track.audio.clone()).collect();
     let date = created.format("%Y-%m-%d").to_string();
     let database = devicesql::encode_with_identity(plan, &audio, &date, &identity)?;
@@ -527,14 +634,14 @@ pub fn write_classic_destination_with_progress(
     write_new(&settings_path, &settings::rgb_device_settings())?;
     settings::verify_rgb_device_settings(&fs::read(&settings_path)?)?;
     let report = ExportReport {
-        schema_version: 5, format: "devicesql-and-onelibrary-experimental".into(), hardware_validated: false,
+        schema_version: 7, format: "devicesql-and-onelibrary-experimental".into(), hardware_validated: false,
         created_at: created.to_rfc3339(), database_sha256: hash_file(&db_path)?,
         one_library_sha256: hash_file(&plus_path)?, library_identity: identity,
         device_settings_sha256: hash_file(&settings_path)?,
-        tracks: exported, playlists: plan.playlists.clone(),
+        tracks: exported, playlists: plan.playlists.clone(), omitted_tracks: plan.omitted_tracks.clone(), playlist_sources: plan.playlist_sources.clone(),
         limitations: vec!["Classic Device Library and SQLCipher 4 OneLibrary are generated by Rau from the same export plan; OneLibrary hardware acceptance remains pending".into(),
             "Per-track cues and loops are written in ANLZ; SQL cue-bank indexes, hot-cue bank lists, My Tags, histories and recommendations are not exported".into(),
-            "ANLZ DAT/EXT/2EX contain monochrome, RGB and three-band waveforms plus XML or explicitly saved Rau grids and imported cues; no PQT2, phrase/vocal analysis, artwork or sync".into(),
+            "ANLZ DAT/EXT/2EX contain monochrome, RGB and three-band waveforms plus XML or explicitly saved Rau grids and imported cues; no PQT2, phrase/vocal analysis or artwork".into(),
             "RGB and three-band waveforms use Rau's own filtered-energy visualization; 3Band deck and browser previews were displayed in a Rekordbox 7.2.3 diagnostic; RGB and hardware acceptance are pending".into(),
             "Saved Rau analysis uses a manually reviewable constant-tempo 4/4 grid; tempo changes need imported XML grids. Ten memory cues and sixteen hot slots are accepted; each player's available slots differ".into(),
             "Cue names are stored in EXT; custom colors, active-loop flags and quantized-loop fractions are not exported".into(),
@@ -547,7 +654,6 @@ pub fn write_classic_destination_with_progress(
         &output.join("rau-export-report.json"),
         &serde_json::to_vec_pretty(&report)?,
     )?;
-    fs::remove_file(marker)?;
     Ok(report)
 }
 

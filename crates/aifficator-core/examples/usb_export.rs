@@ -4,7 +4,7 @@ use aifficator_core::usb_export::{
     anlz, devicesql, onelibrary, plan_library, write_classic_folder,
 };
 use aifficator_core::usb_export::{
-    AudioInfo, ExportPlan, ExportPlaylist, ExportTrack, LibraryIdentity,
+    AudioInfo, ExportPlan, ExportPlaylist, ExportTrack, LibraryIdentity, UnavailableTrack,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -70,7 +70,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let date = chrono::DateTime::parse_from_rfc3339(&receipt.created_at)?;
             let audio = receipt.tracks.iter().map(|t| t.audio.clone()).collect::<Vec<_>>();
             let plan = ExportPlan { tracks: receipt.tracks.into_iter().map(|t| t.track).collect(),
-                playlists: receipt.playlists, source_bytes: 0 };
+                playlists: receipt.playlists, source_bytes: 0, omitted_tracks: receipt.omitted_tracks, playlist_sources: BTreeMap::new() };
             if receipt.schema_version >= 5 && receipt.library_identity.is_none() {
                 return Err("dual-library receipt is missing its export identity".into());
             }
@@ -171,6 +171,8 @@ struct DatabaseReceipt {
     created_at: String,
     tracks: Vec<DatabaseReceiptTrack>,
     playlists: Vec<ExportPlaylist>,
+    #[serde(default)]
+    omitted_tracks: Vec<UnavailableTrack>,
 }
 
 #[derive(Deserialize)]

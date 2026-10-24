@@ -225,10 +225,7 @@ pub fn write(
                 ),
                 ("masterDbId", integer(identity.master_database_id)),
                 ("masterContentId", integer(track.id)),
-                (
-                    "analysisDataFilePath",
-                    text(anlz::path_for_audio(&track.device_path)?),
-                ),
+                ("analysisDataFilePath", text(anlz::path_for_track(track)?)),
                 ("analysedBits", integer(0x29)),
                 (
                     "contentLink",
@@ -588,7 +585,7 @@ pub fn compare(
             || row.sample_rate != media.sample_rate
             || row.bit_depth != media.bit_depth
             || row.bitrate_kbps != media.bitrate_kbps
-            || row.analysis_path != anlz::path_for_audio(&track.device_path)?
+            || row.analysis_path != anlz::path_for_track(track)?
             || row.content_link != devicesql::GENERATED_ANALYSIS_CONTENT_LINK
             || row.analysed_bits != 0x29
             || row.master_content_id != track.id

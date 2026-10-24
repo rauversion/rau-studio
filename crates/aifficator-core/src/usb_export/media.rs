@@ -26,6 +26,8 @@ fn transcode(source: &Path, target: &Path, ffmpeg: &Path, format: AudioFormat) -
             "-loglevel",
             "error",
             "-xerror",
+            "-threads",
+            "1",
             "-n",
             "-i",
         ])
@@ -46,6 +48,8 @@ fn transcode(source: &Path, target: &Path, ffmpeg: &Path, format: AudioFormat) -
             "44100",
             "-c:a",
             codec,
+            "-threads",
+            "1",
             "-f",
             container,
         ]);

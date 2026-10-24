@@ -3,16 +3,57 @@
 //! matching XML still supplies existing cues and loops.
 use super::*;
 use aifficator_core::rekordbox::{PlaylistNode, RekordboxLibrary};
-use aifficator_core::usb_export::{plan_library, preserves_source_audio, ExportPlan};
+use aifficator_core::usb_export::{
+    check_source, plan_library, preserves_source_audio, ExportPlan, UnavailableTrack,
+};
 
 type SourceCache = HashMap<String, Result<HashMap<String, Track>, String>>;
 
+pub(crate) fn match_destination(
+    app: &AppHandle,
+    info: &mut aifficator_core::usb_export::incremental::DestinationInfo,
+) -> Result<(), String> {
+    let conn = open_db(app)?;
+    let targets = list_playlist_targets(&conn)?;
+    let mut used = BTreeSet::new();
+    for p in &mut info.playlists {
+        if p.source_id
+            .as_ref()
+            .is_some_and(|id| !targets.iter().any(|t| &t.id == id))
+        {
+            p.source_id = None;
+        }
+        if let Some(id) = &p.source_id {
+            used.insert(id.clone());
+        }
+    }
+    let mut counts = BTreeMap::<String, usize>::new();
+    for p in &info.playlists {
+        *counts.entry(p.name.clone()).or_default() += 1;
+    }
+    for p in &mut info.playlists {
+        if p.source_id.is_none() && counts[&p.name] == 1 {
+            let matches: Vec<_> = targets.iter().filter(|t| t.name == p.name).collect();
+            if matches.len() == 1 && used.insert(matches[0].id.clone()) {
+                p.source_id = Some(matches[0].id.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) struct Snapshot {
-    pub plan: ExportPlan,
+    pub plan: Option<ExportPlan>,
+    pub playlist_names: Vec<String>,
+    pub unavailable_tracks: Vec<UnavailableTrack>,
     pub estimated_audio_bytes: Option<u64>,
 }
 
-pub(crate) fn snapshot(app: &AppHandle, selected: &[String]) -> Result<Snapshot, String> {
+pub(crate) fn snapshot(
+    app: &AppHandle,
+    selected: &[String],
+    existing: Option<&aifficator_core::usb_export::incremental::Existing>,
+) -> Result<Snapshot, String> {
     if selected.is_empty() || selected.len() > 10_000 {
         return Err("Selecciona entre 1 y 10000 playlists.".into());
     }
@@ -23,6 +64,7 @@ pub(crate) fn snapshot(app: &AppHandle, selected: &[String]) -> Result<Snapshot,
     let mut tracks = BTreeMap::new();
     let mut playlists = Vec::new();
     let mut names = Vec::new();
+    let mut memberships = BTreeMap::<String, BTreeSet<String>>::new();
     for id in selected {
         if !seen.insert(id) {
             return Err("La selección contiene una playlist repetida.".into());
@@ -43,7 +85,7 @@ pub(crate) fn snapshot(app: &AppHandle, selected: &[String]) -> Result<Snapshot,
                     .ok_or_else(|| "La playlist no tiene una ruta válida.".to_string())?,
             )?
         };
-        if members.is_empty() {
+        if members.is_empty() && existing.is_none() {
             return Err(format!("La playlist «{}» está vacía.", target.name));
         }
         let mut keys = Vec::new();
@@ -51,6 +93,10 @@ pub(crate) fn snapshot(app: &AppHandle, selected: &[String]) -> Result<Snapshot,
             let key = serde_json::to_string(&(&track.library_id, &track.track_id))
                 .map_err(|e| e.to_string())?;
             keys.push(key.clone());
+            memberships
+                .entry(key.clone())
+                .or_default()
+                .insert(target.name.clone());
             tracks.entry(key).or_insert(track);
             if tracks.len() > 10_000 {
                 return Err("Esta exportación admite hasta 10000 temas únicos.".into());
@@ -72,36 +118,49 @@ pub(crate) fn snapshot(app: &AppHandle, selected: &[String]) -> Result<Snapshot,
     let mut warnings = BTreeMap::<String, Vec<String>>::new();
     let mut preparations = BTreeMap::new();
     let mut estimated_audio_bytes = Some(0u64);
+    let mut unavailable_tracks = Vec::new();
+    let mut from_usb = BTreeMap::new();
     for (key, indexed) in tracks {
-        let file_path = indexed
-            .source_path
-            .as_ref()
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                format!(
-                    "El tema «{}» no tiene un archivo local.",
-                    indexed.name.as_deref().unwrap_or(&key)
-                )
-            })?;
+        let mut file_path = indexed.source_path.as_ref().map(PathBuf::from);
         let title = indexed.name.as_deref().unwrap_or(&key);
-        let metadata = fs::metadata(&file_path).map_err(|e| {
-            format!(
-                "No se pudo leer el audio de «{title}» ({}): {e}",
-                file_path.display()
-            )
-        })?;
-        if !metadata.is_file() || metadata.len() == 0 {
-            return Err(format!(
-                "El audio de «{title}» está vacío o no es un archivo: {}",
-                file_path.display()
-            ));
+        if check_source(file_path.as_deref()).is_err() {
+            if let Some((old, record)) = existing.and_then(|e| {
+                e.report
+                    .tracks
+                    .iter()
+                    .find(|t| t.track.source_key == key)
+                    .map(|t| (e, t))
+            }) {
+                let path = aifficator_core::usb_export::incremental::device_file(
+                    &old.root,
+                    &record.track.device_path,
+                )
+                .map_err(|e| e.to_string())?;
+                if check_source(Some(&path)).is_ok() {
+                    file_path = Some(path);
+                    from_usb.insert(key.clone(), record.track.analysis.clone());
+                }
+            }
         }
-        fs::File::open(&file_path).map_err(|e| {
-            format!(
-                "No se pudo leer el audio de «{title}» ({}): {e}",
-                file_path.display()
-            )
-        })?;
+        let size = match check_source(file_path.as_deref()) {
+            Ok(size) => size,
+            Err(problem) => {
+                unavailable_tracks.push(UnavailableTrack {
+                    source_key: key.clone(),
+                    title: title.into(),
+                    artist: indexed.artist.clone().unwrap_or_default(),
+                    source_path: file_path,
+                    playlist_names: memberships
+                        .remove(&key)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                    problem,
+                });
+                continue;
+            }
+        };
+        let file_path = file_path.expect("available source has a local path");
         let mut attributes = indexed.attributes.clone();
         if let Some(rating) = indexed.user_rating {
             attributes.insert("Rating".into(), (u16::from(rating) * 51).to_string());
@@ -124,7 +183,7 @@ pub(crate) fn snapshot(app: &AppHandle, selected: &[String]) -> Result<Snapshot,
         // Copied formats use actual bytes. Only converted AIFF uses an advisory
         // estimate from catalog duration (headers/tags are not a size guarantee).
         let estimated_track = if preserves_source_audio(&file_path) {
-            Some(metadata.len())
+            Some(size)
         } else {
             indexed
                 .total_time
@@ -139,17 +198,28 @@ pub(crate) fn snapshot(app: &AppHandle, selected: &[String]) -> Result<Snapshot,
         estimated_audio_bytes = estimated_audio_bytes
             .zip(estimated_track)
             .and_then(|(total, bytes)| total.checked_add(bytes));
-        let (tempos, marks, mut notices) = source_analysis(&tx, &indexed, &file_path, &mut cache)?;
+        let (tempos, marks, mut notices) = if from_usb.contains_key(&key) {
+            (
+                Vec::new(),
+                Vec::new(),
+                vec!["Se reutiliza la pista del USB porque el original no está disponible.".into()],
+            )
+        } else {
+            source_analysis(&tx, &indexed, &file_path, &mut cache)?
+        };
         track.tempos = tempos;
         track.position_marks = marks;
-        if let Some(prepared) = music_analysis::prepared_for_export(
-            &tx,
-            &indexed.library_id,
-            &indexed.track_id,
-            &file_path,
-        )
-        .map_err(|e| format!("«{title}»: {e}"))?
-        {
+        if let Some(prepared) = if from_usb.contains_key(&key) {
+            None
+        } else {
+            music_analysis::prepared_for_export(
+                &tx,
+                &indexed.library_id,
+                &indexed.track_id,
+                &file_path,
+            )
+            .map_err(|e| format!("«{title}»: {e}"))?
+        } {
             if let Some(grid) = &prepared.grid {
                 let (seconds, beat) = grid.first_anchor();
                 track.tempos = vec![BTreeMap::from([
@@ -173,20 +243,73 @@ pub(crate) fn snapshot(app: &AppHandle, selected: &[String]) -> Result<Snapshot,
         library.tracks.push(track);
     }
     tx.commit().map_err(|e| e.to_string())?;
+    let available: BTreeSet<_> = library
+        .tracks
+        .iter()
+        .map(|track| track.track_id.clone())
+        .collect();
+    for playlist in &mut library.playlists {
+        playlist.track_keys.retain(|key| available.contains(key));
+    }
+    if library.tracks.is_empty() {
+        let playlists = names
+            .iter()
+            .enumerate()
+            .map(
+                |(index, name)| aifficator_core::usb_export::ExportPlaylist {
+                    id: index as u32 + 1,
+                    parent_id: 0,
+                    position: index as u32,
+                    name: name.clone(),
+                    is_folder: false,
+                    tracks: Vec::new(),
+                },
+            )
+            .collect();
+        let plan = ExportPlan {
+            tracks: Vec::new(),
+            playlists,
+            source_bytes: 0,
+            omitted_tracks: unavailable_tracks.clone(),
+            playlist_sources: selected
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (index as u32 + 1, id.clone()))
+                .collect(),
+        };
+        return Ok(Snapshot {
+            plan: Some(plan),
+            playlist_names: names,
+            unavailable_tracks,
+            estimated_audio_bytes,
+        });
+    }
     let selected_paths: Vec<_> = library.playlists.iter().map(|p| p.name.clone()).collect();
     let mut plan = plan_library(&library, &selected_paths).map_err(|e| e.to_string())?;
-    for (playlist, name) in plan.playlists.iter_mut().zip(names) {
-        playlist.name = name;
+    for (playlist, name) in plan.playlists.iter_mut().zip(&names) {
+        playlist.name = name.clone();
     }
+    plan.omitted_tracks = unavailable_tracks.clone();
+    plan.playlist_sources = plan
+        .playlists
+        .iter()
+        .zip(selected)
+        .map(|(p, source)| (p.id, source.clone()))
+        .collect();
     for track in &mut plan.tracks {
         track.analysis.source_sha256 = preparations.remove(&track.source_key);
+        if let Some(analysis) = from_usb.remove(&track.source_key) {
+            track.analysis = analysis;
+        }
         if let Some(notices) = warnings.remove(&track.source_key) {
             track.analysis.warnings.extend(notices);
         }
     }
     aifficator_core::usb_export::devicesql::validate_plan(&plan).map_err(|e| e.to_string())?;
     Ok(Snapshot {
-        plan,
+        plan: Some(plan),
+        playlist_names: names,
+        unavailable_tracks,
         estimated_audio_bytes,
     })
 }

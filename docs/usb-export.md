@@ -19,10 +19,11 @@ remain pending.
   library header and a Rau-created playlist's toolbar. It selects existing
   indexed playlists and drafts, previews the selection and destination, and
   shows background progress and the result in Spanish or English.
-- A common track/playlist export model with stable IDs within one plan, nested
+- A common track/playlist export model with persistent IDs across compatible Rau updates, nested
   folders, Unicode metadata, ordering, and repeated playlist entries.
 - Explicit XML playlist/folder selection, source availability checks, and a
-  read-only plan command. Missing tracks stop the export instead of changing a set.
+  read-only plan command. UI review collects unavailable files and asks whether
+  to omit them or cancel; direct XML/CLI planning still requires all sources.
 - Independent DeviceSQL page and row encoding, including table index pages,
   multi-page data, row masks, page-local row slots, metadata dictionaries,
   Unicode/long strings, and playlist references. Empty tables terminate at their
@@ -62,8 +63,12 @@ remain pending.
   requests hot-cue auto-loading when the track has hot cues.
 - A bounded read-only DeviceSQL inspector and semantic comparison against the
   export plan. It can also inspect a known-good `export.pdb` supplied locally.
-- SHA-256 receipts, source-change detection during preparation, an incomplete
-  marker on failure, and refusal to replace existing export files or folders.
+- SHA-256 receipts and source-change detection. Fresh exports reserve their paths
+  and retain an incomplete marker on failure. Compatible Rau exports support
+  additive updates with stable IDs, existing-playlist selection, staged preparation,
+  metadata backups and journal-based restoration. See [incremental USB updates](usb-incremental.md).
+- Bounded preparation concurrency (1, 2 or 4 tracks; default 2), detailed terminal
+  logs, reuse of unchanged USB media/analysis, and a persistent local ANLZ cache.
 - A reproducible two-track demo with generated quiet tones and a playlist ordered
   `1 / 2 / 1`, known timing markers, and a JSON report with audio/analysis hashes.
 
@@ -95,6 +100,35 @@ identity and track master IDs. These IDs are not persistent sync identities.
 Read-back checks compare metadata, paths, format codes, ratings, playlist order,
 duplicates and browse settings. Ordinary SQLite cannot read the generated Plus
 file without its format key; the encrypted read-back passes integrity checks.
+
+Receipt schema **6** additionally records `omitted_tracks`, including source
+identity, title, artist, original path, affected playlists, issue kind and error
+details. Older serialized plans default this list to empty.
+
+### Unavailable source files
+
+**Revisar y continuar** checks actual files rather than cached catalog flags.
+Missing local paths, disconnected/missing files, denied read access, directories,
+empty files and read failures are collected across the complete selection.
+The review dialog lists every affected track and supports searching by name,
+artist, path or playlist. **Cancelar exportación** discards the review without
+writing export files; **Omitir y continuar** accepts that exact omission list.
+The user can then start the reviewed export normally. The backend also requires
+explicit omission consent, so skipping cannot happen merely by closing a dialog.
+
+Available track counts and estimates exclude omitted tracks. Both databases
+and all playlist memberships exclude them too, preserving remaining order and
+repeats. Selected playlists that become empty are retained and identified in
+the review. If every selected source is unavailable, review remains possible
+but export is disabled.
+
+Start checks sources again before touching the destination. Newly unavailable
+tracks create a fresh review identity and require a new decision. **Volver a
+revisar archivos** rescans the original selection after reconnecting a disk or
+fixing paths. The finished report and completion view retain the omitted list.
+Source disappearance after writing has already started, audio decoding errors,
+stale saved grids and destination failures still stop the export; they are not
+silently treated as a user-approved omission.
 
 `usb_export inspect-onelibrary EXPORTLIBRARY.DB` performs read-only inspection.
 `usb_export export-plan PLAN.JSON NEW_FOLDER` prepares both libraries from a
@@ -142,46 +176,59 @@ MP3 compressed-frame seek offsets are not generated; its analysis report warns
 that VBR seeking still requires validation. The empty PVBR compatibility record
 is not a generated VBR seek index.
 Other formats are resampled/downmixed for conversion to AIFF, and file size can
-grow. Waveforms use a temporary local PCM WAV decode of each final audio file;
-the decode is cleaned up after that track and is never published to the USB.
+grow. When no reusable analysis exists, waveforms use a temporary local PCM WAV decode
+of the final audio file; the decode is cleaned up after that track and is never
+published to the USB. Unchanged tracks in compatible Rau exports reuse their
+existing analysis. The desktop writer also caches ANLZ locally for later exports.
+BPM/key detection is a separate, explicit preparation action; export does not
+repeat that detection. See [cache and reuse details](usb-incremental.md#analysis-reuse).
 The UI estimates size from actual bytes for copies and catalog durations for
 conversions; it does not check destination or temporary disk space, the physical
 device's partition map, or its partition position. It has no media
-discovery, ejection, cancellation, incremental sync, or recoverable replacement
-of an existing USB library. Destinations may contain unrelated files, but must
-not already contain `PIONEER`, `Contents`, `rau-export-report.json`, or
-`RAU_EXPORT_INCOMPLETE.txt` (including symlinks and case variants). The writer
-creates the marker and reserves new top-level directories exclusively. A failed
-run retains its `RAU_EXPORT_INCOMPLETE.txt` marker and any partial output;
-it is not a usable export. Publication is not a whole-volume atomic transaction.
+discovery, ejection or cancellation of a running export. A fresh destination may
+contain unrelated files but cannot already contain reserved export paths
+(including symlinks and case variants). Fresh export failure retains the incomplete
+marker and any partial output; that output is not a usable library.
 
-Temporary IDs are scoped to one export. They are **not** suitable for sync across
-changing selections; persistent identity storage belongs in the sync milestone.
+Compatible completed Rau exports with receipt schema 5–7 can instead be updated.
+Existing playlists are shown and matched local playlists are preselected. Selected
+playlists receive current membership/order; unselected playlists and existing
+tracks remain. New or changed audio is added at new paths, without overwriting
+previous media. Both databases are regenerated together, preserving library,
+track and playlist identities. Backups and a journal support restoration after
+interrupted metadata publication; the UI offers **Restaurar biblioteca anterior**.
+Publication spans multiple files and is not a whole-volume atomic transaction.
+See [update boundaries and failure behavior](usb-incremental.md).
 
 ## Export from the app
 
 1. Open **Playlists → Exportar a USB**. A library-header shortcut preselects the
    active playlist; the draft toolbar preselects that draft.
 2. Select one or more playlists, optionally filtering by playlist or library name.
-   Empty playlists cannot be selected.
+   Empty playlists can be selected when updating an existing compatible export.
 3. Choose the final destination folder (the **USB root** for a player), then click
    **Revisar y continuar**. The main button explains any missing requirement
    beside it. `PIONEER` and `Contents` will be created directly in that folder;
-   there is no enclosing export folder or manual move afterward.
+   there is no enclosing export folder or manual move afterward. Existing USB
+   playlists appear automatically; matching Rau playlists are preselected. Select
+   1, 2 or 4 parallel preparation tasks (default 2).
 4. Review unique catalog-track count, source size, estimated output size,
    counts of tracks copied unchanged or converted to AIFF,
    imported-cue count, missing-grid count, and notices. The audio estimate excludes
    databases/analysis and is not a capacity guarantee. The same button now says
    **Preparar exportación**; click it to start. Changing the playlists or destination
-   returns the button to review. Existing export folders/files are refused; this does
-   not format a device or publish over an existing USB library.
+   returns the button to review. For compatible existing Rau exports, the button
+   becomes **Actualizar pendrive** and the summary distinguishes reused, new and
+   changed tracks. Other libraries remain view-only. The app does not format devices.
 5. Track progress through audio preparation, analysis and library publication.
    Navigation is allowed; returning to the screen reads the current job from the
-   backend. The app must remain open. Jobs are not resumed after app restart.
+   backend. Expand **Terminal** to see per-track operations, cache hits and errors.
+   The app must remain open. Running jobs are not resumed after app restart.
 6. On completion, use **Mostrar carpeta** or **Mostrar informe**. If exported
    to the USB root, eject it before trying it on the player. A failure retains
-   partial output with the core's incomplete marker; a fresh attempt requires
-   a destination without those previous export paths.
+   partial output with the core's incomplete marker on a fresh export. An update
+   preserves previous media and keeps database backups; an interrupted journal
+   must be restored before another update.
 
 The desktop adapter snapshots the actual catalog membership/order and current
 ratings in a database read transaction. Selected playlists appear at the device
@@ -377,8 +424,11 @@ tracks; the generated demo described below is a separate fixture.
 4. Extend the implemented Tauri/UI flow with device profiles, partition-map and disk-capacity checks,
    staged volume publication and cancellation. Folder export, selection review,
    background track progress and compatibility notices are now implemented.
-5. Stable persistent IDs, recovery, incremental sync, and preservation of edits
-   made by players. These require their own interruption and conflict checks.
+5. Exercise the implemented additive update path on a separate test USB: repeated
+   updates, source changes, missing originals, selected/unselected playlists,
+   supported player edits and interrupted publication/recovery. Extend preservation
+   to currently unsupported histories, tags, artwork and cue-bank tables before
+   enabling updates to libraries containing those features.
 
 ## Implementation provenance
 

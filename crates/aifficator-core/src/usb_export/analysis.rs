@@ -146,7 +146,11 @@ pub fn from_xml(track: &Track) -> Result<TrackAnalysis> {
 }
 
 pub fn validate(analysis: &TrackAnalysis) -> Result<()> {
-    if analysis.source_sha256.as_ref().is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit())) {
+    if analysis
+        .source_sha256
+        .as_ref()
+        .is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
         return Err(invalid("invalid musical analysis source hash"));
     }
     if analysis.tempos.len() > 100_000 || analysis.cues.len() > 26 {

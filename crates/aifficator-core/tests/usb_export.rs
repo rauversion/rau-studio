@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 fn plan(count: u32) -> ExportPlan {
     ExportPlan {
         source_bytes: 0,
+        omitted_tracks: Vec::new(),
+        playlist_sources: Default::default(),
         tracks: (1..=count)
             .map(|id| ExportTrack {
                 id,
@@ -29,6 +31,7 @@ fn plan(count: u32) -> ExportPlan {
                 year: 2026,
                 track_number: id,
                 analysis: Default::default(),
+                analysis_path: None,
             })
             .collect(),
         playlists: vec![

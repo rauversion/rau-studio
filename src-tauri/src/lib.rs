@@ -1468,6 +1468,8 @@ pub fn run() {
             usb_export::usb_export_prepare,
             usb_export::usb_export_start,
             usb_export::usb_export_status,
+            usb_export::usb_export_inspect_destination,
+            usb_export::usb_export_recover,
             playlist_index::music_analysis::track_analysis_load,
             playlist_index::music_analysis::track_analysis_run,
             playlist_index::music_analysis::track_analysis_save,

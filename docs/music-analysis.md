@@ -71,6 +71,17 @@ plan also carries the source hash so a later source change stops publication
 instead of applying an old grid to different audio. Source identity checks do
 not correct codec delay or prove alignment after lossy decoding/conversion.
 
+## Reuse during USB export
+
+USB export reads saved BPM/grid/key preparation; it does not rerun musical
+inference. Compatible incremental exports also reuse unchanged ANLZ files on
+the destination. A persistent local cache stores generated DAT/EXT/2EX files
+and audio properties for later exports, keyed by exported audio bytes, device
+audio path, grid/cues and renderer version. Cache hits avoid waveform decoding;
+checksums and file identity checks still run as needed. Changed preparation or
+an invalid/missing cache can require waveform rendering, without repeating
+BPM/key detection. See [incremental export details](usb-incremental.md).
+
 ## Reference review and provenance
 
 The public `main` branch of rbxport was reviewed on October 24, 2026. Its

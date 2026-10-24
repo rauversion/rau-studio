@@ -116,6 +116,18 @@ fn decode_string(row: &[u8], at: usize) -> Result<String> {
 }
 
 pub fn validate_plan(plan: &ExportPlan) -> Result<()> {
+    let included: BTreeSet<_> = plan.tracks.iter().map(|track| &track.source_key).collect();
+    let omitted: BTreeSet<_> = plan
+        .omitted_tracks
+        .iter()
+        .map(|track| &track.source_key)
+        .collect();
+    if included.len() + plan.omitted_tracks.len() > 10_000
+        || omitted.len() != plan.omitted_tracks.len()
+        || !included.is_disjoint(&omitted)
+    {
+        return Err(invalid("invalid or overlapping omitted source tracks"));
+    }
     if plan.tracks.is_empty()
         || plan.tracks.len() > 10_000
         || plan.playlists.is_empty()
@@ -143,7 +155,7 @@ pub fn validate_plan(plan: &ExportPlan) -> Result<()> {
             return Err(invalid("MP3 export requires copying the source"));
         }
         analysis::validate(&t.analysis)?;
-        if !analysis_paths.insert(anlz::path_for_audio(&t.device_path)?) {
+        if !analysis_paths.insert(anlz::path_for_track(t)?) {
             return Err(invalid("analysis path hash collision; this prototype refuses to overwrite a track's analysis"));
         }
         for field in [
@@ -300,7 +312,7 @@ pub fn encode_with_identity(
         put16(&mut row, 90, a.format.device_code());
         put16(&mut row, 92, 3);
         let filename = t.device_path.rsplit('/').next().unwrap();
-        let analysis_path = anlz::path_for_audio(&t.device_path)?;
+        let analysis_path = anlz::path_for_track(t)?;
         for slot in 0..21 {
             let text = match slot {
                 7 if t.analysis.cues.iter().any(|c| c.hot_cue > 0) => "ON",
@@ -804,7 +816,7 @@ pub fn compare(plan: &ExportPlan, audio: &[AudioInfo], db: &DatabaseInspection) 
             || found.bit_depth != a.bit_depth
             || found.bitrate_kbps != a.bitrate_kbps
             || found.duration_seconds != a.frames.div_ceil(u64::from(a.sample_rate)) as u16
-            || found.analysis_path != anlz::path_for_audio(&t.device_path)?
+            || found.analysis_path != anlz::path_for_track(t)?
             || found.hot_cue_auto_load
                 != if t.analysis.cues.iter().any(|c| c.hot_cue > 0) {
                     "ON"

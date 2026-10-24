@@ -4,13 +4,13 @@
 
 use super::analysis::{self, Beat, CuePoint};
 use super::{audio, invalid, AudioInfo, ExportTrack, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
 
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnalysisSummary {
     pub dat_path: String,
     pub ext_path: String,
@@ -56,6 +56,25 @@ pub fn path_for_audio(path: &str) -> Result<String> {
     Ok(format!(
         "/PIONEER/USBANLZ/P{shard:03X}/{hash:08X}/ANLZ0000.DAT"
     ))
+}
+
+pub fn path_for_track(track: &ExportTrack) -> Result<String> {
+    if let Some(path) = &track.analysis_path {
+        let Some(relative) = path.strip_prefix("/PIONEER/USBANLZ/") else {
+            return Err(invalid("invalid analysis location"));
+        };
+        if path.len() > 240
+            || !relative.ends_with("/ANLZ0000.DAT")
+            || relative
+                .split('/')
+                .any(|p| p.is_empty() || p == "." || p == ".." || p.contains(['\\', '\0']))
+        {
+            return Err(invalid("invalid analysis location"));
+        }
+        Ok(path.clone())
+    } else {
+        path_for_audio(&track.device_path)
+    }
 }
 
 fn put16(out: &mut [u8], at: usize, value: u16) {
@@ -443,21 +462,9 @@ pub fn encode(track: &ExportTrack, path: &Path, info: &AudioInfo) -> Result<Anal
             }
         }
     }
-    let dat_path = path_for_audio(&track.device_path)?;
+    let dat_path = path_for_track(track)?;
     let ext_path = dat_path.replace(".DAT", ".EXT");
     let three_band_path = dat_path.replace(".DAT", ".2EX");
-    let mut warnings = track.analysis.warnings.clone();
-    if super::AudioFormat::from_path(Path::new(&track.device_path)) == Some(super::AudioFormat::Mp3)
-    {
-        warnings.push("PVBR framing is present but MP3 frame seek offsets are not generated; VBR seeking requires validation".into());
-    }
-    if track.analysis.tempos.is_empty() && warnings.is_empty() {
-        warnings.push("No imported beat grid".into());
-    }
-    if !extra.is_empty() {
-        warnings
-            .push("Hot cues after C are stored in EXT; availability depends on the player".into());
-    }
     Ok(AnalysisBundle {
         dat,
         ext,
@@ -475,9 +482,25 @@ pub fn encode(track: &ExportTrack, path: &Path, info: &AudioInfo) -> Result<Anal
             color_detail_columns: wave.color_detail.len() / 2,
             three_band_preview_columns: wave.three_band_preview.len() / 3,
             three_band_detail_columns: wave.three_band_detail.len() / 3,
-            warnings,
+            warnings: warnings(track),
         },
     })
+}
+
+pub(super) fn warnings(track: &ExportTrack) -> Vec<String> {
+    let mut warnings = track.analysis.warnings.clone();
+    if super::AudioFormat::from_path(Path::new(&track.device_path)) == Some(super::AudioFormat::Mp3)
+    {
+        warnings.push("PVBR framing is present but MP3 frame seek offsets are not generated; VBR seeking requires validation".into());
+    }
+    if track.analysis.tempos.is_empty() && warnings.is_empty() {
+        warnings.push("No imported beat grid".into());
+    }
+    if track.analysis.cues.iter().any(|cue| cue.hot_cue > 3) {
+        warnings
+            .push("Hot cues after C are stored in EXT; availability depends on the player".into());
+    }
+    warnings
 }
 
 #[derive(Debug, Serialize)]
