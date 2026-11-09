@@ -8,7 +8,7 @@ use super::{
     Result,
 };
 use rusqlite::{params_from_iter, types::Value, Connection, OpenFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
@@ -17,6 +17,20 @@ use std::path::Path;
 // github.com/dylanljones/pyrekordbox/blob/master/pyrekordbox/onelibrary/database.py
 // This is a format constant; no account, installation or Rekordbox process is used.
 const FORMAT_KEY: &str = "r8gddnr4k847830ar6cqzbkk0el6qytmb3trbbx805jm74vez64i5o8fnrqryqls";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CueValue {
+    Integer(i64),
+    Text(String),
+}
+
+/// Native columns after cue_id/content_id. IDs are assigned at publication so
+/// cached analysis can be shared between different export plans and track IDs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cue {
+    pub values: [CueValue; 20],
+}
 
 // Column vocabulary/order observed in a locally saved native export. '*' is an
 // integer primary key, '$' is varchar, other columns are integer. Association
@@ -106,8 +120,18 @@ pub fn write(
     created_date: &str,
     identity: &LibraryIdentity,
 ) -> Result<()> {
-    // Reuse the classic serializer's complete plan/audio/date validation.
-    devicesql::encode_with_identity(plan, audio, created_date, identity)?;
+    write_with_cues(path, plan, audio, created_date, identity, &BTreeMap::new())
+}
+
+pub(super) fn write_with_cues(
+    path: &Path,
+    plan: &ExportPlan,
+    audio: &[AudioInfo],
+    created_date: &str,
+    identity: &LibraryIdentity,
+    cues: &BTreeMap<u32, Vec<Cue>>,
+) -> Result<()> {
+    super::engine::database(plan, audio, created_date, identity)?;
     if identity.master_database_id == 0
         || identity.name.is_empty()
         || identity.name.len() > 80
@@ -304,13 +328,41 @@ pub fn write(
             ("myTagMasterDBID", integer(identity.master_database_id)),
         ],
     )?;
-    // Native conversion leaves cue empty: per-track cues/loops are in ANLZ.
-    // Hot-cue bank lists, histories, tags and recommendations are unsupported.
+    let mut cue_id = 0u32;
+    let content_ids: BTreeSet<_> = plan.tracks.iter().map(|t| t.id).collect();
+    for (content_id, entries) in cues {
+        if !content_ids.contains(content_id) {
+            return Err(invalid("cue refers to a missing track"));
+        }
+        for cue in entries {
+            let mut values = vec![integer(cue_id + 1), integer(*content_id)];
+            cue_id += 1;
+            for (i, value) in cue.values.iter().enumerate() {
+                values.push(match (i, value) {
+                    (2, CueValue::Text(s)) => text(s),
+                    (i, CueValue::Integer(n)) if i != 2 => integer(*n),
+                    _ => return Err(invalid("incorrect cue schema value")),
+                });
+            }
+            tx.execute(
+                "INSERT INTO cue VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params_from_iter(values),
+            )?;
+        }
+    }
     tx.commit()?;
     db.close().map_err(|(_, e)| e)?;
     File::open(path)?.sync_all()?;
     let reread = inspect(path)?;
     compare(plan, audio, identity, &reread)?;
+    let expected: BTreeMap<_, _> = cues
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    if reread.cues != expected {
+        return Err(invalid("OneLibrary read-back cues differ from analysis"));
+    }
     if reread.created_date != created_date {
         return Err(invalid("OneLibrary read-back date differs from export"));
     }
@@ -352,6 +404,7 @@ pub struct Inspection {
     pub identity: LibraryIdentity,
     pub created_date: String,
     pub tracks: Vec<InspectedTrack>,
+    pub cues: BTreeMap<u32, Vec<Cue>>,
     pub playlists: Vec<super::ExportPlaylist>,
     pub entries: Vec<[u32; 3]>,
     pub browse_columns: Vec<devicesql::BrowseColumn>,
@@ -445,6 +498,25 @@ pub fn inspect(path: &Path) -> Result<Inspection> {
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut cues: BTreeMap<u32, Vec<Cue>> = BTreeMap::new();
+    let content_ids: BTreeSet<_> = tracks.iter().map(|t| t.id).collect();
+    let mut q = db.prepare("SELECT * FROM cue ORDER BY cue_id")?;
+    let mut rows = q.query([])?;
+    while let Some(row) = rows.next()? {
+        let content_id: u32 = row.get(1)?;
+        if !content_ids.contains(&content_id) {
+            return Err(invalid("dangling OneLibrary cue"));
+        }
+        let mut values = std::array::from_fn(|_| CueValue::Integer(0));
+        for (i, value) in values.iter_mut().enumerate() {
+            *value = if i == 2 {
+                CueValue::Text(row.get(i + 2)?)
+            } else {
+                CueValue::Integer(row.get(i + 2)?)
+            };
+        }
+        cues.entry(content_id).or_default().push(Cue { values });
+    }
     let mut q = db.prepare("SELECT playlist_id,playlist_id_parent,sequenceNo,name,attribute FROM playlist ORDER BY playlist_id")?;
     let mut playlists = q
         .query_map([], |r| {
@@ -535,6 +607,7 @@ pub fn inspect(path: &Path) -> Result<Inspection> {
         },
         created_date,
         tracks,
+        cues,
         playlists,
         entries,
         browse_columns,

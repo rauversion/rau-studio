@@ -69,6 +69,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Authenticate private Rust dependencies
+        uses: ./.github/actions/private-rust-deps
+        with:
+          soulseek-key: ${{ secrets.SOULSEEK_DEPLOY_KEY }}
+          rekordbox-key: ${{ secrets.REKORDBOX_USB_DEPLOY_KEY }}
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

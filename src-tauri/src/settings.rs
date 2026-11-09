@@ -321,6 +321,35 @@ fn load_text_setting(app: &AppHandle, key: &str) -> Result<Option<String>, Strin
     }
 }
 
+// The serialized profile includes the exact password, including whitespace.
+// Keep it in the existing authenticated, encrypted settings store.
+pub(crate) fn load_soulseek_credentials(app: &AppHandle) -> Result<Option<String>, String> {
+    load_text_setting(app, "sharing.soulseek.credentials")
+}
+
+pub(crate) fn save_soulseek_credentials(
+    app: &AppHandle,
+    profile: Option<String>,
+) -> Result<(), String> {
+    save_optional_text_setting(app, "sharing.soulseek.credentials", profile)
+}
+
+pub(crate) fn load_soulseek_download_directory(app: &AppHandle) -> Result<Option<String>, String> {
+    load_text_setting(app, "sharing.soulseek.download_directory")?
+        .map(|value| serde_json::from_str(&value).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+pub(crate) fn save_soulseek_download_directory(
+    app: &AppHandle,
+    directory: Option<String>,
+) -> Result<(), String> {
+    let value = directory
+        .map(|path| serde_json::to_string(&path).map_err(|error| error.to_string()))
+        .transpose()?;
+    save_optional_text_setting(app, "sharing.soulseek.download_directory", value)
+}
+
 fn save_optional_text_setting(
     app: &AppHandle,
     key: &str,

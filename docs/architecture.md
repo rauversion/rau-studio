@@ -32,6 +32,7 @@ Major domains:
 - Icecast/RTMP destination profiles and an ordered, durable broadcast queue.
 - Encrypted settings, including OpenAI and enrichment-provider credentials and audio tool paths.
 - Encrypted P2P device identity, trusted peers, presence observations, shared folders, and virtual file catalogs.
+- Soulseek search history/results and durable download intents, folder batches and verified partial checkpoints.
 
 The app never stores raw audio in SQLite. It stores file paths, metadata snapshots, derived analysis, and event logs.
 
@@ -67,6 +68,8 @@ The Rust backend owns:
 - encrypted settings persistence.
 - Icecast/RTMP publisher lifecycle, encoding, queue recovery, and reconnect policy.
 - P2P identity locking, share permissions, and filesystem-safe catalog indexing.
+- Soulseek session lifecycle, local package integration, encrypted credentials and recovery of in-memory download jobs from SQLite; see [Soulseek architecture](soulseek.md).
+- USB export adapts the local `rekordbox-usb` crate for PDB and macOS/Linux analysis/cues, retaining Rau's bundled SQLCipher, preparation cache, transfer pipeline and update journal; see [USB engine integration](rekordbox-usb-engine.md).
 
 ## Media Tool Resolution
 

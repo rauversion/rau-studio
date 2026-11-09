@@ -8,6 +8,7 @@ mod browse;
 mod cache;
 mod catalog;
 pub mod devicesql;
+mod engine;
 pub mod incremental;
 mod media;
 pub mod onelibrary;
@@ -15,6 +16,7 @@ mod parallel;
 mod paths;
 mod settings;
 mod source;
+mod transfer;
 
 use crate::rekordbox::{PlaylistNode, RekordboxLibrary};
 use serde::{Deserialize, Serialize};
@@ -74,6 +76,8 @@ pub enum UsbExportError {
     Json(#[from] serde_json::Error),
     #[error("library database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("Rekordbox USB: {0}")]
+    Rekordbox(#[from] rekordbox_usb::Error),
 }
 pub type Result<T> = std::result::Result<T, UsbExportError>;
 
@@ -164,6 +168,8 @@ pub struct ExportPlan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExportReport {
     pub schema_version: u32,
+    #[serde(default)]
+    pub engine: String,
     pub format: String,
     pub hardware_validated: bool,
     pub created_at: String,
@@ -201,6 +207,18 @@ pub struct ExportedTrack {
     pub source_metadata: Option<incremental::TrackMetadata>,
     #[serde(default)]
     pub source_preparation: Option<analysis::TrackAnalysis>,
+    #[serde(default)]
+    pub source_aliases: Vec<String>,
+}
+
+impl ExportedTrack {
+    pub fn matches_source(&self, key: &str) -> bool {
+        self.track.source_key == key || self.source_aliases.iter().any(|alias| alias == key)
+    }
+}
+
+pub fn available_export_workers() -> usize {
+    transfer::available_workers()
 }
 
 fn invalid(message: impl Into<String>) -> UsbExportError {
@@ -378,6 +396,32 @@ pub enum ExportStage {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct PublicationProgress {
+    pub completed_files: usize,
+    pub total_files: usize,
+    /// Payload bytes whose destination copy has been flushed and verified.
+    pub completed_bytes: u64,
+    pub total_bytes: u64,
+    pub current_file_bytes: u64,
+    /// Bytes copied or read back in the current phase of the current file.
+    pub current_file_processed_bytes: u64,
+    pub total_bytes_known: bool,
+    pub current_track: Option<String>,
+    pub current_file: Option<String>,
+    pub phase: String,
+    pub queued_tracks: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PreparationProgress {
+    pub completed_tracks: usize,
+    pub total_tracks: usize,
+    pub reused_tracks: usize,
+    pub workers: usize,
+    pub active_tracks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ExportProgress {
     pub stage: ExportStage,
     pub completed_tracks: usize,
@@ -385,6 +429,8 @@ pub struct ExportProgress {
     pub current_track: Option<String>,
     pub action: Option<String>,
     pub detail: Option<String>,
+    pub publication: Option<PublicationProgress>,
+    pub preparation: Option<PreparationProgress>,
 }
 
 impl ExportProgress {
@@ -403,7 +449,14 @@ impl ExportProgress {
             current_track,
             action: Some(action.into()),
             detail: Some(detail.into()),
+            publication: None,
+            preparation: None,
         }
+    }
+
+    pub fn with_publication(mut self, publication: PublicationProgress) -> Self {
+        self.publication = Some(publication);
+        self
     }
 }
 
@@ -460,7 +513,14 @@ pub fn write_classic_destination_with_progress(
     ffprobe: &Path,
     progress: impl FnMut(ExportProgress),
 ) -> Result<ExportReport> {
-    write_destination_parallel(plan, output, ffmpeg, ffprobe, 2, progress)
+    write_destination_parallel(
+        plan,
+        output,
+        ffmpeg,
+        ffprobe,
+        available_export_workers(),
+        progress,
+    )
 }
 
 pub fn write_destination_parallel(
@@ -495,15 +555,22 @@ pub fn write_destination_cached(
     fs::create_dir(output.join("Contents"))?;
     fs::create_dir(output.join("PIONEER"))?;
     fs::create_dir(output.join("PIONEER/rekordbox"))?;
-    let exported = parallel::prepare(
+    let local = tempfile::Builder::new()
+        .prefix("rau-usb-prepare-")
+        .tempdir()?;
+    let exported = parallel::run(
         &plan.tracks,
         workers,
+        0,
+        plan.tracks.len() * 4,
+        &output,
         |track, notify| {
             notify(
                 if track.copy_source { "copy" } else { "convert" },
                 &format!("{} → {}", track.source_path.display(), track.device_path),
             );
-            prepare_track(track, &output, ffmpeg, ffprobe, cache, notify)
+            let record = prepare_track(track, local.path(), ffmpeg, ffprobe, cache, notify)?;
+            transfer::PreparedTrack::new(record, local.path(), &output, true)
         },
         &mut progress,
     )?;
@@ -517,6 +584,14 @@ pub fn write_destination_cached(
     ));
     let report = finish_report(plan, exported, LibraryIdentity::new(), &output)?;
     fs::remove_file(marker)?;
+    progress(ExportProgress::event(
+        ExportStage::Library,
+        plan.tracks.len(),
+        plan.tracks.len(),
+        None,
+        "complete",
+        "Exportación completada; bibliotecas e informe guardados",
+    ));
     Ok(report)
 }
 
@@ -594,6 +669,7 @@ pub(super) fn prepare_track(
         ]),
         source_metadata: Some(incremental::TrackMetadata::from_track(track)),
         source_preparation: Some(track.analysis.clone()),
+        source_aliases: Vec::new(),
         analysis: bundle.summary,
         dat_sha256: hash_file(&dat_path)?,
         ext_sha256: hash_file(&ext_path)?,
@@ -610,14 +686,18 @@ pub(super) fn finish_report(
     let created = chrono::Utc::now();
     let audio: Vec<_> = exported.iter().map(|track| track.audio.clone()).collect();
     let date = created.format("%Y-%m-%d").to_string();
-    let database = devicesql::encode_with_identity(plan, &audio, &date, &identity)?;
+    let database = engine::database(plan, &audio, &date, &identity)?;
     let inspected = devicesql::inspect(&database)?;
     devicesql::compare(plan, &audio, &inspected)?;
     // Finish and close SQLCipher locally before publishing either library.
     // The USB gets a self-contained encrypted file without WAL/journal files.
     let staging = tempfile::tempdir()?;
     let prepared_plus = staging.path().join("exportLibrary.db");
-    onelibrary::write(&prepared_plus, plan, &audio, &date, &identity)?;
+    let cues = exported
+        .iter()
+        .map(|t| (t.track.id, t.analysis.plus_cues.clone()))
+        .collect();
+    onelibrary::write_with_cues(&prepared_plus, plan, &audio, &date, &identity, &cues)?;
     onelibrary::compare_classic(&inspected, &onelibrary::inspect(&prepared_plus)?)?;
     let plus_path = output.join("PIONEER/rekordbox/exportLibrary.db");
     write_new(&plus_path, &fs::read(&prepared_plus)?)?;
@@ -634,20 +714,20 @@ pub(super) fn finish_report(
     write_new(&settings_path, &settings::rgb_device_settings())?;
     settings::verify_rgb_device_settings(&fs::read(&settings_path)?)?;
     let report = ExportReport {
-        schema_version: 7, format: "devicesql-and-onelibrary-experimental".into(), hardware_validated: false,
+        schema_version: 8, engine: engine::RENDERER.into(), format: "devicesql-and-onelibrary-experimental".into(), hardware_validated: false,
         created_at: created.to_rfc3339(), database_sha256: hash_file(&db_path)?,
         one_library_sha256: hash_file(&plus_path)?, library_identity: identity,
         device_settings_sha256: hash_file(&settings_path)?,
         tracks: exported, playlists: plan.playlists.clone(), omitted_tracks: plan.omitted_tracks.clone(), playlist_sources: plan.playlist_sources.clone(),
         limitations: vec!["Classic Device Library and SQLCipher 4 OneLibrary are generated by Rau from the same export plan; OneLibrary hardware acceptance remains pending".into(),
-            "Per-track cues and loops are written in ANLZ; SQL cue-bank indexes, hot-cue bank lists, My Tags, histories and recommendations are not exported".into(),
+            if cfg!(unix) { "Cues and loops are written in ANLZ and OneLibrary; hot-cue bank lists, My Tags, histories and recommendations are not exported" } else { "Windows retains the legacy ANLZ renderer; OneLibrary cue rows are not generated for new analysis" }.into(),
             "ANLZ DAT/EXT/2EX contain monochrome, RGB and three-band waveforms plus XML or explicitly saved Rau grids and imported cues; no PQT2, phrase/vocal analysis or artwork".into(),
-            "RGB and three-band waveforms use Rau's own filtered-energy visualization; 3Band deck and browser previews were displayed in a Rekordbox 7.2.3 diagnostic; RGB and hardware acceptance are pending".into(),
+            "On macOS/Linux, classic, RGB and three-band waveforms and MP3 seek use rekordbox-usb; integration acceptance on players remains pending".into(),
             "Saved Rau analysis uses a manually reviewable constant-tempo 4/4 grid; tempo changes need imported XML grids. Ten memory cues and sixteen hot slots are accepted; each player's available slots differ".into(),
-            "Cue names are stored in EXT; custom colors, active-loop flags and quantized-loop fractions are not exported".into(),
-            "Imported timings are applied to the decoded PCM timeline without codec-delay correction; alignment needs source-specific hardware validation".into(),
+            "On macOS/Linux, cue comments and explicit RGB are stored in EXT; palette indices, active-loop flags and quantized-loop fractions are not inferred from XML".into(),
+            "MP3 uses the bundled FFmpeg decoder with gapless trimming disabled, not rekordbox-usb's optional mpg123 loader; source/player alignment still needs validation".into(),
             "MP3 and AIFF sources are copied unchanged; other sources are converted to stereo PCM16 AIFF at 44100 Hz; player support for original audio parameters remains unverified".into(),
-            "Rekordbox 7.2.3 displayed grids, cues and 3Band deck overviews in a two-AIFF diagnostic; full export and player acceptance remain unverified; use a separate FAT32 test USB".into(),
+            "Previous Rau diagnostic acceptance does not validate this new engine; full export and player acceptance remain unverified".into(),
             "Classic browse category/sort defaults are generated independently; player acceptance is pending".into()],
     };
     write_new(

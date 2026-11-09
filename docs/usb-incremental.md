@@ -1,8 +1,14 @@
 # Incremental USB updates
 
+November 9, 2026: schema 8 integrates `rekordbox-usb`. On macOS/Linux, analysis
+from the previous renderer is regenerated from USB audio at fresh paths; later
+unchanged updates reuse it. Both catalogs retain generated cue rows. See the
+[engine integration](rekordbox-usb-engine.md) for platform and acceptance details.
+
 Implemented October 24, 2026 on `feature/usb-export`. Compilation and frontend
-packaging have been checked; this update path has not yet been exercised on a
-real USB or player. No USB was accessed or changed during this implementation.
+packaging are the acceptance checks for this pipeline revision; no export was
+run by the agent. MIKI TEST was inspected read-only during diagnosis. Runtime
+validation of the new overlapping queues on a test USB/player remains pending.
 
 ## Selection and preservation
 
@@ -17,7 +23,10 @@ Ambiguous matches are left separate rather than guessed.
 - Unselected and USB-only playlists remain on the device. Deselecting does not
   remove a playlist. Existing tracks also remain, even if no longer referenced.
 - Tracks shared across selected playlists within a catalog library are prepared
-  once. Distinct catalog identities are not deduplicated by content.
+  once. Existing USB tracks also match an unambiguous original file path across
+  catalog libraries, with the usual source fingerprint/hash check before reuse.
+  Source aliases are retained so later updates keep that identity. Ambiguous
+  originals and unrelated files are not merged by title or filename.
 - Existing track/playlist IDs and the device library identity remain stable.
 - Unchanged audio and analysis keep their paths and bytes. Changed audio gets
   a new filename; old audio is retained. A changed grid/cue set can receive new
@@ -30,15 +39,17 @@ Ambiguous matches are left separate rather than guessed.
   block the update instead of choosing one silently.
 
 This is an additive update. It does not delete old media or provide a mirror,
-purge, full conflict-resolution editor or cross-catalog deduplication.
+purge, full conflict-resolution editor or global content deduplication.
 
 ## Compatibility boundary
 
-Updates require a completed Rau export with a readable schema 5–7 receipt,
+Updates require a completed Rau export with a readable schema 5–8 receipt,
 both databases, matching track identities/paths and valid media/analysis. Foreign
 libraries can be displayed but are not rewritten. Exports with changed/unknown
 track sets, unresolved playlist conflicts or nonempty unsupported history,
-artwork, My Tags, cue-index/bank and recommendation tables are view-only.
+artwork, My Tags, cue-bank and recommendation tables are view-only. Schema 8
+supports generated OneLibrary cue rows and preserves consistent cue edits.
+Legacy reports with unexpected SQL cue rows remain view-only.
 The exporter does not promise preservation of every vendor-specific column.
 
 Legacy receipts lack source hashes/signatures or stable playlist bindings.
@@ -48,7 +59,7 @@ one new conversion/export; subsequent unchanged updates reuse it.
 
 The receipt is part of the export and should be retained. Schema 7 adds stable
 playlist bindings, source/device fingerprints and last-observed source metadata
-and preparation for subsequent merges. Moving to another machine or remounting
+and preparation for subsequent merges, plus optional source aliases. Moving to another machine or remounting
 can invalidate fast filesystem signatures; hashes then establish identity again.
 
 ## Analysis reuse
@@ -82,30 +93,67 @@ changed audio on the USB is rejected. Metadata revisions and prepared media
 signatures are checked again before publication. This detects normal concurrent
 changes; it is not an exclusive volume lock against other applications.
 
+The metadata revision uses the canonical destination path, mounted device ID
+on Unix, and hashes of the two databases, receipt and device settings. It does
+not use the root directory's inode: MIKI TEST returned different synthetic root
+inodes across read-only observations while all four metadata hashes remained
+identical. A root identifier change alone must not invalidate the review.
+
 ## Concurrency and terminal
 
-Choose **Temas en paralelo**: 1, 2 (default), or 4. The core limits workers to four
-and FFmpeg audio processing to one thread per worker. Each worker prepares a
-separate track; a coordinator serializes progress messages. An error stops new
-work and waits for already-running workers before failing.
+**Temas en paralelo** defaults to **Automático**, using Rust's available CPU
+parallelism (the schedulable logical cores reported by the operating system).
+Manual selection ranges from one to that count. The effective processing pool
+also cannot exceed the number of tracks needing work. FFmpeg codec and filter
+processing are each limited to one thread per worker.
 
-Both databases are generated/validated and published serially after all track
-work succeeds. The terminal reports source/destination paths, copy/conversion,
-reuse, analysis, cache hits/stores/warnings, per-track completion, media additions,
-database generation/publication and failures. The current job retains the latest
-1,000 entries across navigation; logs are not persisted across app restarts.
+CPU workers prepare changed/new audio and ANLZ in a local temporary directory.
+A single dedicated USB writer starts copying as soon as a track is ready while
+other tracks continue processing. A bounded queue allows two prepared tracks
+to wait behind the active copy; workers also hold at most their current result.
+Backpressure prevents preparing the whole library ahead of a slow USB.
+
+Unchanged tracks bypass both queues. The processing panel counts only tracks
+that need audio or analysis work and separately shows unchanged/reused tracks.
+It displays the actual pool size and active tracks. The copy panel has its own
+file counter, confirmed byte count, per-file copy/read-back progress and queued
+track count. Its current track/phase remains independent of CPU activity. The
+total byte count is shown only after all output sizes are known.
+
+An error stops new processing/queue intake. In-flight threads are joined before
+returning failure; new media may remain unreferenced, while the old databases
+are retained. Both libraries are built and published serially only after both
+queues succeed. Fresh exports retain their incomplete marker until the same
+condition and final library publication succeed.
+
+The terminal distinguishes processing counters from copied-file counters. It
+reports paths, preparation/reuse, cache activity, flush/verification stages and
+completion time. Frequent byte updates refresh the panels without flooding logs.
+The current job retains 1,000 entries across navigation; logs are not persisted
+across app restarts. Transfer speed has not been benchmarked for this revision.
 
 ## Publication, backups and recovery
 
-Preparation happens in a temporary `.rau-stage-*` directory on the selected
-volume. Existing media/analysis are never replaced. New files are created
-exclusively, copied from staging, flushed and checked before publication. This
-requires temporary space for staged additions and additional IO for those files.
+Large media are prepared in a local `rau-usb-prepare-*` temporary directory,
+then copied once to their final USB paths by the writer. This removes the former
+second USB write from a USB staging folder to the final path. The source checksum
+is accumulated during copying; the flushed USB file is independently read back.
+Existing media/analysis are never replaced. Local temporary space is needed for
+in-flight workers, queued output and decoded waveforms.
+
+Only the small final database/report set uses `.rau-stage-*` on the destination,
+so its publication renames and backups remain on the same filesystem. The old
+databases continue referencing the old media until every new copy is verified.
 
 The previous `export.pdb`, `exportLibrary.db` and `rau-export-report.json` are kept
 under `.rau-backups/<timestamp-random>/`. A flushed `.rau-update-journal.json`
 records their hashes before moving the metadata. Existing `DEVSETTING.DAT` is
 retained. A normal publication error attempts restoration automatically.
+During an update, the previous JSON receipt remains present until the final
+metadata publication. The fresh-export incomplete marker is not used for
+updates, so its absence does not establish that an update has finished.
+Temporary cleanup is an explicit final phase; a cleanup error after successful
+publication is reported as a warning while retaining the completed library.
 
 An interrupted journal blocks further updates. **Restaurar biblioteca anterior**
 verifies all available originals/backups before restoring them. This action is

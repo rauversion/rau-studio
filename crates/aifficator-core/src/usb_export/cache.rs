@@ -1,7 +1,7 @@
 //! Persistent ANLZ cache, keyed by actual exported audio bytes, preparation,
 //! audio path and renderer version. No decoded PCM or source audio is stored.
 use super::*;
-const VERSION: &str = "rau-usb-anlz-pcm44100-v1";
+const VERSION: &str = super::engine::RENDERER;
 #[derive(Serialize, Deserialize)]
 struct Entry {
     version: String,
@@ -51,10 +51,19 @@ pub(super) fn prepare(
         "analysis",
         "Decodificando audio y generando waveforms, grilla y cues",
     );
-    let prepared = media::analyze(audio_path, ffmpeg, ffprobe)?;
-    let bundle = anlz::encode(track, &prepared.wave_path, &prepared.wave_info)?;
+    #[cfg(unix)]
+    let (audio, bundle) = {
+        let _ = ffprobe;
+        super::engine::analyze(track, audio_path, ffmpeg)?
+    };
+    #[cfg(not(unix))]
+    let (audio, bundle) = {
+        let prepared = media::analyze(audio_path, ffmpeg, ffprobe)?;
+        let bundle = anlz::encode(track, &prepared.wave_path, &prepared.wave_info)?;
+        (prepared.audio, bundle)
+    };
     if let Some(location) = &location {
-        if store(location, &hash, &prepared.audio, &bundle).is_err() {
+        if store(location, &hash, &audio, &bundle).is_err() {
             notify(
                 "cache_error",
                 "No se pudo guardar la caché local; la exportación continúa",
@@ -66,7 +75,7 @@ pub(super) fn prepare(
             );
         }
     }
-    Ok((prepared.audio, bundle))
+    Ok((audio, bundle))
 }
 
 fn read(
@@ -84,6 +93,7 @@ fn read(
     }
     let mut entry: Entry = serde_json::from_slice(&fs::read(manifest)?)?;
     if entry.version != VERSION
+        || entry.summary.renderer != VERSION
         || entry.audio_hash != hash
         || entry.hashes.len() != 3
         || u64::from(entry.audio.size_bytes) != fs::metadata(audio_path)?.len()
@@ -105,10 +115,12 @@ fn read(
         }
         payloads.push(bytes);
     }
+    #[cfg(unix)]
+    super::engine::validate_cues(&payloads[0], &payloads[1], &entry.summary.plus_cues)?;
     entry.summary.dat_path = anlz::path_for_track(track)?;
     entry.summary.ext_path = entry.summary.dat_path.replace(".DAT", ".EXT");
     entry.summary.three_band_path = entry.summary.dat_path.replace(".DAT", ".2EX");
-    entry.summary.warnings = anlz::warnings(track);
+    entry.summary.warnings = super::engine::warnings(track);
     Ok(Some((
         entry.audio,
         anlz::AnalysisBundle {

@@ -1,5 +1,12 @@
 # USB export prototype
 
+The November 9, 2026 integration replaces the production PDB writer and the
+macOS/Linux analysis renderer with `rekordbox-usb`. OneLibrary now includes its
+generated cue rows. Rau keeps conversion, bundled SQLCipher, caching, transfer
+and recovery. See [engine integration and platform boundaries](rekordbox-usb-engine.md)
+for receipt schema 8, legacy migration and pending hardware acceptance. Historical
+diagnostic results below apply to the earlier implementation.
+
 Updated: October 24, 2026. Branch: `feature/usb-export`.
 
 The target is independent USB export for both classic DeviceSQL players and
@@ -67,7 +74,7 @@ remain pending.
   and retain an incomplete marker on failure. Compatible Rau exports support
   additive updates with stable IDs, existing-playlist selection, staged preparation,
   metadata backups and journal-based restoration. See [incremental USB updates](usb-incremental.md).
-- Bounded preparation concurrency (1, 2 or 4 tracks; default 2), detailed terminal
+- Preparation concurrency based on available CPU cores, a dedicated USB writer with a bounded queue, detailed terminal
   logs, reuse of unchanged USB media/analysis, and a persistent local ANLZ cache.
 - A reproducible two-track demo with generated quiet tones and a playlist ordered
   `1 / 2 / 1`, known timing markers, and a JSON report with audio/analysis hashes.
@@ -168,6 +175,13 @@ This initial detector has not yet been evaluated on music or hardware.
 timeline without codec-delay correction. Alignment of converted MP3/AAC and
 other compressed sources still needs verification against source playback.
 
+Grid segments end exclusively at the next anchor's serialized millisecond.
+If an extrapolated beat just before an anchor rounds to the same millisecond,
+the incoming anchor supplies the beat, BPM and bar position. Multiple anchors
+in that same millisecond similarly resolve to the last anchor. This prevents
+rounding collisions from aborting export without changing the source grid or
+shifting beats forward. Track preparation errors include the affected title.
+
 Copied MP3/AIFF files retain their original parameters. The current reader accepts
 mono/stereo MP3 and 16/24-bit PCM AIFF; unsupported codecs or mismatched extensions
 stop the export rather than silently changing a copied source. Acceptance of
@@ -211,7 +225,8 @@ See [update boundaries and failure behavior](usb-incremental.md).
    beside it. `PIONEER` and `Contents` will be created directly in that folder;
    there is no enclosing export folder or manual move afterward. Existing USB
    playlists appear automatically; matching Rau playlists are preselected. Select
-   1, 2 or 4 parallel preparation tasks (default 2).
+   automatic preparation concurrency (available CPU cores), or choose a manual
+   count. A separate USB writer copies prepared tracks concurrently.
 4. Review unique catalog-track count, source size, estimated output size,
    counts of tracks copied unchanged or converted to AIFF,
    imported-cue count, missing-grid count, and notices. The audio estimate excludes

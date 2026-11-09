@@ -39,12 +39,18 @@ type ExportPreview = {
   updating: boolean;
   sync_counts: { new_tracks: number; reused_tracks: number; updated_tracks: number; analysis_tracks: number; preserved_playlists: number } | null;
   workers: number;
+  upload_workers: number;
 };
 
 type ExportJob = {
   id: string;
   status: "running" | "completed" | "failed";
-  progress: { stage: "audio" | "analysis" | "library"; completed_tracks: number; total_tracks: number; current_track: string | null };
+  progress: {
+    stage: "audio" | "analysis" | "library"; completed_tracks: number; total_tracks: number; current_track: string | null;
+    action?: string | null; detail?: string | null;
+    preparation?: { completed_tracks: number; total_tracks: number; reused_tracks: number; workers: number; active_tracks: string[] } | null;
+    publication?: { completed_files: number; total_files: number; completed_bytes: number; total_bytes: number; current_file_bytes: number; current_file_processed_bytes: number; total_bytes_known: boolean; current_track: string | null; current_file: string | null; phase: string; queued_tracks: number } | null;
+  };
   preview: ExportPreview;
   output_path: string;
   report_path: string | null;
@@ -76,7 +82,8 @@ export function UsbExportPage() {
   const [destinationPath, setDestinationPath] = useState("");
   const [destinationInfo, setDestinationInfo] = useState<DestinationInfo | null>(null);
   const [inspecting, setInspecting] = useState(false);
-  const [workers, setWorkers] = useState(2);
+  const [workers, setWorkers] = useState(0);
+  const [availableCores, setAvailableCores] = useState(Math.max(1, navigator.hardwareConcurrency || 1));
   const [terminalLogs, setTerminalLogs] = useState<TerminalLogEntry[]>([]);
   const [terminalExpanded, setTerminalExpanded] = useState(false);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -104,7 +111,24 @@ export function UsbExportPage() {
   const selectable = visible.filter((p) => p.track_count > 0 || destinationInfo?.existing);
   const allVisibleSelected = selectable.length > 0 && selectable.every((p) => selected.has(p.id));
   const summary = running && job ? job.preview : preview;
-  const percent = job ? (job.status === "completed" ? 100 : Math.min(99, Math.floor(job.progress.completed_tracks / Math.max(1, job.progress.total_tracks) * 100))) : 0;
+  const preparation = job?.progress.preparation;
+  const publication = job?.progress.publication;
+  const publicationAction = publication?.phase ?? job?.progress.action ?? "";
+  const verifyingFile = publicationAction === "verify_media" || publicationAction === "verify_bytes";
+  const currentFileFraction = publication && publication.current_file_bytes > 0
+    ? Math.min(1, publication.current_file_processed_bytes / publication.current_file_bytes) : 0;
+  const currentPublicationFraction = verifyingFile ? 0.5 + currentFileFraction / 2
+    : publicationAction === "sync_media" ? 0.5 : currentFileFraction / 2;
+  const preparationPercent = preparation ? preparation.total_tracks === 0 ? 100
+    : Math.floor(preparation.completed_tracks / preparation.total_tracks * 100) : 0;
+  const publicationPercent = publication ? publication.total_files === 0 ? 100
+    : Math.min(100, Math.floor((publication.completed_files + currentPublicationFraction) / publication.total_files * 100)) : 0;
+  const stillPreparing = preparation ? preparation.completed_tracks < preparation.total_tracks : job?.progress.stage !== "library";
+  const stillCopying = publication ? publication.completed_files < publication.total_files : false;
+  const progressLabel = stillPreparing && stillCopying ? "Procesando y copiando al pendrive…"
+    : stillPreparing ? "Preparando audio y análisis…"
+    : stillCopying ? "Copiando y verificando el pendrive…"
+    : job?.progress.action === "cleanup" ? "Limpiando archivos temporales…" : "Guardando bibliotecas e informe…";
   const actionDisabled = locked || selected.size === 0 || !destinationPath || !destinationInfo?.can_update || preview?.track_count === 0;
   const actionLabel = running ? "Exportación en curso…" : preparing ? "Revisando archivos y análisis…"
     : preview?.track_count === 0 ? "No hay temas disponibles" : preview?.updating ? "Actualizar pendrive" : preview ? "Preparar exportación" : "Revisar y continuar";
@@ -220,6 +244,9 @@ export function UsbExportPage() {
   useEffect(() => {
     mounted.current = true;
     void loadOptions();
+    void invoke<{ available_cores: number; default_workers: number; upload_workers: number }>("usb_export_configuration")
+      .then((configuration) => { if (mounted.current) setAvailableCores(Math.max(1, configuration.available_cores)); })
+      .catch((cause) => { if (mounted.current) appendLog("warning", String(cause)); });
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
@@ -263,7 +290,7 @@ export function UsbExportPage() {
     try {
       // The backend holds this exact snapshot until export starts.
       appendLog("info", t("Revisando archivos, análisis y contenido existente del USB…"));
-      const result = await invoke<ExportPreview>("usb_export_prepare", { playlistIds: [...selected], destinationPath, workers });
+      const result = await invoke<ExportPreview>("usb_export_prepare", { playlistIds: [...selected], destinationPath, workers: workers === 0 ? null : workers });
       if (mounted.current) {
         setPreview(result); setDestinationPath(result.destination_path); setUnavailableOpen(result.unavailable_tracks.length > 0);
         appendLog("info", t("Revisión lista: {tracks} pistas, {workers} temas en paralelo.", { tracks: result.track_count, workers: result.workers }));
@@ -347,7 +374,7 @@ export function UsbExportPage() {
       </header>
 
       <div className="mb-4 rounded-lg border border-border bg-muted/40 p-3 text-xs leading-relaxed text-muted-foreground">
-        {t("Genera Device Library y OneLibrary directamente desde Rau. Prueba funcional en XDJ-1000MK2; la validación en equipos OneLibrary está pendiente.")}
+        {t("Genera Device Library y OneLibrary directamente desde Rau. La validación del nuevo motor en reproductores está pendiente.")}
       </div>
       {error && <div role="alert" className="mb-4 break-words rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300">{translateBackendMessage(locale, error)}</div>}
       {statusError && <div role="alert" className="mb-4 rounded-lg border border-amber-500/30 p-3 text-sm">{t("No se pudo consultar el progreso. Reintentando la conexión…")}</div>}
@@ -358,16 +385,32 @@ export function UsbExportPage() {
             <div className="flex min-w-0 items-center gap-3">
               {job.status === "running" ? <LoaderCircle className="h-5 w-5 shrink-0 animate-spin" /> : job.status === "completed" ? <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" /> : <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600" />}
               <div className="min-w-0" role="status" aria-live="polite">
-                <h2 className="text-sm font-semibold">{t(job.status === "completed" ? "Exportación completada" : job.status === "failed" ? "Exportación interrumpida" : job.progress.stage === "analysis" ? "Preparando waveforms y cues" : job.progress.stage === "library" ? "Guardando playlists e informe" : "Preparando audio")}</h2>
-                <p className="mt-1 truncate text-xs text-muted-foreground">{job.progress.current_track && job.status !== "completed" ? job.progress.current_track : t("{count} playlists · {tracks} temas únicos", { count: job.preview.playlist_names.length, tracks: job.preview.track_count })}</p>
+                <h2 className="text-sm font-semibold">{t(job.status === "completed" ? "Exportación completada" : job.status === "failed" ? "Exportación interrumpida" : progressLabel)}</h2>
+                <p className="mt-1 truncate text-xs text-muted-foreground">{job.progress.current_track && job.status === "failed" ? job.progress.current_track : t("{count} playlists · {tracks} temas únicos", { count: job.preview.playlist_names.length, tracks: job.preview.track_count })}</p>
               </div>
             </div>
             <Button variant="secondary" size="sm" onClick={() => void reveal(job.output_path)}><FolderOpen className="h-4 w-4" />{t("Mostrar carpeta")}</Button>
           </div>
-          {job.status === "running" && <>
-            <progress className="h-2 w-full accent-primary" max={100} value={percent} aria-label={t("Progreso de exportación")} />
-            <p className="text-xs text-muted-foreground">{t("{done} de {total} temas preparados", { done: job.progress.completed_tracks, total: job.progress.total_tracks })} · {t("Puedes cambiar de vista y volver mientras la app siga abierta.")}</p>
-          </>}
+          {(job.status === "running" || preparation) && <div className="grid gap-3 sm:grid-cols-2">
+            <section className="space-y-2 rounded-md border border-border p-3" aria-label={t("Procesamiento")}>
+              <div className="flex justify-between gap-2 text-xs font-medium"><span>{t("Procesamiento")}</span><span>{t("{count} hilos", { count: preparation?.workers ?? job.preview.workers })}</span></div>
+              <progress className="h-2 w-full accent-primary" max={100} value={preparationPercent} aria-label={t("Progreso de procesamiento")} />
+              <p className="text-xs">{t("{done} de {total} temas preparados", { done: preparation?.completed_tracks ?? 0, total: preparation?.total_tracks ?? job.preview.copied_tracks + job.preview.converted_tracks })}</p>
+              <p className="text-xs text-muted-foreground">{t("{count} pistas sin cambios: no se procesan ni se copian.", { count: preparation?.reused_tracks ?? 0 })}</p>
+              {preparation && preparation.active_tracks.length > 0 && <p className="truncate text-xs text-muted-foreground" title={preparation.active_tracks.join(" · ")}>{preparation.active_tracks.slice(0, 3).join(" · ")}</p>}
+            </section>
+            <section className="space-y-2 rounded-md border border-border p-3" aria-label={t("Copia al pendrive")}>
+              <div className="flex justify-between gap-2 text-xs font-medium"><span>{t("Copia al pendrive")}</span><span>{t("1 hilo dedicado")}</span></div>
+              <progress className="h-2 w-full accent-primary" max={100} value={publicationPercent} aria-label={t("Progreso de copia al pendrive")} />
+              <p className="text-xs">{t("{done} de {total} archivos publicados", { done: publication?.completed_files ?? 0, total: publication?.total_files ?? (job.preview.copied_tracks + job.preview.converted_tracks) * 4 + (job.preview.sync_counts?.analysis_tracks ?? 0) * 3 })}</p>
+              {publication && <p className="text-xs text-muted-foreground">{publication.total_bytes_known ? formatBytes(publication.completed_bytes) + " / " + formatBytes(publication.total_bytes) : t("{size} publicados", { size: formatBytes(publication.completed_bytes) })}</p>}
+              {publication?.current_track && <p className="truncate text-xs font-medium">{publication.current_track}</p>}
+              {publication && publication.current_file_bytes > 0 ? <p className="text-xs text-muted-foreground">{t(verifyingFile ? "Verificando archivo: {done} de {total}" : publicationAction === "sync_media" ? "Confirmando escritura: {total}" : "Copiando archivo: {done} de {total}", { done: formatBytes(publication.current_file_processed_bytes), total: formatBytes(publication.current_file_bytes) })}</p>
+                : job.status === "running" && stillPreparing && <p className="text-xs text-muted-foreground">{t("Esperando pistas preparadas…")}</p>}
+              {job.status === "running" && publication && publication.queued_tracks > 0 && <p className="text-xs text-muted-foreground">{t("{count} pistas listas o en copia", { count: publication.queued_tracks })}</p>}
+            </section>
+          </div>}
+          {job.status === "running" && <p className="text-xs text-muted-foreground">{t("El procesamiento y la copia avanzan de forma independiente. Las bibliotecas se guardan al terminar ambas colas.")}</p>}
           <p className="break-all font-mono text-xs text-muted-foreground">{job.output_path}</p>
           {job.status === "completed" && <div className="space-y-2 text-sm">
             <p>{t("PIONEER y Contents quedaron en el destino elegido. Si exportaste al pendrive, ya puedes expulsarlo y probarlo en el equipo.")}</p>
@@ -453,8 +496,10 @@ export function UsbExportPage() {
                 {destinationInfo.recovery_available && <Button size="sm" disabled={locked} onClick={() => void recoverDestination()}>{t("Restaurar biblioteca anterior")}</Button>}
               </div>}
               <label className="block text-xs font-medium">{t("Temas en paralelo")}<select className="mt-2 h-9 w-full rounded-md border border-input bg-background px-3 text-sm" value={workers} disabled={locked} onChange={(event) => { setWorkers(Number(event.target.value)); setPreview(null); setAcceptedOmissions(null); }}>
-                {[1, 2, 4].map((value) => <option key={value} value={value}>{value}{value === 2 ? ` · ${t("Recomendado")}` : ""}</option>)}
+                <option value={0}>{t("Automático ({count} núcleos)", { count: availableCores })}</option>
+                {Array.from({ length: availableCores }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value}</option>)}
               </select></label>
+              <p className="text-xs text-muted-foreground">{t("Procesamiento según los núcleos disponibles y 1 hilo independiente para copiar al pendrive. Solo se copian archivos nuevos o modificados.")}</p>
               {destinationPath && <pre className="whitespace-pre-wrap break-all rounded-md bg-muted p-2 font-mono text-xs">{`${destinationPath}\n├── PIONEER/\n└── Contents/`}</pre>}
               <p className="text-xs text-muted-foreground">{t("Los temas se organizan en Contents por artista y conservan su nombre. Los nombres repetidos reciben un sufijo; sin artista, se usa «Artista desconocido».")}</p>
               <p className="text-xs text-muted-foreground">{t("MP3 y AIFF se copian sin cambios. FLAC, WAV y los demás formatos se convierten a AIFF estéreo de 16 bits y 44,1 kHz.")}</p>

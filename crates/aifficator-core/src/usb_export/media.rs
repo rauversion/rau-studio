@@ -1,9 +1,15 @@
-use super::{invalid, read_pcm_wave, AudioFormat, AudioInfo, ExportTrack, Result};
+use super::{invalid, AudioFormat, ExportTrack, Result};
+#[cfg(not(unix))]
+use super::{read_pcm_wave, AudioInfo};
+#[cfg(not(unix))]
 use serde::Deserialize;
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(unix))]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+#[cfg(not(unix))]
 pub(super) struct PreparedAudio {
     pub audio: AudioInfo,
     pub wave_info: AudioInfo,
@@ -25,6 +31,10 @@ fn transcode(source: &Path, target: &Path, ffmpeg: &Path, format: AudioFormat) -
             "-hide_banner",
             "-loglevel",
             "error",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
             "-xerror",
             "-threads",
             "1",
@@ -90,15 +100,18 @@ pub(super) fn export(track: &ExportTrack, target: &Path, ffmpeg: &Path) -> Resul
 }
 
 #[derive(Deserialize)]
+#[cfg(not(unix))]
 struct Probe {
     streams: Vec<Stream>,
     format: Container,
 }
 #[derive(Deserialize)]
+#[cfg(not(unix))]
 struct Container {
     format_name: String,
 }
 #[derive(Deserialize)]
+#[cfg(not(unix))]
 struct Stream {
     codec_name: String,
     sample_rate: String,
@@ -107,6 +120,7 @@ struct Stream {
     bit_rate: Option<String>,
 }
 
+#[cfg(not(unix))]
 pub(super) fn analyze(path: &Path, ffmpeg: &Path, ffprobe: &Path) -> Result<PreparedAudio> {
     let size_bytes = u32::try_from(path.metadata()?.len())
         .map_err(|_| invalid("audio file exceeds the device's 4 GiB size limit"))?;

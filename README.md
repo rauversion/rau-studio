@@ -16,6 +16,7 @@ Rau Studio uses Tauri 2, Rust, React, TypeScript, SQLite, OpenAI-compatible AI f
 - [Metadata Enrichment](docs/enrichment.md): fill metadata gaps through capability-aware providers, encrypted credentials, durable observations, and field-level resolution.
 - [Musical preparation](docs/music-analysis.md): analyze local audio for BPM, a constant-tempo 4/4 grid and key; listen, correct the grid and explicitly save preparation for both USB libraries. Initial detector accuracy and player alignment remain pending.
 - [P2P Sharing Foundation](docs/p2p-sharing.md): encrypted device identity, authenticated Iroh connectivity, peer presence, and read-only shared-folder catalogs for Rau Connect.
+- [Soulseek](docs/soulseek.md): local `soulseek-rs` packages, saved searches, complete-folder downloads, an in-memory queue and verified partial restoration in Sharing.
 - [Broadcast](docs/radio-broadcast.md): run an immediate queue or a persisted daily music schedule, fill idle gaps with a ducked looping music bed, mix local inputs, and publish either a persistent Icecast MP3 stream or a vertical RTMP video signal for Instagram Live.
 - [Import Rau Studio XML into Rekordbox](docs/rekordbox-import/README.md): visual guide for importing exported XML back into Rekordbox.
 - [USB export prototype](docs/usb-export.md): select playlists under **Playlists → Exportar a USB**, review the selection and export directly to the chosen folder or USB root with background progress. Groups files by artist and keeps their names: MP3/AIFF are copied unchanged; other formats become AIFF. Rau generates classic Device Library and encrypted OneLibrary, checks their consistency, and includes DAT/EXT/2EX waveforms, imported XML grids/cues and RGB USB display preferences. Compatible Rau exports support [incremental updates](docs/usb-incremental.md), preselected existing playlists, unchanged-analysis reuse, a local ANLZ cache, controlled concurrency and terminal details. OneLibrary hardware acceptance is pending.
@@ -49,6 +50,8 @@ Rau Studio uses Tauri 2, Rust, React, TypeScript, SQLite, OpenAI-compatible AI f
 
 - Stable Rust.
 - Node.js and npm.
+- Read access over SSH to the private `rauversion/soulseek-rs` repository; see [package sources and CI](docs/soulseek.md#package-sources-and-ci).
+- Rust 1.87+ and read access over SSH to the private `rauversion/rekordbox-usb-rs` repository; see the [USB engine integration](docs/rekordbox-usb-engine.md).
 
 The macOS application supports Monterey 12.3 or newer on both Apple Silicon and
 Intel. Mac system/application audio capture remains available on Ventura 13 or

@@ -30,6 +30,7 @@ mod p2p;
 mod playlist_copilot;
 mod playlist_index;
 mod settings;
+mod soulseek;
 mod system;
 mod turn;
 mod usb_export;
@@ -1461,10 +1462,29 @@ pub fn run() {
         .manage(broadcast::BroadcastManager::default())
         .manage(playlist_index::duplicates::DuplicateManager::default())
         .manage(usb_export::UsbExportManager::default())
+        .manage(soulseek::SoulseekState::default())
+        .setup(|app| soulseek::setup(app.handle()))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
+            soulseek::soulseek_profile,
+            soulseek::preferences::soulseek_download_settings,
+            soulseek::preferences::soulseek_save_download_directory,
+            soulseek::soulseek_forget_credentials,
+            soulseek::soulseek_snapshot,
+            soulseek::soulseek_connect,
+            soulseek::soulseek_disconnect,
+            soulseek::soulseek_search,
+            soulseek::soulseek_stop_search,
+            soulseek::soulseek_delete_search,
+            soulseek::soulseek_search_results,
+            soulseek::soulseek_browse,
+            soulseek::soulseek_download_file,
+            soulseek::soulseek_download_browsed_file,
+            soulseek::soulseek_download_folder,
+            soulseek::soulseek_download_action,
             system_status,
+            usb_export::usb_export_configuration,
             usb_export::usb_export_prepare,
             usb_export::usb_export_start,
             usb_export::usb_export_status,
@@ -1633,6 +1653,13 @@ pub fn run() {
             turn::turn_retry_job,
             turn::turn_delete_job
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Rau Studio");
+        .build(tauri::generate_context!())
+        .expect("error while building Rau Studio")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if soulseek::request_exit(app, code.unwrap_or(0)) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }

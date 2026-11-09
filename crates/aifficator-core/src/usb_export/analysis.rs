@@ -30,7 +30,7 @@ pub struct CuePoint {
     pub start_ms: u32,
     pub end_ms: Option<u32>,
     pub name: String,
-    /// Retained for future palette support; currently reported as not exported.
+    /// Explicit RGB, exported by rekordbox-usb without guessing a palette index.
     pub rgb: Option<[u8; 3]>,
 }
 
@@ -135,6 +135,7 @@ pub fn from_xml(track: &Track) -> Result<TrackAnalysis> {
         });
     }
     analysis.cues.sort_by_key(|c| (c.hot_cue, c.start_ms));
+    #[cfg(not(unix))]
     if analysis.cues.iter().any(|cue| cue.rgb.is_some()) {
         analysis.warnings.push(
             "Cue RGB values are retained in the report; custom cue colors are not written yet"
@@ -201,6 +202,9 @@ pub fn validate(analysis: &TrackAnalysis) -> Result<()> {
 /// Expand each XML anchor independently. Absolute multiplication avoids drift
 /// from repeatedly rounding/adding an integer beat interval. Changes of tempo
 /// and bar position take effect at the next anchor, even between former beats.
+/// Segment ends are exclusive at the serialized millisecond precision: a beat
+/// that rounds to the next anchor belongs to that next anchor. If several
+/// anchors round to one millisecond, the last anchor takes precedence there.
 pub fn beats(analysis: &TrackAnalysis, audio: &AudioInfo) -> Result<Vec<Beat>> {
     validate(analysis)?;
     if audio.sample_rate == 0 || audio.frames == 0 {
@@ -226,6 +230,7 @@ pub fn beats(analysis: &TrackAnalysis, audio: &AudioInfo) -> Result<Vec<Beat>> {
             .tempos
             .get(index + 1)
             .map_or(duration, |a| a.seconds);
+        let until_ms = milliseconds(until)?.min(end_ms);
         let period = 60.0 / anchor.bpm;
         let count = ((until - anchor.seconds) / period).ceil() as usize;
         if count > 1_000_000 || result.len().saturating_add(count) > 1_000_000 {
@@ -237,8 +242,11 @@ pub fn beats(analysis: &TrackAnalysis, audio: &AudioInfo) -> Result<Vec<Beat>> {
                 break;
             }
             let time_ms = milliseconds(seconds)?;
-            if time_ms >= end_ms {
-                continue;
+            // Comparing seconds alone lets a beat just before `until` round
+            // to the same timestamp as the next anchor. Stop this segment at
+            // that boundary so the next anchor supplies BPM and bar position.
+            if time_ms >= until_ms {
+                break;
             }
             if result.last().is_some_and(|b| b.time_ms >= time_ms) {
                 return Err(invalid(

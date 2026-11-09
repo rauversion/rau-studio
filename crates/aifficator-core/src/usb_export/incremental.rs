@@ -152,6 +152,7 @@ pub struct Update {
     pub notices: Vec<String>,
     source_metadata: BTreeMap<u32, TrackMetadata>,
     source_preparation: BTreeMap<u32, analysis::TrackAnalysis>,
+    source_aliases: BTreeMap<u32, BTreeSet<String>>,
 }
 
 /// Refuse symlinks and traversal in device-owned paths, including parents.
@@ -185,12 +186,16 @@ fn bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 fn revision(root: &Path) -> Result<String> {
     let mut digest = Sha256::new();
+    digest.update(root.as_os_str().as_encoded_bytes());
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let m = fs::metadata(root)?;
         digest.update(m.dev().to_le_bytes());
-        digest.update(m.ino().to_le_bytes());
+        // Some removable filesystems assign a synthetic root inode that
+        // changes between lookups, even though the mounted device and all
+        // library bytes are unchanged. The canonical path, device and content
+        // hashes identify this snapshot without relying on that unstable ID.
     }
     for name in METADATA.into_iter().chain(["PIONEER/DEVSETTING.DAT"]) {
         let p = device_file(root, name)?;
@@ -297,7 +302,7 @@ pub fn load_existing(root: &Path) -> Result<Existing> {
     }
     let data = bounded(&device_file(&root, METADATA[2])?, 64 * 1024 * 1024)?;
     let mut report: ExportReport = serde_json::from_slice(&data)?;
-    if !(5..=7).contains(&report.schema_version)
+    if !(5..=8).contains(&report.schema_version)
         || report.tracks.is_empty()
         || report.tracks.len() > 10_000
     {
@@ -310,8 +315,10 @@ pub fn load_existing(root: &Path) -> Result<Existing> {
         128 * 1024 * 1024,
     )?)?;
     let plus = onelibrary::inspect(&device_file(&root, METADATA[1])?)?;
+    if report.schema_version < 8 && !plus.cues.is_empty() {
+        return Err(invalid("La biblioteca antigua contiene cues de OneLibrary que Rau no puede migrar sin perder datos. Solo se permite visualizarla."));
+    }
     if [
-        "cue",
         "history",
         "history_content",
         "hotCueBankList",
@@ -347,7 +354,13 @@ pub fn load_existing(root: &Path) -> Result<Existing> {
         if item.source_preparation.is_none() {
             item.source_preparation = Some(item.track.analysis.clone());
         }
-        if !seen.insert(item.track.source_key.clone()) {
+        if item.source_aliases.len() > 10_000
+            || !seen.insert(item.track.source_key.clone())
+            || item
+                .source_aliases
+                .iter()
+                .any(|alias| alias == &item.track.source_key || !seen.insert(alias.clone()))
+        {
             return Err(invalid("duplicate source identity in USB report"));
         }
         let c = classic
@@ -394,6 +407,22 @@ pub fn load_existing(root: &Path) -> Result<Existing> {
         item.track.year = p.year;
         item.track.track_number = p.track_number;
         item.track.comment = p.comment.clone();
+        let cues = plus.cues.get(&item.track.id).cloned().unwrap_or_default();
+        #[cfg(unix)]
+        if item.analysis.renderer == super::engine::RENDERER && cues != item.analysis.plus_cues {
+            super::engine::validate_cues(
+                &bounded(
+                    &device_file(&root, &item.analysis.dat_path)?,
+                    anlz::MAX_FILE_BYTES as u64,
+                )?,
+                &bounded(
+                    &device_file(&root, &item.analysis.ext_path)?,
+                    anlz::MAX_FILE_BYTES as u64,
+                )?,
+                &cues,
+            )?;
+        }
+        item.analysis.plus_cues = cues;
     }
     let classic_playlists = classic
         .playlists
@@ -549,6 +578,20 @@ fn hydrate(old: &mut Existing) -> Result<()> {
                 item.three_band_sha256.clone(),
             ]
         {
+            #[cfg(unix)]
+            if item.analysis.renderer == super::engine::RENDERER {
+                super::engine::validate_cues(
+                    &bounded(
+                        &device_file(&old.root, &item.analysis.dat_path)?,
+                        anlz::MAX_FILE_BYTES as u64,
+                    )?,
+                    &bounded(
+                        &device_file(&old.root, &item.analysis.ext_path)?,
+                        anlz::MAX_FILE_BYTES as u64,
+                    )?,
+                    &item.analysis.plus_cues,
+                )?;
+            }
             let dat = anlz::inspect(&bounded(
                 &device_file(&old.root, &item.analysis.dat_path)?,
                 anlz::MAX_FILE_BYTES as u64,
@@ -594,7 +637,9 @@ fn hydrate(old: &mut Existing) -> Result<()> {
             item.track.analysis.tempos = tempos;
             item.track.analysis.cues = cues;
             analysis::validate(&item.track.analysis)?;
-            item.analysis.beat_count = analysis::beats(&item.track.analysis, &item.audio)?.len();
+            item.analysis.beat_count = analysis::beats(&item.track.analysis, &item.audio)
+                .map_err(|error| invalid(format!("«{}»: {error}", item.track.title)))?
+                .len();
             item.analysis.hot_cues = item
                 .track
                 .analysis
@@ -650,16 +695,62 @@ pub fn prepare(
     let mut counts = SyncCounts::default();
     let mut source_metadata = BTreeMap::new();
     let mut source_preparation = BTreeMap::new();
+    let mut source_aliases: BTreeMap<_, BTreeSet<_>> = existing
+        .report
+        .tracks
+        .iter()
+        .map(|item| {
+            (
+                item.track.id,
+                item.source_aliases
+                    .iter()
+                    .cloned()
+                    .chain([item.track.source_key.clone()])
+                    .collect(),
+            )
+        })
+        .collect();
     for selected in incoming.tracks {
-        let previous = existing
+        let exact = existing
             .report
             .tracks
             .iter()
-            .find(|p| p.track.source_key == selected.source_key)
+            .find(|p| p.matches_source(&selected.source_key))
             .cloned();
+        // Different catalogs can refer to the same original file. Only use an
+        // unambiguous original-path match; the content check below still decides
+        // whether audio is reused or must be exported again.
+        let previous = exact.or_else(|| {
+            let selected_path = selected
+                .source_path
+                .canonicalize()
+                .unwrap_or_else(|_| selected.source_path.clone());
+            let mut candidates = existing.report.tracks.iter().filter(|item| {
+                item.track.source_path == selected.source_path
+                    || item
+                        .track
+                        .source_path
+                        .canonicalize()
+                        .is_ok_and(|path| path == selected_path)
+            });
+            let candidate = candidates.next().cloned();
+            if candidates.next().is_some() {
+                None
+            } else {
+                candidate
+            }
+        });
         let mut track = selected.clone();
         if let Some(previous) = previous {
             track.id = previous.track.id;
+            track.source_key = previous.track.source_key.clone();
+            source_aliases
+                .entry(track.id)
+                .or_default()
+                .insert(selected.source_key.clone());
+            if selected.source_key != previous.track.source_key {
+                notices.push(format!("«{}» corresponde al mismo archivo original de otra biblioteca; se reutiliza su identidad en el USB.", track.title));
+            }
             let usb_source = device_file(&existing.root, &previous.track.device_path)?;
             let from_usb = track.source_path == usb_source;
             let signature = if from_usb {
@@ -835,8 +926,35 @@ pub fn prepare(
         .iter()
         .filter(|p| !p.is_folder && !updated.contains(&p.id))
         .count();
+    // Old analysis must not masquerade as output of the new renderer. Prepare
+    // fresh companions from USB audio, at fresh paths, preserving rollback.
+    #[cfg(unix)]
+    for previous in &existing.report.tracks {
+        if previous.analysis.renderer != super::engine::RENDERER
+            && work.get(&previous.track.id) == Some(&Work::Reuse)
+        {
+            let track = tracks
+                .get_mut(&previous.track.id)
+                .ok_or_else(|| invalid("missing migration track"))?;
+            track.analysis_path = Some(format!(
+                "/PIONEER/USBANLZ/RAU/{:08X}{:08X}/ANLZ0000.DAT",
+                LibraryIdentity::new().master_database_id,
+                track.id
+            ));
+            work.insert(track.id, Work::Analyze);
+            counts.analysis_tracks += 1;
+        }
+    }
     counts.reused_tracks = work.values().filter(|w| **w != Work::Export).count();
-    let included: BTreeSet<_> = tracks.values().map(|t| t.source_key.clone()).collect();
+    let included: BTreeSet<_> = tracks
+        .values()
+        .map(|t| t.source_key.clone())
+        .chain(
+            source_aliases
+                .values()
+                .flat_map(|aliases| aliases.iter().cloned()),
+        )
+        .collect();
     let plan = ExportPlan {
         tracks: tracks.into_values().collect(),
         playlists,
@@ -857,6 +975,7 @@ pub fn prepare(
         notices,
         source_metadata,
         source_preparation,
+        source_aliases,
     })
 }
 
@@ -996,21 +1115,6 @@ fn rewrite_staged(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-// create_new prevents an unexpected file from being replaced between the
-// existence check and publication. Only additions are copied from staging.
-fn publish_new(source: &Path, target: &Path) -> Result<()> {
-    fs::create_dir_all(target.parent().unwrap())?;
-    let mut input = File::open(source)?;
-    let mut output = File::create_new(target)?;
-    std::io::copy(&mut input, &mut output)?;
-    output.sync_all()?;
-    if hash_file(source)? != hash_file(target)? {
-        return Err(invalid("published USB media differs from staging"));
-    }
-    fs::remove_file(source)?;
-    Ok(())
-}
-
 pub fn write(
     update: &Update,
     ffmpeg: &Path,
@@ -1029,12 +1133,10 @@ pub fn write(
         return Err(invalid("Hay una actualización interrumpida. Restaura la biblioteca anterior antes de continuar."));
     }
     verify_existing_media(&update.existing)?;
-    let staging = tempfile::Builder::new()
-        .prefix(".rau-stage-")
-        .tempdir_in(root)?;
-    let stage = staging.path();
-    fs::create_dir(stage.join("Contents"))?;
-    fs::create_dir_all(stage.join("PIONEER/rekordbox"))?;
+    let local = tempfile::Builder::new()
+        .prefix("rau-usb-prepare-")
+        .tempdir()?;
+    let stage = local.path();
     let old: BTreeMap<_, _> = update
         .existing
         .report
@@ -1042,9 +1144,65 @@ pub fn write(
         .iter()
         .map(|t| (t.track.id, t))
         .collect();
-    let records = super::parallel::prepare(
-        &update.plan.tracks,
+
+    let mut reused_records = BTreeMap::new();
+    let apply_source = |item: &mut ExportedTrack| {
+        if let Some(metadata) = update.source_metadata.get(&item.track.id) {
+            item.source_metadata = Some(metadata.clone());
+        }
+        if let Some(preparation) = update.source_preparation.get(&item.track.id) {
+            item.source_preparation = Some(preparation.clone());
+        }
+        if let Some(aliases) = update.source_aliases.get(&item.track.id) {
+            item.source_aliases = aliases
+                .iter()
+                .filter(|key| **key != item.track.source_key)
+                .cloned()
+                .collect();
+        }
+    };
+    for track in &update.plan.tracks {
+        if update.work[&track.id] == Work::Reuse {
+            let mut item = (*old
+                .get(&track.id)
+                .ok_or_else(|| invalid("cached USB track missing"))?)
+            .clone();
+            item.track = track.clone();
+            apply_source(&mut item);
+            reused_records.insert(track.id, item);
+            progress(ExportProgress::event(
+                ExportStage::Audio,
+                0,
+                0,
+                Some(track.title.clone()),
+                "reuse",
+                "Ya está en el pendrive; no se vuelve a procesar ni copiar",
+            ));
+        }
+    }
+    let pending: Vec<_> = update
+        .plan
+        .tracks
+        .iter()
+        .filter(|track| update.work[&track.id] != Work::Reuse)
+        .cloned()
+        .collect();
+    let files = pending
+        .iter()
+        .map(|track| {
+            if update.work[&track.id] == Work::Export {
+                4usize
+            } else {
+                3
+            }
+        })
+        .sum();
+    let prepared = super::parallel::run(
+        &pending,
         workers,
+        reused_records.len(),
+        files,
+        root,
         |track, notify| {
             let action = update.work.get(&track.id).copied().unwrap_or(Work::Export);
             let mut item = match action {
@@ -1055,15 +1213,7 @@ pub fn write(
                     );
                     super::prepare_track(track, stage, ffmpeg, ffprobe, cache, notify)
                 }
-                Work::Reuse => {
-                    notify("reuse", "Reutilizando audio y análisis del USB");
-                    let mut item = (*old
-                        .get(&track.id)
-                        .ok_or_else(|| invalid("cached USB track missing"))?)
-                    .clone();
-                    item.track = track.clone();
-                    Ok(item)
-                }
+                Work::Reuse => return Err(invalid("reused track entered the preparation queue")),
                 Work::Analyze => {
                     notify(
                         "analysis",
@@ -1074,7 +1224,7 @@ pub fn write(
                         .ok_or_else(|| invalid("cached USB track missing"))?)
                     .clone();
                     let source = device_file(root, &track.device_path)?;
-                    let (_, bundle) =
+                    let (audio, bundle) =
                         super::cache::prepare(track, &source, ffmpeg, ffprobe, cache, notify)?;
                     for (relative, bytes) in [
                         (&bundle.summary.dat_path, &bundle.dat),
@@ -1090,20 +1240,34 @@ pub fn write(
                     item.three_band_sha256 =
                         hash_file(&device_file(stage, &bundle.summary.three_band_path)?)?;
                     item.analysis = bundle.summary;
+                    item.audio = audio;
                     item.track = track.clone();
                     Ok(item)
                 }
             }?;
-            if let Some(metadata) = update.source_metadata.get(&track.id) {
-                item.source_metadata = Some(metadata.clone());
-            }
-            if let Some(preparation) = update.source_preparation.get(&track.id) {
-                item.source_preparation = Some(preparation.clone());
-            }
-            Ok(item)
+            apply_source(&mut item);
+            super::transfer::PreparedTrack::new(item, stage, root, action == Work::Export)
         },
         &mut progress,
     )?;
+    for item in prepared {
+        reused_records.insert(item.track.id, item);
+    }
+    let records = update
+        .plan
+        .tracks
+        .iter()
+        .map(|track| {
+            reused_records
+                .remove(&track.id)
+                .ok_or_else(|| invalid("USB pipeline result missing"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let staging = tempfile::Builder::new()
+        .prefix(".rau-stage-")
+        .tempdir_in(root)?;
+    let stage = staging.path();
+    fs::create_dir_all(stage.join("PIONEER/rekordbox"))?;
     progress(ExportProgress::event(
         ExportStage::Library,
         update.plan.tracks.len(),
@@ -1127,55 +1291,14 @@ pub fn write(
         report.device_settings_sha256 = hash_file(&stage.join("PIONEER/DEVSETTING.DAT"))?;
     }
     verify_existing_media(&update.existing)?;
-    for item in &report.tracks {
-        let action = update.work[&item.track.id];
-        let mut files = Vec::new();
-        if action == Work::Export {
-            files.push(item.track.device_path.as_str());
-        }
-        if action != Work::Reuse {
-            files.extend([
-                item.analysis.dat_path.as_str(),
-                &item.analysis.ext_path,
-                &item.analysis.three_band_path,
-            ]);
-        }
-        for relative in files {
-            let target = device_file(root, relative)?;
-            if target.exists() {
-                return Err(invalid(
-                    "USB update refuses to replace existing media or analysis",
-                ));
-            }
-            progress(ExportProgress::event(
-                ExportStage::Library,
-                update.plan.tracks.len(),
-                update.plan.tracks.len(),
-                Some(item.track.title.clone()),
-                "publish_media",
-                relative,
-            ));
-            publish_new(&device_file(stage, relative)?, &target)?;
-        }
-    }
-    // Signatures must describe the final files, including inode/ctime changes
-    // caused by publishing from staging, so the next update can skip hashing.
-    for item in &mut report.tracks {
-        item.device_signature = Some(FileSignature::read(&device_file(
-            root,
-            &item.track.device_path,
-        )?)?);
-        item.analysis_signatures = Some(
-            [
-                &item.analysis.dat_path,
-                &item.analysis.ext_path,
-                &item.analysis.three_band_path,
-            ]
-            .into_iter()
-            .map(|p| FileSignature::read(&device_file(root, p)?))
-            .collect::<Result<Vec<_>>>()?,
-        );
-    }
+    progress(ExportProgress::event(
+        ExportStage::Library,
+        update.plan.tracks.len(),
+        update.plan.tracks.len(),
+        None,
+        "publish",
+        "Todas las copias están verificadas; preparando las bibliotecas finales",
+    ));
     rewrite_staged(
         &stage.join(METADATA[2]),
         &serde_json::to_vec_pretty(&report)?,
@@ -1231,5 +1354,24 @@ pub fn write(
         };
     }
     fs::remove_file(journal_path)?;
+    progress(ExportProgress::event(
+        ExportStage::Library,
+        update.plan.tracks.len(),
+        update.plan.tracks.len(),
+        None,
+        "cleanup",
+        "Limpiando archivos temporales de la actualización",
+    ));
+    if let Err(error) = staging.close() {
+        progress(ExportProgress::event(ExportStage::Library, update.plan.tracks.len(), update.plan.tracks.len(), None, "cleanup_error", &format!("La biblioteca quedó publicada, pero no se pudo completar la limpieza temporal: {error}")));
+    }
+    progress(ExportProgress::event(
+        ExportStage::Library,
+        update.plan.tracks.len(),
+        update.plan.tracks.len(),
+        None,
+        "complete",
+        "Exportación completada; bibliotecas e informe guardados",
+    ));
     Ok(report)
 }

@@ -12,6 +12,10 @@ pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnalysisSummary {
+    #[serde(default)]
+    pub renderer: String,
+    #[serde(default)]
+    pub plus_cues: Vec<super::onelibrary::Cue>,
     pub dat_path: String,
     pub ext_path: String,
     pub three_band_path: String,
@@ -470,6 +474,8 @@ pub fn encode(track: &ExportTrack, path: &Path, info: &AudioInfo) -> Result<Anal
         ext,
         three_band,
         summary: AnalysisSummary {
+            renderer: "rau-legacy-v1".into(),
+            plus_cues: Vec::new(),
             dat_path,
             ext_path,
             three_band_path,

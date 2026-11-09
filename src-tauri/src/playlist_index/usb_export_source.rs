@@ -128,7 +128,7 @@ pub(crate) fn snapshot(
                 e.report
                     .tracks
                     .iter()
-                    .find(|t| t.track.source_key == key)
+                    .find(|t| t.matches_source(&key))
                     .map(|t| (e, t))
             }) {
                 let path = aifficator_core::usb_export::incremental::device_file(

@@ -1,7 +1,7 @@
 use crate::{playlist_index::usb_export_source, system};
 use aifficator_core::usb_export::{
-    check_source, incremental, write_destination_cached, ExportPlan, ExportProgress, ExportStage,
-    UnavailableTrack, UsbExportError,
+    available_export_workers, check_source, incremental, write_destination_cached, ExportPlan,
+    ExportProgress, ExportStage, PreparationProgress, UnavailableTrack, UsbExportError,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -49,6 +49,7 @@ pub(crate) struct ExportPreview {
     updating: bool,
     sync_counts: Option<incremental::SyncCounts>,
     workers: usize,
+    upload_workers: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -58,6 +59,23 @@ struct ExportLog {
     level: String,
     name: Option<String>,
     message: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ExportConfiguration {
+    available_cores: usize,
+    default_workers: usize,
+    upload_workers: usize,
+}
+
+#[tauri::command]
+pub(crate) fn usb_export_configuration() -> ExportConfiguration {
+    let cores = available_export_workers();
+    ExportConfiguration {
+        available_cores: cores,
+        default_workers: cores,
+        upload_workers: 1,
+    }
 }
 
 fn log(job: &mut ExportJob, level: &str, name: Option<String>, message: String) {
@@ -260,7 +278,9 @@ pub(crate) async fn usb_export_prepare(
                 message: message.clone(),
             }));
         }
-        let workers = workers.unwrap_or(2).clamp(1, 4);
+        let workers = workers
+            .unwrap_or_else(available_export_workers)
+            .clamp(1, available_export_workers());
         let summary = ExportPreview {
             plan_id: Uuid::new_v4().to_string(),
             destination_path: output.to_string_lossy().into_owned(),
@@ -323,6 +343,7 @@ pub(crate) async fn usb_export_prepare(
             updating: update.is_some(),
             sync_counts: update.as_ref().map(|u| u.counts.clone()),
             workers,
+            upload_workers: 1,
         };
         Ok::<_, String>(Prepared {
             plan,
@@ -500,6 +521,26 @@ pub(crate) async fn usb_export_start(
                 current_track: None,
                 action: Some("start".into()),
                 detail: None,
+                publication: None,
+                preparation: Some(PreparationProgress {
+                    completed_tracks: 0,
+                    total_tracks: prepared.summary.copied_tracks
+                        + prepared.summary.converted_tracks
+                        + prepared
+                            .summary
+                            .sync_counts
+                            .as_ref()
+                            .map_or(0, |counts| counts.analysis_tracks),
+                    reused_tracks: prepared.update.as_ref().map_or(0, |update| {
+                        update
+                            .work
+                            .values()
+                            .filter(|work| **work == incremental::Work::Reuse)
+                            .count()
+                    }),
+                    workers: prepared.summary.workers,
+                    active_tracks: Vec::new(),
+                }),
             },
             preview: prepared.summary.clone(),
             output_path: output.to_string_lossy().into_owned(),
@@ -509,7 +550,7 @@ pub(crate) async fn usb_export_start(
         };
         let mut job = job;
         let message = format!(
-            "{} · {} pistas · {} trabajadores",
+            "{} · {} pistas en biblioteca · {} trabajadores CPU · 1 escritor USB",
             output.display(),
             job.preview.track_count,
             job.preview.workers
@@ -527,22 +568,61 @@ pub(crate) async fn usb_export_start(
     tauri::async_runtime::spawn(async move {
         let progress_state = shared.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
-            let mut notify = |progress: ExportProgress| {
+            let mut notify = |mut progress: ExportProgress| {
                 if let Ok(mut state) = progress_state.lock() {
                     if let Some(job) = state.job.as_mut() {
-                        let message = format!(
-                            "{} · {}/{} · {}",
-                            progress.action.as_deref().unwrap_or("progress"),
-                            progress.completed_tracks,
-                            progress.total_tracks,
-                            progress.detail.as_deref().unwrap_or("")
-                        );
-                        let level = match progress.action.as_deref() {
-                            Some("error") => "error",
-                            Some("cache_error") => "warning",
-                            _ => "info",
-                        };
-                        log(job, level, progress.current_track.clone(), message);
+                        if progress.preparation.is_none() {
+                            progress.preparation = job.progress.preparation.clone();
+                        }
+                        if progress.publication.is_none() {
+                            progress.publication = job.progress.publication.clone();
+                        }
+                        if !matches!(
+                            progress.action.as_deref(),
+                            Some("publish_bytes" | "verify_bytes")
+                        ) {
+                            let count = match &progress.publication {
+                                Some(publication)
+                                    if matches!(
+                                        progress.action.as_deref(),
+                                        Some(
+                                            "publish_media"
+                                                | "publish_media_done"
+                                                | "publish_track_done"
+                                                | "sync_media"
+                                                | "verify_media"
+                                        )
+                                    ) =>
+                                {
+                                    format!(
+                                        "{}/{} archivos publicados",
+                                        publication.completed_files, publication.total_files
+                                    )
+                                }
+                                _ if progress.preparation.is_some() => {
+                                    let preparation = progress.preparation.as_ref().unwrap();
+                                    format!(
+                                        "{}/{} pistas preparadas",
+                                        preparation.completed_tracks, preparation.total_tracks
+                                    )
+                                }
+                                _ => format!(
+                                    "{}/{} pistas preparadas",
+                                    progress.completed_tracks, progress.total_tracks
+                                ),
+                            };
+                            let message = format!(
+                                "{} · {count} · {}",
+                                progress.action.as_deref().unwrap_or("progress"),
+                                progress.detail.as_deref().unwrap_or("")
+                            );
+                            let level = match progress.action.as_deref() {
+                                Some("error") => "error",
+                                Some("cache_error" | "cleanup_error") => "warning",
+                                _ => "info",
+                            };
+                            log(job, level, progress.current_track.clone(), message);
+                        }
                         job.progress = progress;
                     }
                 }
@@ -581,6 +661,18 @@ pub(crate) async fn usb_export_start(
                     Ok(report) => {
                         log(job, "info", None, "Exportación completada; ambas bibliotecas y el informe están guardados.".into());
                         job.status = JobStatus::Completed;
+                        let preparation = job.progress.preparation.clone();
+                        let publication = job.progress.publication.clone();
+                        job.progress = ExportProgress::event(
+                            ExportStage::Library,
+                            job.preview.track_count,
+                            job.preview.track_count,
+                            None,
+                            "complete",
+                            "Exportación completada",
+                        );
+                        job.progress.preparation = preparation;
+                        job.progress.publication = publication;
                         job.report_path = Some(
                             Path::new(&job.output_path)
                                 .join("rau-export-report.json")
