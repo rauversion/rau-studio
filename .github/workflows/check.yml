@@ -60,7 +60,7 @@ jobs:
         run: cargo +stable check --workspace --all-targets --locked
       - name: Test Rust workspace
         shell: bash
-        run: cargo +stable test --workspace --locked
+        run: cargo +stable test --workspace --locked --no-fail-fast
       - name: Build frontend
         shell: bash
         run: |

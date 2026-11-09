@@ -22,6 +22,9 @@ fn parses_tracks_and_playlists() {
     )
     .unwrap();
     let source_url = Url::from_file_path(&source_path).unwrap().to_string();
+    let missing_url = Url::from_file_path(temp_dir.path().join("missing-track.mp3"))
+        .unwrap()
+        .to_string();
 
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -29,7 +32,7 @@ fn parses_tracks_and_playlists() {
   <PRODUCT Name="rekordbox" Version="7.2.3" Company="AlphaTheta"/>
   <COLLECTION Entries="2">
     <TRACK TrackID="1" Name="Track One" Artist="Artist" Kind="FLAC File" Location="{source_url}"/>
-    <TRACK TrackID="2" Name="Missing" Artist="Artist" Kind="MP3 File" Location="file://localhost/tmp/missing-track.mp3"/>
+    <TRACK TrackID="2" Name="Missing" Artist="Artist" Kind="MP3 File" Location="{missing_url}"/>
   </COLLECTION>
   <PLAYLISTS>
     <NODE Type="0" Name="ROOT" Count="1">
@@ -118,8 +121,8 @@ fn ffmpeg_args_use_compatible_aiff_defaults() {
 
 #[test]
 fn export_replacement_xml_rewrites_track_location_and_preserves_children() {
-    let target_location = path_to_rekordbox_location(Path::new("/tmp/converted/Track One.aiff"))
-        .expect("valid file URL");
+    let target_path = std::env::temp_dir().join("converted").join("Track One.aiff");
+    let target_location = path_to_rekordbox_location(&target_path).expect("valid file URL");
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <DJ_PLAYLISTS Version="1.0.0">
   <COLLECTION Entries="1">
@@ -131,7 +134,7 @@ fn export_replacement_xml_rewrites_track_location_and_preserves_children() {
     let replacements = BTreeMap::from([(
         "1".to_string(),
         ExportTrackReplacement {
-            location: target_location,
+            location: target_location.clone(),
             kind: "AIFF File".to_string(),
             size: Some(1234),
             sample_rate: Some(44_100),
@@ -142,7 +145,9 @@ fn export_replacement_xml_rewrites_track_location_and_preserves_children() {
     let exported = export_replacement_xml(xml, &replacements).unwrap();
 
     assert!(exported.contains("Kind=\"AIFF File\""));
-    assert!(exported.contains("Location=\"file://localhost/tmp/converted/Track%20One.aiff\""));
+    assert!(exported.contains(&format!("Location=\"{target_location}\"")));
+    let parsed = parse_rekordbox_xml(&exported).expect("parse replaced location");
+    assert_eq!(parsed.tracks[0].file_path.as_ref(), Some(&target_path));
     assert!(exported.contains("<TEMPO Inizio=\"0.025\" Bpm=\"128.00\""));
 }
 
