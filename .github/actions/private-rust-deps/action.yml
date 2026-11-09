@@ -26,3 +26,8 @@ runs:
         ssh-private-key: |
           ${{ inputs.soulseek-key }}
           ${{ inputs.rekordbox-key }}
+    - name: Verify private dependency access
+      shell: bash
+      run: |
+        git ls-remote ssh://git@github.com/rauversion/soulseek-rs.git refs/heads/main > /dev/null
+        git ls-remote ssh://git@github.com/rauversion/rekordbox-usb-rs.git refs/heads/main > /dev/null
