@@ -352,7 +352,7 @@ pub(super) fn write_with_cues(
     }
     tx.commit()?;
     db.close().map_err(|(_, e)| e)?;
-    File::open(path)?.sync_all()?;
+    File::options().write(true).open(path)?.sync_all()?;
     let reread = inspect(path)?;
     compare(plan, audio, identity, &reread)?;
     let expected: BTreeMap<_, _> = cues

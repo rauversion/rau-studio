@@ -390,7 +390,9 @@ impl Regeneration {
             )
             .map_err(|e| e.to_string())?;
         }
-        fs::File::open(&self.temporary)
+        fs::File::options()
+            .write(true)
+            .open(&self.temporary)
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())?;
         Fingerprint::read(&self.temporary)

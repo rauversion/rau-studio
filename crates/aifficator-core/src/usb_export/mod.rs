@@ -630,7 +630,7 @@ pub(super) fn prepare_track(
             track.title
         )));
     }
-    File::open(&destination)?.sync_all()?;
+    File::options().write(true).open(&destination)?.sync_all()?;
     let (audio, bundle) = cache::prepare(track, &destination, ffmpeg, ffprobe, cache, notify)?;
     if !track.copy_source
         && (audio.channels != 2 || audio.sample_rate != 44_100 || audio.bit_depth != 16)
