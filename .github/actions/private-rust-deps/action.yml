@@ -1,0 +1,33 @@
+name: Private Rust dependencies
+description: Load repository-scoped read-only deploy keys for Rau's Rust libraries
+inputs:
+  soulseek-key:
+    description: Read-only deploy key for rauversion/soulseek-rs
+    required: true
+  rekordbox-key:
+    description: Read-only deploy key for rauversion/rekordbox-usb-rs
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Trust GitHub SSH host
+      shell: python
+      run: |
+        import os
+        from pathlib import Path
+        ssh = Path.home() / '.ssh'
+        ssh.mkdir(mode=0o700, exist_ok=True)
+        with (ssh / 'known_hosts').open('ab') as target:
+            target.write((Path(os.environ['GITHUB_ACTION_PATH']) / 'known_hosts').read_bytes())
+    - name: Load dependency deploy keys
+      uses: webfactory/ssh-agent@a6f90b1f127823b31d4d4a8d96047790581349bd # v0.9.1
+      with:
+        log-public-key: false
+        ssh-private-key: |
+          ${{ inputs.soulseek-key }}
+          ${{ inputs.rekordbox-key }}
+    - name: Verify private dependency access
+      shell: bash
+      run: |
+        git ls-remote ssh://git@github.com/rauversion/soulseek-rs.git refs/heads/main > /dev/null
+        git ls-remote ssh://git@github.com/rauversion/rekordbox-usb-rs.git refs/heads/main > /dev/null

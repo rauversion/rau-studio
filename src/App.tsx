@@ -39,6 +39,7 @@ import {
   Tags,
   Trash2,
   Upload,
+  Usb,
   UserRound,
   X
 } from "lucide-react";
@@ -70,6 +71,7 @@ import { P2PPage } from "./P2PPage";
 import { PlaylistBrowserPage } from "./PlaylistBrowserPage";
 import { PlaylistCopilotPage } from "./PlaylistCopilotPage";
 import { PlaylistIndexPage } from "./PlaylistIndexPage";
+import { UsbExportPage } from "./UsbExportPage";
 import { TaxonomyPage } from "./TaxonomyPage";
 import { TurnPage } from "./TurnPage";
 import { languageLabel, translate, translateBackendMessage, useI18n, type Locale } from "./i18n";
@@ -318,6 +320,7 @@ export default function App() {
             <Route path="/file-conversion/local" element={<FileConversionPage />} />
             <Route path="/file-conversion/rekordbox-convert" element={<RekordboxConvertPage />} />
             <Route path="/playlists" element={<PlaylistIndexPage />} />
+            <Route path="/playlists/usb-export" element={<UsbExportPage />} />
             <Route path="/playlists/catalog" element={<CatalogPage />} />
             <Route path="/playlists/duplicates" element={<DuplicatesPage />} />
             <Route path="/playlists/copilot" element={<PlaylistCopilotPage />} />
@@ -2599,6 +2602,9 @@ function AppSidebar({
           </SidebarLink>
           <SidebarLink to="/playlists/copilot" icon={<Sparkles className="h-4 w-4" />}>
             {t("Playlist Copilot")}
+          </SidebarLink>
+          <SidebarLink to="/playlists/usb-export" icon={<Usb className="h-4 w-4" />}>
+            {t("Exportar a USB")}
           </SidebarLink>
           <SidebarLink to="/playlists/artists" icon={<UserRound className="h-4 w-4" />}>
             {t("Artistas")}

@@ -32,6 +32,7 @@ import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { useI18n } from "./i18n";
 import { cn } from "./lib/utils";
+import { SoulseekPanel } from "./components/sharing/SoulseekPanel";
 
 type IdentityStatus = {
   configured: boolean;
@@ -176,6 +177,23 @@ const fieldClass =
   "h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none transition focus:border-foreground/35 focus:ring-2 focus:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60";
 
 export function P2PPage() {
+  const { t } = useI18n();
+  const [provider, setProvider] = useState<"rau" | "soulseek">("rau");
+  return (
+    <div>
+      <nav aria-label={t("Red para compartir")} className="flex gap-2 border-b border-border px-4 pt-3 lg:px-6" role="tablist">
+        {([ ["rau", "Rau Connect"], ["soulseek", "Soulseek"] ] as const).map(([value, label]) => (
+          <button key={value} type="button" role="tab" aria-selected={provider === value} onClick={() => setProvider(value)} className={cn("border-b-2 px-4 py-2 text-sm font-medium", provider === value ? "border-primary text-foreground" : "border-transparent text-muted-foreground")}>
+            {t(label)}
+          </button>
+        ))}
+      </nav>
+      {provider === "soulseek" ? <SoulseekPanel /> : <RauConnectPage />}
+    </div>
+  );
+}
+
+function RauConnectPage() {
   const { t } = useI18n();
   const [identity, setIdentity] = useState<IdentityStatus | null>(null);
   const [peers, setPeers] = useState<PeerSummary[]>([]);

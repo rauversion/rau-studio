@@ -1,5 +1,6 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { invoke } from "@tauri-apps/api/core";
+import { MusicAnalysisPanel } from "./components/tracks/MusicAnalysisPanel";
 import {
   Album,
   FolderOpen,
@@ -577,6 +578,10 @@ export function PlaylistBrowserPage({ kind }: { kind: BrowserKind }) {
 
       <BrowseTrackDetailSheet
         track={detailTrack}
+        onTrackUpdated={(updated) => {
+          setDetailTrack(updated);
+          setTracks((current) => current.map((item) => item.library_id === updated.library_id && item.track_id === updated.track_id ? updated : item));
+        }}
         onClose={() => setDetailTrack(null)}
         onPlay={(track) => void toggleDisplayedTrackPlayback(track)}
         onOpenFolder={(track) => void openFolder(track.source_path)}
@@ -670,16 +675,19 @@ function BrowseTrackRow({
 
 function BrowseTrackDetailSheet({
   track,
+  onTrackUpdated,
   onClose,
   onPlay,
   onOpenFolder
 }: {
   track: PlaylistIndexTrack | null;
+  onTrackUpdated: (track: PlaylistIndexTrack) => void;
   onClose: () => void;
   onPlay: (track: PlaylistIndexTrack) => void;
   onOpenFolder: (track: PlaylistIndexTrack) => void;
 }) {
   const { t } = useI18n();
+  const [preparedMetadata, setPreparedMetadata] = useState<{ id: string; bpm: string | null; key: string | null } | null>(null);
 
   useEffect(() => {
     if (!track) return;
@@ -700,8 +708,8 @@ function BrowseTrackDetailSheet({
     [t("Artista"), track.artist],
     ["Album", track.album],
     [t("Genero"), track.genre],
-    ["BPM", track.bpm],
-    ["Key", track.key],
+    ["BPM", preparedMetadata?.id === `${track.library_id}/${track.track_id}` ? preparedMetadata.bpm ?? track.bpm : track.bpm],
+    ["Key", preparedMetadata?.id === `${track.library_id}/${track.track_id}` ? preparedMetadata.key ?? track.key : track.key],
     [t("Ano"), track.year],
     ["Label", track.label],
     ["Rating", track.rating],
@@ -739,6 +747,11 @@ function BrowseTrackDetailSheet({
           </section>
 
           <TrackPlaylistMemberships track={track} />
+          <MusicAnalysisPanel track={track} onSaved={(bpm, key) => {
+            setPreparedMetadata({ id: `${track.library_id}/${track.track_id}`, bpm, key });
+            onTrackUpdated({ ...track, bpm: bpm ?? track.bpm, key: key ?? track.key,
+              attributes: { ...track.attributes, ...(bpm ? { AverageBpm: bpm } : {}), ...(key ? { Tonality: key } : {}) } });
+          }} />
 
           {xmlAttributes.length > 0 ? (
             <section className="mt-4 rounded-md border border-border bg-card">

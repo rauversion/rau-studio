@@ -38,6 +38,12 @@ pub struct Track {
     pub sample_rate: Option<u32>,
     pub bitrate: Option<u32>,
     pub attributes: BTreeMap<String, String>,
+    /// Preserve the XML attributes without rejecting libraries whose analysis
+    /// cannot be exported. The USB planner validates only selected tracks.
+    #[serde(default)]
+    pub tempos: Vec<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub position_marks: Vec<BTreeMap<String, String>>,
 }
 
 impl Track {
@@ -130,6 +136,7 @@ pub fn parse_rekordbox_xml(xml: &str) -> Result<RekordboxLibrary, RekordboxParse
     let mut library = RekordboxLibrary::default();
     let mut section = None;
     let mut playlist_stack: Vec<PlaylistNode> = Vec::new();
+    let mut collection_track = None;
 
     loop {
         match reader.read_event()? {
@@ -150,9 +157,14 @@ pub fn parse_rekordbox_xml(xml: &str) -> Result<RekordboxLibrary, RekordboxParse
                         section = Some(Section::Playlists);
                     }
                     "TRACK" if section == Some(Section::Collection) => {
+                        collection_track = None;
                         if let Some(track) = track_from_attrs(&reader, &event)? {
+                            collection_track = Some(library.tracks.len());
                             library.tracks.push(track);
                         }
+                    }
+                    "TEMPO" | "POSITION_MARK" if section == Some(Section::Collection) => {
+                        append_analysis(&reader, &event, &mut library, collection_track, &name)?;
                     }
                     "TRACK" if section == Some(Section::Playlists) => {
                         append_playlist_track_key(&reader, &event, &mut playlist_stack)?;
@@ -175,6 +187,9 @@ pub fn parse_rekordbox_xml(xml: &str) -> Result<RekordboxLibrary, RekordboxParse
                             library.tracks.push(track);
                         }
                     }
+                    "TEMPO" | "POSITION_MARK" if section == Some(Section::Collection) => {
+                        append_analysis(&reader, &event, &mut library, collection_track, &name)?;
+                    }
                     "TRACK" if section == Some(Section::Playlists) => {
                         append_playlist_track_key(&reader, &event, &mut playlist_stack)?;
                     }
@@ -191,7 +206,9 @@ pub fn parse_rekordbox_xml(xml: &str) -> Result<RekordboxLibrary, RekordboxParse
                 match name.as_str() {
                     "COLLECTION" | "PLAYLISTS" => {
                         section = None;
+                        collection_track = None;
                     }
+                    "TRACK" if section == Some(Section::Collection) => collection_track = None,
                     "NODE" if section == Some(Section::Playlists) => {
                         if let Some(node) = playlist_stack.pop() {
                             attach_playlist_node(node, &mut playlist_stack, &mut library.playlists);
@@ -206,6 +223,24 @@ pub fn parse_rekordbox_xml(xml: &str) -> Result<RekordboxLibrary, RekordboxParse
     }
 
     Ok(library)
+}
+
+fn append_analysis(
+    reader: &Reader<&[u8]>,
+    event: &BytesStart<'_>,
+    library: &mut RekordboxLibrary,
+    current: Option<usize>,
+    name: &str,
+) -> Result<(), RekordboxParseError> {
+    if let Some(track) = current.and_then(|i| library.tracks.get_mut(i)) {
+        let attrs = attributes_to_map(reader, event)?;
+        if name == "TEMPO" {
+            track.tempos.push(attrs);
+        } else {
+            track.position_marks.push(attrs);
+        }
+    }
+    Ok(())
 }
 
 fn product_from_attrs(
@@ -245,6 +280,8 @@ fn track_from_attrs(
         sample_rate: attrs.get("SampleRate").and_then(|value| value.parse().ok()),
         bitrate: attrs.get("BitRate").and_then(|value| value.parse().ok()),
         attributes: attrs,
+        tempos: Vec::new(),
+        position_marks: Vec::new(),
     }))
 }
 

@@ -25,6 +25,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 mod conversion_refresh;
+pub(crate) mod music_analysis;
+pub(crate) mod usb_export_source;
 pub mod duplicates;
 pub(crate) use conversion_refresh::refresh_converted_file;
 
@@ -2772,6 +2774,15 @@ fn init_db(conn: &Connection) -> Result<(), String> {
           score_components_json TEXT NOT NULL DEFAULT '{}',
           PRIMARY KEY(candidate_set_id, track_id),
           FOREIGN KEY(candidate_set_id) REFERENCES playlist_copilot_candidate_sets(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS playlist_track_analysis (
+          library_id TEXT NOT NULL,
+          track_id TEXT NOT NULL,
+          proposal_json TEXT,
+          prepared_json TEXT,
+          PRIMARY KEY(library_id, track_id),
+          FOREIGN KEY(library_id, track_id) REFERENCES playlist_index_tracks(library_id, track_id) ON DELETE CASCADE
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS playlist_track_fts USING fts5(

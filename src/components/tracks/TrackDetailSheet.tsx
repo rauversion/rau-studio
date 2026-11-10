@@ -1,9 +1,10 @@
 import { FolderOpen, Play } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type * as React from "react";
 import { useI18n } from "../../i18n";
 import { Button } from "../ui/button";
 import { TrackCover } from "./TrackCover";
+import { MusicAnalysisPanel } from "./MusicAnalysisPanel";
 import { TrackPlaylistMemberships } from "./TrackPlaylistMemberships";
 import type { TrackListItem } from "./types";
 
@@ -19,6 +20,7 @@ export function TrackDetailSheet({
   onPlay: (track: TrackListItem) => void;
 }) {
   const { t } = useI18n();
+  const [preparedMetadata, setPreparedMetadata] = useState<{ id: string; bpm: string | null; key: string | null } | null>(null);
 
   useEffect(() => {
     if (!track) return;
@@ -39,8 +41,8 @@ export function TrackDetailSheet({
     [t("Artista"), track.artist],
     ["Album", track.album],
     [t("Genero"), track.genre],
-    ["BPM", track.bpm],
-    ["Key", track.key],
+    ["BPM", preparedMetadata?.id === `${track.library_id}/${track.track_id}` ? preparedMetadata.bpm ?? track.bpm : track.bpm],
+    ["Key", preparedMetadata?.id === `${track.library_id}/${track.track_id}` ? preparedMetadata.key ?? track.key : track.key],
     [t("Ano"), track.year],
     ["Label", track.label],
     ["Rating", track.rating],
@@ -78,6 +80,7 @@ export function TrackDetailSheet({
           </section>
 
           <TrackPlaylistMemberships track={track} />
+          <MusicAnalysisPanel track={track} onSaved={(bpm, key) => setPreparedMetadata({ id: `${track.library_id}/${track.track_id}`, bpm, key })} />
 
           {xmlAttributes.length > 0 ? (
             <section className="mt-4 rounded-md border border-border bg-card">

@@ -23,9 +23,10 @@ iroh-tickets = "1.0.0"
 regex = "1.13.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 ring = "0.17.14"
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+rusqlite = { version = "0.37.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+soulseek-client = { git = "ssh://git@github.com/rauversion/soulseek-rs.git", rev = "20f7f97255e8aa95d79bce029b4e940f62d057a9" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
@@ -33,6 +34,9 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread
 uuid = { version = "1.23.4", features = ["v4", "serde"] }
 walkdir = "2.5.0"
 zeroize = "1.8.2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-audio-types-rs = "0.3.5"
