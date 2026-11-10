@@ -25,9 +25,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 mod conversion_refresh;
+pub mod duplicates;
 pub(crate) mod music_analysis;
 pub(crate) mod usb_export_source;
-pub mod duplicates;
 pub(crate) use conversion_refresh::refresh_converted_file;
 
 const DB_FILE: &str = "aifficator.sqlite3";
